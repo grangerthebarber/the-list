@@ -11,7 +11,7 @@ const WEEK_OPTIONS = [1,2,3,4,5,6,7,8];
 
 function parseTime(t) { const [h,m] = t.split(":").map(Number); return h*60+m; }
 let _gid = 1;
-function newGroupId() { return `g${_gid++}`; }
+function newGroupId() { return "g"+(_gid++); }
 const SHORT_MONTHS = [3,4,5,6]; // April(3), May(4), June(5), July(6) — 0-based
 function smartDate(date, includeWeekday=false) {
   const month = date.getMonth();
@@ -70,12 +70,11 @@ function getUSHolidays(year) {
 }
 const DAYS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 
-export default function TheList() {
-  // localStorage persistence
-  const loadFromStorage = (key, fallback) => {
-    try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch { return fallback; }
-  };
+function loadFromStorage(key, fallback) {
+  try { var v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch(e) { return fallback; }
+}
 
+export default function TheList() {
   const [view, setView] = useState("Day");
   const [baseDate, setBaseDate] = useState(new Date());
   const [schedules, setSchedules] = useState(() => loadFromStorage("tl_schedules", {}));
@@ -113,10 +112,10 @@ export default function TheList() {
   const touchStart = useRef(null);
 
   // Save to localStorage whenever data changes
-  useEffect(() => { try { localStorage.setItem("tl_schedules", JSON.stringify(schedules)); } catch {} }, [schedules]);
-  useEffect(() => { try { localStorage.setItem("tl_clients", JSON.stringify(clientMemory)); } catch {} }, [clientMemory]);
-  useEffect(() => { try { localStorage.setItem("tl_holidays", JSON.stringify(customHolidays)); } catch {} }, [customHolidays]);
-  useEffect(() => { try { localStorage.setItem("tl_history", JSON.stringify(history)); } catch {} }, [history]);
+  useEffect(() => { try { localStorage.setItem("tl_schedules", JSON.stringify(schedules)); } catch(e) {} }, [schedules]);
+  useEffect(() => { try { localStorage.setItem("tl_clients", JSON.stringify(clientMemory)); } catch(e) {} }, [clientMemory]);
+  useEffect(() => { try { localStorage.setItem("tl_holidays", JSON.stringify(customHolidays)); } catch(e) {} }, [customHolidays]);
+  useEffect(() => { try { localStorage.setItem("tl_history", JSON.stringify(history)); } catch(e) {} }, [history]);
 
   // Holiday lookup helpers
   const getHolidayForDate = (dateKey) => {
@@ -125,11 +124,11 @@ export default function TheList() {
     const usHolidays = getUSHolidays(year);
     if (usHolidays[dateKey]) return usHolidays[dateKey];
     // Check custom holidays
-    for (const h of customHolidays) {
+    for (var hi = 0; hi < customHolidays.length; hi++) {
+      var h = customHolidays[hi];
       if (h.dateKey === dateKey) return h.name;
       if (h.yearly) {
-        // Match month/day regardless of year
-        const hd = parseDateKey(h.dateKey);
+        var hd = parseDateKey(h.dateKey);
         if (hd.getMonth() === d.getMonth() && hd.getDate() === d.getDate()) return h.name;
       }
     }
@@ -191,14 +190,14 @@ export default function TheList() {
       // We're removing someone who was added — check if slot still has them
       const slots = getSlots(entry.dateKey);
       const idx = slots.findIndex(s=>s.time===entry.time&&s.name===entry.name);
-      if (idx<0) { alert(`Can't undo — ${entry.name} is no longer at ${entry.time} on ${friendlyDate(entry.dateKey)}.`); return; }
+      if (idx<0) { alert("Can't undo — "+entry.name+" is no longer at "+entry.time+" on "+friendlyDate(entry.dateKey)+"."); return; }
     }
     if (entry.type === "removed") {
       // We're restoring someone — check if slot is now taken by someone else
       const slots = getSlots(entry.dateKey);
       const idx = slots.findIndex(s=>s.time===entry.time);
       if (idx>=0 && slots[idx].name && slots[idx].name!==entry.name) {
-        if (!window.confirm(`⚠ ${slots[idx].name} is now in that slot. Undoing will displace them. Continue?`)) return;
+        if (!window.confirm("⚠ "+slots[idx].name+" is now in that slot. Undoing will displace them. Continue?")) return;
       }
     }
     // Perform undo
@@ -276,7 +275,7 @@ export default function TheList() {
 
   const handleBlur = useCallback((e) => {
     const related = e.relatedTarget;
-    if (related?.dataset?.rowkey===`${editingRef.current?.dateKey}-${editingRef.current?.idx}`) return;
+    if (related && related.dataset && related.dataset.rowkey===((editingRef.current && editingRef.current.dateKey)+"-"+(editingRef.current && editingRef.current.idx))) return;
     setTimeout(()=>{ if (editingRef.current) doCommit(editingRef.current.dateKey,editingRef.current.idx,editValuesRef.current); },100);
   },[doCommit]);
 
@@ -284,34 +283,39 @@ export default function TheList() {
     if (e.key==="Tab") return;
     if (e.key==="Enter" && e.shiftKey) {
       e.preventDefault();
-      // Shift+Enter: save current slot, copy name+price into next slot, link them with a groupId
       const currentVals = editValuesRef.current;
       const slots = [...getSlots(dateKey)];
       const currentSlot = slots[idx];
-      // Determine groupId — reuse existing or create new
-      const gid = currentSlot.groupId || newGroupId();
-      // Commit current slot with groupId
       const newName = capitalizeFirst((currentVals.name||"").trim());
       const newPrice = (currentVals.price||"").trim();
+      if (!newName) return;
+      // Reuse existing groupId from this slot OR any adjacent grouped slot OR create new
+      const gid = currentSlot.groupId ||
+        (idx > 0 && slots[idx-1].groupId) ||
+        newGroupId();
       slots[idx] = {...currentSlot, name:newName, price:newPrice, groupId:gid};
       if (idx < slots.length-1) {
-        // Pre-fill next slot with same name+price+groupId
         slots[idx+1] = {...slots[idx+1], name:newName, price:newPrice, groupId:gid};
       }
       setSlots(dateKey, slots);
       addHistoryEntry({type:"added", time:slots[idx].time, name:newName, price:newPrice, dateKey});
       editingRef.current = null;
       setEditingCell(null);
-      // Move to next slot
       if (idx < slots.length-1) {
-        setTimeout(()=>startEdit(dateKey, idx+1), 50);
+        // Small delay to let state settle before opening next slot
+        setTimeout(()=>startEdit(dateKey, idx+1), 80);
       }
     } else if (e.key==="Enter") {
       e.preventDefault(); doCommit(dateKey,idx,editValuesRef.current);
     } else if (e.key==="ArrowDown") {
-      e.preventDefault(); doCommit(dateKey,idx,editValuesRef.current); const s=getSlots(dateKey); if(idx<s.length-1) setTimeout(()=>startEdit(dateKey,idx+1),50);
+      e.preventDefault();
+      doCommit(dateKey,idx,editValuesRef.current);
+      const s=getSlots(dateKey);
+      if(idx<s.length-1) setTimeout(()=>startEdit(dateKey,idx+1),80);
     } else if (e.key==="ArrowUp") {
-      e.preventDefault(); doCommit(dateKey,idx,editValuesRef.current); if(idx>0) setTimeout(()=>startEdit(dateKey,idx-1),50);
+      e.preventDefault();
+      doCommit(dateKey,idx,editValuesRef.current);
+      if(idx>0) setTimeout(()=>startEdit(dateKey,idx-1),80);
     } else if (e.key==="Escape") { editingRef.current=null; setEditingCell(null); }
   };
 
@@ -427,8 +431,8 @@ export default function TheList() {
     bookings.sort((a,b)=>a.dateKey.localeCompare(b.dateKey));
     // Find usual time (most common time among non-exception bookings)
     const nonException = bookings.filter(b=>!b.isException);
-    const usualTime = nonException.length>0 ? nonException[0].time : bookings[0]?.time || "";
-    const recurWeeks = bookings.find(b=>b.recurWeeks)?.recurWeeks || null;
+    const usualTime = nonException.length>0 ? nonException[0].time : bookings[0] && bookings[0].time || "";
+    const recurWeeks = bookings.find(b=>b.recurWeeks) ? bookings.find(b=>b.recurWeeks).recurWeeks : null || null;
     setClientProfile({name, recurWeeks, usualTime, bookings});
   };
 
@@ -644,7 +648,7 @@ export default function TheList() {
     slots[idx] = {...slots[idx], name:"", price:"", done:false, recurWeeks:null, isException:false};
     setSlots(dateKey,slots);
     addHistoryEntry({type:"removed",time:slot.time,name:slot.name,price:slot.price,dateKey});
-    const key = `${dateKey}-${idx}`;
+    const key = (dateKey+"-"+idx);
     setRecentlyRemoved(r=>({...r,[key]:true}));
     setTimeout(()=>setRecentlyRemoved(r=>{const n={...r};delete n[key];return n;}),8000);
     setConfirmDelete(null);
@@ -699,7 +703,7 @@ export default function TheList() {
         toggleBlockSlot(dateKey, idx, null);
       } else {
         // Filled slot — show cancel confirmation
-        setSwipedSlot(`${dateKey}-${idx}`);
+        setSwipedSlot((dateKey+"-"+idx));
       }
     } else if (dx>30) setSwipedSlot(null);
     touchStart.current=null;
@@ -708,11 +712,11 @@ export default function TheList() {
   const unreadRemovals = history.filter(h=>h.type==="removed"||h.type==="slot_removed").length;
   const dates = getDates();
 
-  const effectiveNextDate = nudgedDate || checkoffModal?.nextDateKey;
-  const nudgeConflict = effectiveNextDate ? isSlotTaken(effectiveNextDate, checkoffModal?.slot?.time) : false;
+  const effectiveNextDate = nudgedDate || (checkoffModal && checkoffModal.nextDateKey);
+  const nudgeConflict = effectiveNextDate ? isSlotTaken(effectiveNextDate, checkoffModal && checkoffModal.slot && checkoffModal.slot.time) : false;
 
   return (
-    <div style={{minHeight:"100vh",background:"#ffffff",fontFamily:"'Georgia',serif",color:"#1a1a1a",paddingTop:reassignMode?"52px":"0"}}
+    <div style={{minHeight:"100vh",background:"#ffffff",fontFamily:"Georgia,serif",color:"#1a1a1a",paddingTop:reassignMode?"52px":"0"}}
       onClick={()=>swipedSlot&&setSwipedSlot(null)}>
 
 
@@ -789,12 +793,12 @@ export default function TheList() {
             <div style={{display:"flex",gap:"8px",marginBottom:"16px"}}>
               <button
                 onClick={()=>setGroupRecurModal(prev=>({...prev,recurCount:1}))}
-                style={{flex:1,padding:"10px",background:groupRecurModal.recurCount===1?"#1a1a1a":"#f4f4f2",border:`1px solid ${groupRecurModal.recurCount===1?"#1a1a1a":"#d8d8d6"}`,borderRadius:"8px",color:groupRecurModal.recurCount===1?"#fff":"#666",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}
+                style={{flex:1,padding:"10px",background:groupRecurModal.recurCount===1?"#1a1a1a":"#f4f4f2",border:(groupRecurModal.recurCount===1?"1px solid #1a1a1a":"1px solid #d8d8d6"),borderRadius:"8px",color:groupRecurModal.recurCount===1?"#fff":"#666",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}
               >Just this slot</button>
               {groupRecurModal.groupSlots.map((_,i)=> i===0 ? null : (
                 <button key={i+1}
                   onClick={()=>setGroupRecurModal(prev=>({...prev,recurCount:i+1}))}
-                  style={{flex:1,padding:"10px",background:groupRecurModal.recurCount===i+1?"#1a1a1a":"#f4f4f2",border:`1px solid ${groupRecurModal.recurCount===i+1?"#1a1a1a":"#d8d8d6"}`,borderRadius:"8px",color:groupRecurModal.recurCount===i+1?"#fff":"#666",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}
+                  style={{flex:1,padding:"10px",background:groupRecurModal.recurCount===i+1?"#1a1a1a":"#f4f4f2",border:(groupRecurModal.recurCount===i+1?"1px solid #1a1a1a":"1px solid #d8d8d6"),borderRadius:"8px",color:groupRecurModal.recurCount===i+1?"#fff":"#666",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}
                 >All {i+1} slots</button>
               ))}
             </div>
@@ -808,7 +812,7 @@ export default function TheList() {
                     <button key={w}
                       onClick={()=>setGroupRecurModal(prev=>({...prev,weeks:w}))}
                       style={{padding:"7px 12px",borderRadius:"6px",border:"1px solid",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",background:groupRecurModal.weeks===w?"#1a1a1a":"#f4f4f2",borderColor:groupRecurModal.weeks===w?"#1a1a1a":"#d8d8d6",color:groupRecurModal.weeks===w?"#fff":"#666"}}
-                    >{w===1?"Weekly":`${w}w`}</button>
+                    >{w===1?"Weekly":(w+"w")}</button>
                   ))}
                 </div>
                 {groupRecurModal.weeks && (
@@ -833,7 +837,7 @@ export default function TheList() {
                       setGroupRecurModal(null);
                     }
                   }} style={{width:"100%",padding:"11px",background:"#1a1a1a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",marginBottom:"8px"}}>
-                    Confirm — every {groupRecurModal.weeks===1?"week":`${groupRecurModal.weeks} weeks`}
+                    Confirm — every {groupRecurModal.weeks===1?"week":(groupRecurModal.weeks+" weeks")}
                   </button>
                 )}
               </>
@@ -900,7 +904,7 @@ export default function TheList() {
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#c0392b",marginBottom:"8px"}}>⚠ Scheduling Conflicts</div>
             <div style={{fontSize:"15px",color:"#1a1a1a",marginBottom:"6px"}}>Some slots are already taken</div>
             <div style={{fontSize:"12px",color:"#888",marginBottom:"16px"}}>
-              {conflictModal.conflicts[0]?.name} will be placed on all open dates. The following dates need your attention — tap Jump to sort them out directly.
+              {conflictModal.conflicts[0] && conflictModal.conflicts[0].name} will be placed on all open dates. The following dates need your attention — tap Jump to sort them out directly.
             </div>
             <div style={{marginBottom:"20px"}}>
               {conflictModal.conflicts.map((c,i)=>(
@@ -931,7 +935,6 @@ export default function TheList() {
             <button onClick={()=>setConflictModal(null)} style={{display:"block",width:"100%",padding:"8px",background:"none",border:"none",color:"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>
               Cancel
             </button>
-          </div>
         </div>
       )}
 
@@ -994,7 +997,7 @@ export default function TheList() {
             </div>
             {clientProfile.recurWeeks && (
               <div style={{fontSize:"12px",color:"#6a8aaa",marginBottom:"16px"}}>
-                ↺ Every {clientProfile.recurWeeks===1?"week":`${clientProfile.recurWeeks} weeks`} · usual time {clientProfile.usualTime}
+                ↺ Every {clientProfile.recurWeeks===1?"week":(clientProfile.recurWeeks+" weeks")} · usual time {clientProfile.usualTime}
               </div>
             )}
             <div style={{overflowY:"auto",flex:1}}>
@@ -1002,7 +1005,7 @@ export default function TheList() {
                 <div style={{fontSize:"13px",color:"#aaa",fontStyle:"italic"}}>No upcoming bookings.</div>
               )}
               {clientProfile.bookings.map((b,i)=>(
-                <div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 12px",marginBottom:"4px",background:b.isException?"#fffbf0":b.done?"#f4faf4":"#f8f8f6",border:`1px solid ${b.isException?"#e8d8a0":b.done?"#c0d8c0":"#e8e8e6"}`,borderRadius:"8px"}}>
+                <div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 12px",marginBottom:"4px",background:b.isException?"#fffbf0":b.done?"#f4faf4":"#f8f8f6",border:(b.isException?"1px solid #e8d8a0":b.done?"1px solid #c0d8c0":"1px solid #e8e8e6"),borderRadius:"8px"}}>
                   <div>
                     <div style={{fontSize:"13px",color:"#1a1a1a",marginBottom:"2px"}}>
                       {friendlyDate(b.dateKey)}
@@ -1059,7 +1062,7 @@ export default function TheList() {
                   borderColor:recurringModal.slot.recurWeeks===w?"#1a1a1a":"#d8d8d6",
                   color:recurringModal.slot.recurWeeks===w?"#ffffff":"#666",
                 }}>
-                  {w === 1 ? "Weekly" : `${w}w`}
+                  {w === 1 ? "Weekly" : (w+"w")}
                 </button>
               ))}
             </div>
@@ -1126,7 +1129,7 @@ export default function TheList() {
               </>
             ) : (
               <>
-                <div style={{fontSize:"12px",color:"#999",marginBottom:"6px"}}>Every {checkoffModal.slot.recurWeeks === 1 ? "week" : `${checkoffModal.slot.recurWeeks} weeks`} · {checkoffModal.slot.time} · {DAYS[dayOfWeek(checkoffModal.dateKey)]}s</div>
+                <div style={{fontSize:"12px",color:"#999",marginBottom:"6px"}}>Every {checkoffModal.slot.recurWeeks === 1 ? "week" : (checkoffModal.slot.recurWeeks+" weeks")} · {checkoffModal.slot.time} · {DAYS[dayOfWeek(checkoffModal.dateKey)]}s</div>
 
                 {/* Nudge date */}
                 <div style={{fontSize:"11px",letterSpacing:"0.1em",textTransform:"uppercase",color:"#999",margin:"16px 0 8px"}}>Next appointment</div>
@@ -1139,7 +1142,7 @@ export default function TheList() {
 
                 {nudgedDate && nudgedDate !== checkoffModal.nextDateKey && (
                   <div style={{fontSize:"11px",color:"#a07830",marginBottom:"10px"}}>
-                    ↳ Nudged by {Math.round((parseDateKey(nudgedDate)-parseDateKey(checkoffModal.nextDateKey))/(1000*60*60*24))} days · schedule resumes every {checkoffModal.slot.recurWeeks === 1 ? "week" : `${checkoffModal.slot.recurWeeks} weeks`} after this
+                    ↳ Nudged by {Math.round((parseDateKey(nudgedDate)-parseDateKey(checkoffModal.nextDateKey))/(1000*60*60*24))} days · schedule resumes every {checkoffModal.slot.recurWeeks === 1 ? "week" : (checkoffModal.slot.recurWeeks+" weeks")} after this
                   </div>
                 )}
 
@@ -1157,7 +1160,7 @@ export default function TheList() {
 
                 <div style={{display:"flex",gap:"8px",marginBottom:"12px"}}>
                   <button onClick={()=>confirmNextBooking(effectiveNextDate)} style={{flex:1,padding:"10px",background:nudgeConflict?"#5a2a1a":"#c9a96e",border:"none",borderRadius:"6px",color:nudgeConflict?"#e8b84b":"#0f0f0f",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>
-                    {nudgeConflict ? "Book anyway" : `Book ${friendlyDate(effectiveNextDate)}`}
+                    {nudgeConflict ? "Book anyway" : ("Book "+friendlyDate(effectiveNextDate))}
                   </button>
                   <button onClick={()=>jumpToDate(effectiveNextDate)} style={{padding:"10px 14px",background:"#efefed",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>
                     Jump →
@@ -1192,18 +1195,17 @@ export default function TheList() {
 
       {/* HISTORY DRAWER */}
       {showHistory && (
-        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.8)",zIndex:500,display:"flex",justifyContent:"flex-end"}} onClick={()=>setShowHistory(false)}>
-          <div style={{background:"#f4f4f2",borderLeft:"1px solid #e4e4e2",width:"min(340px,90vw)",height:"100%",overflowY:"auto",padding:"24px 20px"}} onClick={e=>e.stopPropagation()}>
+        <div style={{position:"fixed",top:0,right:0,bottom:0,width:"min(340px,90vw)",zIndex:500,background:"#fafaf8",borderLeft:"1px solid #e4e4e2",overflowY:"auto",padding:"24px 20px",boxShadow:"-4px 0 20px rgba(0,0,0,0.08)"}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"20px"}}>
               <div style={{fontSize:"11px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#888"}}>Change History</div>
               <button onClick={()=>setShowHistory(false)} style={{background:"none",border:"none",color:"#999",fontSize:"18px",cursor:"pointer"}}>×</button>
             </div>
             {history.length===0 && <div style={{color:"#bbb",fontSize:"13px",fontStyle:"italic"}}>No changes yet.</div>}
             {history.map((entry,i)=>(
-              <div key={i} style={{padding:"10px 12px",marginBottom:"6px",borderRadius:"6px",background:(entry.type==="removed"||entry.type==="slot_removed")?"#fff0ee":"#fafaf8",border:`1px solid ${(entry.type==="removed"||entry.type==="slot_removed")?"#e0b0a8":"#e4e4e2"}`}}>
+              <div key={i} style={{padding:"10px 12px",marginBottom:"6px",borderRadius:"6px",background:(entry.type==="removed"||entry.type==="slot_removed")?"#fff0ee":"#fafaf8",border:((entry.type==="removed"||entry.type==="slot_removed")?"1px solid #e0b0a8":"1px solid #e4e4e2")}}>
                 <div style={{display:"flex",justifyContent:"space-between",marginBottom:"3px"}}>
                   <span style={{fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",color:entry.type==="added"?"#4a8a5a":(entry.type==="removed"||entry.type==="slot_removed")?"#8a3a2a":entry.type==="recurring_set"?"#c9a96e":"#666"}}>
-                    {entry.type==="added"?"Added":entry.type==="removed"?"Removed":entry.type==="slot_removed"?"Slot Deleted":entry.type==="slot_added"?"Slot Added":entry.type==="recurring_set"?`Set Recurring (${entry.weeks}w)`:"Edited"}
+                    {entry.type==="added"?"Added":entry.type==="removed"?"Removed":entry.type==="slot_removed"?"Slot Deleted":entry.type==="slot_added"?"Slot Added":entry.type==="recurring_set"?("Set Recurring ("+entry.weeks+"w)"):"Edited"}
                   </span>
                   <span style={{fontSize:"10px",color:"#bbb"}}>{entry.timestamp}</span>
                 </div>
@@ -1262,7 +1264,7 @@ export default function TheList() {
             </div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:"1px",background:"#e8e8e6"}}>
               {monthDays.map((day,i)=>{
-                if (!day) return <div key={`empty-${i}`} style={{background:"#f8f8f6",minHeight:"80px"}}/>;
+                if (!day) return <div key={("empty-"+i)} style={{background:"#f8f8f6",minHeight:"80px"}}/>;
                 const dk = toDateKey(day);
                 const slots = getSlots(dk);
                 const booked = slots.filter(s=>s.name);
@@ -1298,7 +1300,7 @@ export default function TheList() {
       })()}
 
       {/* DAY COLUMNS */}
-      {view!=="Month" && <div style={{display:"grid",gridTemplateColumns:`repeat(${getDayCount()},1fr)`,gap:"1px",background:"#d8d8d6"}}>
+      {view!=="Month" && <div style={{display:"grid",gridTemplateColumns:("repeat("+getDayCount()+",1fr)"),gap:"1px",background:"#d8d8d6"}}>
         {dates.map(date=>{
           const dateKey = toDateKey(date);
           const slots = getSlots(dateKey);
@@ -1328,11 +1330,11 @@ export default function TheList() {
 
               <div style={{flex:1,padding:"6px 0"}}>
                 {slots.map((slot,idx)=>{
-                  const isEditing = editingCell?.dateKey===dateKey&&editingCell?.idx===idx;
+                  const isEditing = editingCell&&editingCell.dateKey===dateKey&&editingCell.idx===idx;
                   const filled = !!slot.name;
-                  const wasRemoved = recentlyRemoved[`${dateKey}-${idx}`];
-                  const isSwiped = swipedSlot===`${dateKey}-${idx}`;
-                  const rowKey = `${dateKey}-${idx}`;
+                  const wasRemoved = recentlyRemoved[(dateKey+"-"+idx)];
+                  const isSwiped = swipedSlot===(dateKey+"-"+idx);
+                  const rowKey = (dateKey+"-"+idx);
                   return (
                     <div key={rowKey} style={{position:"relative",overflow:"hidden",borderBottom:"1px solid #efefed"}}>
                       {/* Swipe reveal — Reschedule + Cancel */}
@@ -1360,8 +1362,8 @@ export default function TheList() {
                         {slot.groupId&&!wasRemoved&&(()=>{
                           const daySlots = getSlots(dateKey);
                           const gSlots = daySlots.map((s,i)=>({...s,i})).filter(s=>s.groupId===slot.groupId&&s.name);
-                          const first = gSlots[0]?.i === idx;
-                          const last = gSlots[gSlots.length-1]?.i === idx;
+                          const first = gSlots[0] && gSlots[0].i === idx;
+                          const last = gSlots[gSlots.length-1] && gSlots[gSlots.length-1].i === idx;
                           const inGroup = gSlots.some(s=>s.i===idx);
                           if (!inGroup) return null;
                           return (
@@ -1377,7 +1379,7 @@ export default function TheList() {
                         {/* Checkoff button */}
                         <button
                           onClick={()=>handleCheckoff(dateKey,idx)}
-                          style={{width:"18px",height:"18px",borderRadius:"50%",border:`1.5px solid ${slot.done?"#2a7a2a":filled?"#aaaaaa":"#dddddd"}`,background:slot.done?"#2a7a2a":"transparent",cursor:filled?"pointer":"default",flexShrink:0,marginRight:"10px",display:"flex",alignItems:"center",justifyContent:"center",transition:"all 0.15s"}}
+                          style={{width:"18px",height:"18px",borderRadius:"50%",border:(slot.done?"1.5px solid #2a7a2a":filled?"1.5px solid #aaaaaa":"1.5px solid #dddddd"),background:slot.done?"#2a7a2a":"transparent",cursor:filled?"pointer":"default",flexShrink:0,marginRight:"10px",display:"flex",alignItems:"center",justifyContent:"center",transition:"all 0.15s"}}
                         >
                           {slot.done&&<span style={{color:"#fff",fontSize:"10px",lineHeight:1}}>✓</span>}
                         </button>
@@ -1393,7 +1395,7 @@ export default function TheList() {
                             onClick={()=>filled&&openClientProfile(slot.name)}
                             style={{fontSize:"9px",color:slot.isException?"#a07830":"#6a8aaa",marginRight:"6px",flexShrink:0,letterSpacing:"0.05em",cursor:filled?"pointer":"default"}}
                           >
-                            ↺{slot.recurWeeks===1?"w":`${slot.recurWeeks}w`}{slot.isException?"*":""}
+                            ↺{slot.recurWeeks===1?"w":(slot.recurWeeks+"w")}{slot.isException?"*":""}
                           </div>
                         )}
 
@@ -1414,9 +1416,7 @@ export default function TheList() {
                             <input
                               value={isEditing ? editValues.name : (wasRemoved?"":slot.name)}
                               readOnly={!isEditing}
-                              onFocus={()=>{
-                                if(!isEditing) startEdit(dateKey,idx);
-                              }}
+                              onFocus={()=>{ if(!isEditing) startEdit(dateKey,idx); }}
                               onChange={e=>{ if(isEditing) setEditValues(v=>({...v,name:e.target.value})); }}
                               onKeyDown={e=>{ if(isEditing) handleKeyDown(e,dateKey,idx); }}
                               onBlur={e=>{ if(isEditing) handleBlur(e); }}
@@ -1425,21 +1425,23 @@ export default function TheList() {
                               onTouchStart={()=>{ if(filled&&!isEditing) startLongPress(slot.name); }}
                               onTouchEnd={cancelLongPress}
                               onTouchMove={cancelLongPress}
-                              placeholder={wasRemoved?"removed":""}
+                              placeholder=""
                               data-rowkey={rowKey}
                               style={{
                                 flex:1,
                                 fontSize:"13px",
-                                color:wasRemoved?"#c0392b":slot.done?"#2a6a2a":filled?"#1a1a1a":"#aaa",
-                                fontStyle:"normal",
+                                color:wasRemoved?"#c0392b":slot.done?"#2a6a2a":filled?"#1a1a1a":"#999",
                                 textDecoration:slot.done?"line-through":"none",
-                                background:"transparent",
+                                background: isEditing?"#efefed":"transparent",
                                 border:"none",
                                 outline:"none",
-                                padding:"0 2px",
+                                padding: isEditing?"4px 6px":"0 2px",
+                                borderRadius: isEditing?"4px":"0",
                                 fontFamily:"Georgia,serif",
                                 cursor:isEditing?"text":"pointer",
+                                caretColor: isEditing?"auto":"transparent",
                                 WebkitUserSelect: isEditing?"text":"none",
+                                transition:"background 0.1s, padding 0.1s",
                               }}
                             />
                             {(!isEditing) && (
