@@ -238,12 +238,20 @@ export default function TheList() {
     setHistory(prev=>prev.filter(h=>h.id!==entry.id));
   };
 
+  const nameInputFocusRef = useRef(null);
+
   const startEdit = (dateKey, idx) => {
     const slot = getSlots(dateKey)[idx];
     editingRef.current = {dateKey,idx};
     setEditingCell({dateKey,idx});
     setEditValues({name:slot.name||"",price:slot.price||""});
     setSwipedSlot(null);
+    // Focus input after render — critical for iPad keyboard
+    setTimeout(()=>{
+      if (nameInputFocusRef.current) {
+        nameInputFocusRef.current.focus();
+      }
+    }, 50);
   };
 
   const doCommit = useCallback((dateKey, idx, values) => {
@@ -1428,10 +1436,16 @@ export default function TheList() {
                               </div>
                             )}
                             <div style={{display:"flex",gap:"5px",alignItems:"center"}}>
-                              <input autoFocus data-rowkey={rowKey} value={editValues.name}
+                              <input
+                                ref={editingCell?.dateKey===dateKey&&editingCell?.idx===idx ? nameInputFocusRef : null}
+                                autoFocus
+                                data-rowkey={rowKey}
+                                value={editValues.name}
                                 onChange={e=>setEditValues(v=>({...v,name:e.target.value}))}
                                 onKeyDown={e=>handleKeyDown(e,dateKey,idx)}
-                                onBlur={handleBlur} placeholder="Name" style={inputStyle}/>
+                                onBlur={handleBlur}
+                                placeholder="Name"
+                                style={inputStyle}/>
                               <input data-rowkey={rowKey} value={editValues.price}
                                 onChange={e=>setEditValues(v=>({...v,price:e.target.value}))}
                                 onKeyDown={e=>handleKeyDown(e,dateKey,idx)}
