@@ -1299,7 +1299,7 @@ export default function TheList() {
       })()}
 
       {/* DAY COLUMNS */}
-      {view!=="Month" && <div style={{display:"grid",gridTemplateColumns:("repeat("+getDayCount()+",1fr)"),gap:"1px",background:"#d8d8d6"}}>
+      {view!=="Month" && (<div style={{display:"grid",gridTemplateColumns:("repeat("+getDayCount()+",1fr)"),gap:"1px",background:"#d8d8d6"}}>
         {dates.map(date=>{
           const dateKey = toDateKey(date);
           const slots = getSlots(dateKey);
@@ -1499,7 +1499,7 @@ export default function TheList() {
           );
         })}
       </div>
-      }
+      )}
     </div>
   );
 }
