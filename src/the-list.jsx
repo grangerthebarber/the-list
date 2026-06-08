@@ -12,7 +12,7 @@ const WEEK_OPTIONS = [1,2,3,4,5,6,7,8];
 function parseTime(t) { const [h,m] = t.split(":").map(Number); return h*60+m; }
 let _gid = 1;
 function newGroupId() { return "g"+(_gid++); }
-const SHORT_MONTHS = [3,4,5,6]; // April(3), May(4), June(5), July(6) — 0-based
+const SHORT_MONTHS = [3,4,5,6];
 function smartDate(date, includeWeekday=false) {
   const month = date.getMonth();
   const monthStyle = SHORT_MONTHS.includes(month) ? "long" : "short";
@@ -37,9 +37,7 @@ function dayOfWeek(dateKey) { return parseDateKey(dateKey).getDay(); }
 
 const VIEWS = ["Day","3-Day","Wknd","Week","Month"];
 
-// US Federal Holidays (month is 1-based)
 function getNthWeekday(year, month, weekday, n) {
-  // weekday: 0=Sun,1=Mon,...  n: 1-based (or -1 for last)
   if (n === -1) {
     const last = new Date(year, month, 0);
     const d = last.getDay();
@@ -87,43 +85,40 @@ export default function TheList() {
   const [recentlyRemoved, setRecentlyRemoved] = useState({});
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [swipedSlot, setSwipedSlot] = useState(null);
-  const [recurringModal, setRecurringModal] = useState(null); // {dateKey, idx, slot}
-  const [checkoffModal, setCheckoffModal] = useState(null); // {dateKey, idx, slot, nextDateKey, conflict, notRecurring}
-  const [nudgedDate, setNudgedDate] = useState(null); // override dateKey for next booking
-  const [conflictModal, setConflictModal] = useState(null); // {conflicts, onCancel}
-  const [reassignMode, setReassignMode] = useState(null); // {client:{name,price,recurWeeks}, currentDateKey, remainingConflicts}
+  const [recurringModal, setRecurringModal] = useState(null);
+  const [checkoffModal, setCheckoffModal] = useState(null);
+  const [nudgedDate, setNudgedDate] = useState(null);
+  const [conflictModal, setConflictModal] = useState(null);
+  const [reassignMode, setReassignMode] = useState(null);
   const [reassignApplyAll, setReassignApplyAll] = useState(null);
   const [groupConfirm, setGroupConfirm] = useState(null);
-  const [groupRecurModal, setGroupRecurModal] = useState(null); // {dateKey, idx, slot, groupSlots, recurCount, weeks}
+  const [groupRecurModal, setGroupRecurModal] = useState(null);
   const [clientMemory, setClientMemory] = useState(() => loadFromStorage("tl_clients", []));
-  const [customHolidays, setCustomHolidays] = useState(() => loadFromStorage("tl_holidays", [])); // [{dateKey, name, yearly}]
-  const [holidayModal, setHolidayModal] = useState(null); // {dateKey} or null
+  const [customHolidays, setCustomHolidays] = useState(() => loadFromStorage("tl_holidays", []));
+  const [holidayModal, setHolidayModal] = useState(null);
   const [newHolidayName, setNewHolidayName] = useState("");
   const [newHolidayYearly, setNewHolidayYearly] = useState(false);
-  const [blockLabelModal, setBlockLabelModal] = useState(null); // {dateKey, idx}
+  const [blockLabelModal, setBlockLabelModal] = useState(null);
   const [blockLabel, setBlockLabel] = useState("Lunch");
-  const [clientProfile, setClientProfile] = useState(null); // {name, price, recurWeeks, usualTime}
+  const [clientProfile, setClientProfile] = useState(null);
   const longPressTimer = useRef(null);
-  const [monthLongPress, setMonthLongPress] = useState(null); // {dateKey, day}
+  const [monthLongPress, setMonthLongPress] = useState(null);
 
   const editingRef = useRef(null);
   const editValuesRef = useRef(editValues);
   editValuesRef.current = editValues;
   const touchStart = useRef(null);
 
-  // Save to localStorage whenever data changes
   useEffect(() => { try { localStorage.setItem("tl_schedules", JSON.stringify(schedules)); } catch(e) {} }, [schedules]);
   useEffect(() => { try { localStorage.setItem("tl_clients", JSON.stringify(clientMemory)); } catch(e) {} }, [clientMemory]);
   useEffect(() => { try { localStorage.setItem("tl_holidays", JSON.stringify(customHolidays)); } catch(e) {} }, [customHolidays]);
   useEffect(() => { try { localStorage.setItem("tl_history", JSON.stringify(history)); } catch(e) {} }, [history]);
 
-  // Holiday lookup helpers
   const getHolidayForDate = (dateKey) => {
     const d = parseDateKey(dateKey);
     const year = d.getFullYear();
     const usHolidays = getUSHolidays(year);
     if (usHolidays[dateKey]) return usHolidays[dateKey];
-    // Check custom holidays
     for (var hi = 0; hi < customHolidays.length; hi++) {
       var h = customHolidays[hi];
       if (h.dateKey === dateKey) return h.name;
@@ -147,14 +142,13 @@ export default function TheList() {
       return Array.from({length:7},(_,i)=>addDays(monday,i));
     }
     if (view==="Wknd") {
-      // Show upcoming weekend. If Fri/Sat/Sun, show NEXT weekend.
       const d = new Date(baseDate);
-      const day = d.getDay(); // 0=Sun,1=Mon,...,6=Sat
+      const day = d.getDay();
       let daysToSat;
-      if (day === 6) daysToSat = 7;       // Sat -> next Sat
-      else if (day === 0) daysToSat = 6;  // Sun -> next Sat
-      else if (day === 5) daysToSat = 7;  // Fri -> next Sat
-      else daysToSat = 6 - day;           // Mon-Thu -> this Sat
+      if (day === 6) daysToSat = 7;
+      else if (day === 0) daysToSat = 6;
+      else if (day === 5) daysToSat = 7;
+      else daysToSat = 6 - day;
       const sat = addDays(d, daysToSat);
       return [sat, addDays(sat, 1)];
     }
@@ -164,7 +158,6 @@ export default function TheList() {
   const getMonthDays = () => {
     const d = new Date(baseDate.getFullYear(), baseDate.getMonth(), 1);
     const days = [];
-    // Pad to Monday start
     const firstDay = d.getDay()===0?6:d.getDay()-1;
     for (let i=0;i<firstDay;i++) days.push(null);
     const daysInMonth = new Date(baseDate.getFullYear(), baseDate.getMonth()+1, 0).getDate();
@@ -185,22 +178,18 @@ export default function TheList() {
   };
 
   const undoHistoryEntry = (entry) => {
-    // Check if undoing would displace someone
     if (entry.type === "added" || entry.type === "recurring_set") {
-      // We're removing someone who was added — check if slot still has them
       const slots = getSlots(entry.dateKey);
       const idx = slots.findIndex(s=>s.time===entry.time&&s.name===entry.name);
       if (idx<0) { alert("Can't undo — "+entry.name+" is no longer at "+entry.time+" on "+friendlyDate(entry.dateKey)+"."); return; }
     }
     if (entry.type === "removed") {
-      // We're restoring someone — check if slot is now taken by someone else
       const slots = getSlots(entry.dateKey);
       const idx = slots.findIndex(s=>s.time===entry.time);
       if (idx>=0 && slots[idx].name && slots[idx].name!==entry.name) {
         if (!window.confirm("⚠ "+slots[idx].name+" is now in that slot. Undoing will displace them. Continue?")) return;
       }
     }
-    // Perform undo
     if (entry.type === "added") {
       const slots = [...getSlots(entry.dateKey)];
       const idx = slots.findIndex(s=>s.time===entry.time&&s.name===entry.name);
@@ -214,7 +203,6 @@ export default function TheList() {
       const idx = slots.findIndex(s=>s.time===entry.time);
       if (idx>=0) { slots[idx]={...slots[idx],name:entry.prevName}; setSlots(entry.dateKey,slots); }
     } else if (entry.type === "recurring_set") {
-      // Remove all future placements for this person
       const newSchedules = {...schedulesRef.current};
       const sixMonthsOut = new Date(); sixMonthsOut.setMonth(sixMonthsOut.getMonth()+6);
       Object.keys(newSchedules).forEach(dk => {
@@ -222,7 +210,7 @@ export default function TheList() {
         const dSlots = [...newSchedules[dk]];
         const si = dSlots.findIndex(s=>s.time===entry.time&&s.name===entry.name&&s.recurWeeks===entry.weeks);
         if (si>=0) {
-          if (dSlots[si].done) return; // skip already-done slots
+          if (dSlots[si].done) return;
           dSlots[si]={...dSlots[si],name:"",price:"",recurWeeks:null,done:false};
           newSchedules[dk]=dSlots;
         }
@@ -233,7 +221,6 @@ export default function TheList() {
       const idx = slots.findIndex(s=>s.time===entry.time);
       if (idx>=0) { slots[idx]={...slots[idx],blocked:false,blockLabel:""}; setSlots(entry.dateKey,slots); }
     }
-    // Remove entry from history
     setHistory(prev=>prev.filter(h=>h.id!==entry.id));
   };
 
@@ -256,7 +243,6 @@ export default function TheList() {
       if (prev.name&&!newName) addHistoryEntry({type:"removed",time:prev.time,name:prev.name,dateKey});
       else if (!prev.name&&newName) {
         addHistoryEntry({type:"added",time:slots[idx].time,name:newName,price:newPrice,dateKey});
-        // Save to client memory
         setClientMemory(mem => {
           const existing = mem.findIndex(c=>c.name.toLowerCase()===newName.toLowerCase());
           if (existing>=0) {
@@ -289,10 +275,7 @@ export default function TheList() {
       const newName = capitalizeFirst((currentVals.name||"").trim());
       const newPrice = (currentVals.price||"").trim();
       if (!newName) return;
-      // Reuse existing groupId from this slot OR any adjacent grouped slot OR create new
-      const gid = currentSlot.groupId ||
-        (idx > 0 && slots[idx-1].groupId) ||
-        newGroupId();
+      const gid = currentSlot.groupId || (idx > 0 && slots[idx-1].groupId) || newGroupId();
       slots[idx] = {...currentSlot, name:newName, price:newPrice, groupId:gid};
       if (idx < slots.length-1) {
         slots[idx+1] = {...slots[idx+1], name:newName, price:newPrice, groupId:gid};
@@ -302,7 +285,6 @@ export default function TheList() {
       editingRef.current = null;
       setEditingCell(null);
       if (idx < slots.length-1) {
-        // Small delay to let state settle before opening next slot
         setTimeout(()=>startEdit(dateKey, idx+1), 80);
       }
     } else if (e.key==="Enter") {
@@ -319,41 +301,32 @@ export default function TheList() {
     } else if (e.key==="Escape") { editingRef.current=null; setEditingCell(null); }
   };
 
-  // Find next same-day-of-week date that is N weeks out
   const getNextDateKey = (fromDateKey, weeks) => {
     const next = addWeeks(parseDateKey(fromDateKey), weeks);
     return formatDateKey(next);
   };
 
-  // Check if a slot time is taken on a given day
   const isSlotTaken = (dateKey, time) => {
     const slots = getSlots(dateKey);
     return slots.some(s=>s.time===time && s.name);
   };
 
-  // Handle check-off tap
-  // First tap = quietly mark done. Second tap = open booking/recurring modal.
   const handleCheckoff = (dateKey, idx) => {
     const slots = getSlots(dateKey);
     const slot = slots[idx];
     if (!slot.name) return;
-
     if (!slot.done) {
-      // First tap — just mark done, no modal
       const updated = [...slots];
       updated[idx] = {...slot, done:true};
       setSlots(dateKey, updated);
       return;
     }
-
-    // Second tap — open the next booking modal
     if (slot.recurWeeks) {
       const nextKey = getNextDateKey(dateKey, slot.recurWeeks);
       const conflict = isSlotTaken(nextKey, slot.time);
       setNudgedDate(nextKey);
       setCheckoffModal({dateKey, idx, slot, nextDateKey:nextKey, conflict, notRecurring:false});
     } else {
-      // Not recurring — ask if they want to book again
       setNudgedDate(null);
       setCheckoffModal({dateKey, idx, slot, nextDateKey:null, conflict:false, notRecurring:true});
     }
@@ -362,8 +335,6 @@ export default function TheList() {
   const confirmNextBooking = (targetDateKey) => {
     if (!checkoffModal) return;
     const {slot} = checkoffModal;
-
-    // Place the immediate next slot
     const newSchedules = {...schedulesRef.current};
     const daySlots = newSchedules[targetDateKey]
       ? [...newSchedules[targetDateKey]]
@@ -376,8 +347,6 @@ export default function TheList() {
       daySlots.sort((a,b)=>parseTime(a.time)-parseTime(b.time));
     }
     newSchedules[targetDateKey] = daySlots;
-
-    // If recurring, fill forward from the new anchor date
     if (slot.recurWeeks) {
       const sixMonthsOut = new Date();
       sixMonthsOut.setMonth(sixMonthsOut.getMonth()+6);
@@ -399,7 +368,6 @@ export default function TheList() {
         newSchedules[futureKey] = fSlots;
       }
     }
-
     setSchedules(newSchedules);
     addHistoryEntry({type:"added",time:slot.time,name:slot.name,price:slot.price,dateKey:targetDateKey});
     setCheckoffModal(null);
@@ -414,10 +382,8 @@ export default function TheList() {
   };
 
   const openClientProfile = (name) => {
-    // Find all future bookings for this client across all scheduled days
     const today = toDateKey(new Date());
     const bookings = [];
-    // Check schedules
     Object.entries(schedulesRef.current).forEach(([dateKey, slots]) => {
       if (dateKey < today) return;
       slots.forEach(slot => {
@@ -426,13 +392,10 @@ export default function TheList() {
         }
       });
     });
-    // Also check default slots on days not yet in schedules — only if recurring
-    // (default days won't have custom entries yet, so we rely on setRecurring having pre-populated)
     bookings.sort((a,b)=>a.dateKey.localeCompare(b.dateKey));
-    // Find usual time (most common time among non-exception bookings)
     const nonException = bookings.filter(b=>!b.isException);
-    const usualTime = nonException.length>0 ? nonException[0].time : bookings[0] && bookings[0].time || "";
-    const recurWeeks = bookings.find(b=>b.recurWeeks) ? bookings.find(b=>b.recurWeeks).recurWeeks : null || null;
+    const usualTime = nonException.length>0 ? nonException[0].time : (bookings[0] && bookings[0].time) || "";
+    const recurWeeks = bookings.find(b=>b.recurWeeks) ? bookings.find(b=>b.recurWeeks).recurWeeks : null;
     setClientProfile({name, recurWeeks, usualTime, bookings});
   };
 
@@ -444,46 +407,34 @@ export default function TheList() {
     slots[idx] = {...slot, name:"", price:"", recurWeeks:null, isException:false, done:false};
     setSlots(dateKey, slots);
     addHistoryEntry({type:"removed",time:slot.time,name,dateKey,note:"removed from profile"});
-    // Refresh profile
     setClientProfile(prev => prev ? {...prev, bookings: prev.bookings.filter(b=>b.dateKey!==dateKey)} : null);
   };
 
   const startLongPress = (name) => {
-    longPressTimer.current = setTimeout(() => {
-      openClientProfile(name);
-    }, 600);
+    longPressTimer.current = setTimeout(() => { openClientProfile(name); }, 600);
   };
 
   const cancelLongPress = () => {
-    if (longPressTimer.current) {
-      clearTimeout(longPressTimer.current);
-      longPressTimer.current = null;
-    }
+    if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
   };
 
-  // Called when user taps an open slot during reassign mode — instantly places client
   const handleReassignSlotTap = (dateKey, idx) => {
     if (!reassignMode) return;
     if (reassignMode.currentDateKey !== dateKey) return;
     const {client, remainingConflicts} = reassignMode;
     const slots = [...getSlots(dateKey)];
     const slot = slots[idx];
-    if (slot.name) return; // slot taken, ignore
-
-    // Instantly place client — keep recurWeeks, mark as exception
+    if (slot.name) return;
     const newSlots = [...slots];
     newSlots[idx] = {...slot, name:client.name, price:client.price, recurWeeks:client.recurWeeks, isException:true, done:false};
     setSlots(dateKey, newSlots);
     addHistoryEntry({type:"added", time:slot.time, name:client.name, price:client.price, dateKey, note:"conflict exception"});
-
     setReassignMode(null);
-
     if (remainingConflicts.length > 0) {
       setReassignApplyAll({altTime:slot.time, remainingConflicts, client});
     }
   };
 
-  // Apply alternate time to all remaining conflicts — keeps recurWeeks so still shows as recurring
   const applyAltTimeToConflicts = (altTime, conflicts, client) => {
     const newSchedules = {...schedulesRef.current};
     conflicts.forEach(c => {
@@ -492,7 +443,6 @@ export default function TheList() {
         : DEFAULT_TIMES.map(t=>({time:t,name:"",price:"",done:false,recurWeeks:null}));
       const targetIdx = daySlots.findIndex(s=>s.time===altTime);
       if (targetIdx>=0 && !daySlots[targetIdx].name) {
-        // Keep recurWeeks so badge still shows, mark as exception so we know time differs
         daySlots[targetIdx] = {...daySlots[targetIdx],name:client.name,price:client.price,recurWeeks:client.recurWeeks,isException:true,done:false};
         newSchedules[c.dateKey] = daySlots;
         addHistoryEntry({type:"added",time:altTime,name:client.name,price:client.price,dateKey:c.dateKey,note:"conflict exception"});
@@ -502,7 +452,6 @@ export default function TheList() {
     setReassignApplyAll(null);
   };
 
-  // Build new schedules for recurring, returns {newSchedules, conflicts}
   const buildRecurringSchedules = (baseSchedules, dateKey, sourceSlot, weeks) => {
     const newSchedules = {...baseSchedules};
     const conflicts = [];
@@ -531,21 +480,17 @@ export default function TheList() {
     return {newSchedules, conflicts};
   };
 
-
-
   const setRecurring = (dateKey, idx, weeks) => {
     const sourceSlots = [...getSlots(dateKey)];
     const sourceSlot = sourceSlots[idx];
     sourceSlots[idx] = {...sourceSlot, recurWeeks: weeks};
     const baseSchedules = {...schedulesRef.current, [dateKey]: sourceSlots};
-
     if (weeks) {
       const {newSchedules, conflicts} = buildRecurringSchedules(baseSchedules, dateKey, sourceSlot, weeks);
       if (conflicts.length > 0) {
         setConflictModal({
           conflicts,
           onCancel: () => {
-            // Place only on non-conflicting dates
             setSchedules(newSchedules);
             addHistoryEntry({type:"recurring_set",time:sourceSlot.time,name:sourceSlot.name,weeks,dateKey});
             setConflictModal(null);
@@ -558,7 +503,6 @@ export default function TheList() {
         setRecurringModal(null);
       }
     } else {
-      // Removing recurring
       const newSchedules = {...schedulesRef.current, [dateKey]: sourceSlots};
       const oldWeeks = sourceSlot.recurWeeks;
       if (oldWeeks) {
@@ -586,7 +530,6 @@ export default function TheList() {
     const slot = getSlots(dateKey)[idx];
     if (!slot.name) { setSwipedSlot(null); return; }
     if (slot.groupId) {
-      // Check how many slots share this groupId
       const slots = getSlots(dateKey);
       const groupSlots = slots.filter(s=>s.groupId===slot.groupId&&s.name);
       if (groupSlots.length > 1) {
@@ -602,10 +545,8 @@ export default function TheList() {
   const cancelGroupSlots = (dateKey, groupId, onlyIdx) => {
     const slots = [...getSlots(dateKey)];
     if (onlyIdx !== undefined) {
-      // Cancel just this one, remove its groupId linkage
       const slot = slots[onlyIdx];
       slots[onlyIdx] = {...slot, name:"", price:"", done:false, recurWeeks:null, isException:false, groupId:null};
-      // If only one remains in group, unlink it too
       const remaining = slots.filter(s=>s.groupId===groupId&&s.name);
       if (remaining.length === 1) {
         const ri = slots.findIndex(s=>s.groupId===groupId&&s.name);
@@ -613,7 +554,6 @@ export default function TheList() {
       }
       addHistoryEntry({type:"removed", time:slot.time, name:slot.name, dateKey});
     } else {
-      // Cancel all in group
       slots.forEach((s,i) => {
         if (s.groupId===groupId&&s.name) {
           addHistoryEntry({type:"removed", time:s.time, name:s.name, dateKey});
@@ -627,7 +567,6 @@ export default function TheList() {
   };
 
   const rescheduleGroupSlots = (dateKey, groupId, onlyIdx, slot) => {
-    // Enter reassign mode for this slot; pass groupId so reassign knows about group
     const targetSlot = getSlots(dateKey)[onlyIdx];
     setReassignMode({
       client:{name:targetSlot.name, price:targetSlot.price, recurWeeks:targetSlot.recurWeeks},
@@ -644,7 +583,6 @@ export default function TheList() {
     if (!confirmDelete) return;
     const {dateKey,idx,slot} = confirmDelete;
     const slots = [...getSlots(dateKey)];
-    // Clear the person but keep the slot
     slots[idx] = {...slots[idx], name:"", price:"", done:false, recurWeeks:null, isException:false};
     setSlots(dateKey,slots);
     addHistoryEntry({type:"removed",time:slot.time,name:slot.name,price:slot.price,dateKey});
@@ -667,11 +605,9 @@ export default function TheList() {
     const slots = [...getSlots(dateKey)];
     const slot = slots[idx];
     if (slot.blocked) {
-      // Unblock
       slots[idx] = {...slot, blocked:false, blockLabel:""};
       addHistoryEntry({type:"unblocked", time:slot.time, name:slot.blockLabel||"Blocked", dateKey});
     } else {
-      // Block with label
       slots[idx] = {...slot, blocked:true, blockLabel:label||"Lunch", name:"", done:false, recurWeeks:null, isException:false};
       addHistoryEntry({type:"blocked", time:slot.time, name:label||"Lunch", dateKey});
     }
@@ -695,14 +631,11 @@ export default function TheList() {
       const slots = getSlots(dateKey);
       const slot = slots[idx];
       if (!slot.name && !slot.blocked) {
-        // Empty slot — show block label modal
         setBlockLabelModal({dateKey, idx});
         setBlockLabel("Lunch");
       } else if (slot.blocked) {
-        // Already blocked — unblock immediately
         toggleBlockSlot(dateKey, idx, null);
       } else {
-        // Filled slot — show cancel confirmation
         setSwipedSlot((dateKey+"-"+idx));
       }
     } else if (dx>30) setSwipedSlot(null);
@@ -719,8 +652,6 @@ export default function TheList() {
     <div style={{minHeight:"100vh",background:"#ffffff",fontFamily:"Georgia,serif",color:"#1a1a1a",paddingTop:reassignMode?"52px":"0"}}
       onClick={()=>swipedSlot&&setSwipedSlot(null)}>
 
-
-      {/* MONTH LONG PRESS MODAL */}
       {monthLongPress && (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center"}}
           onClick={()=>setMonthLongPress(null)}>
@@ -729,17 +660,10 @@ export default function TheList() {
             <div style={{fontSize:"13px",color:"#888",marginBottom:"16px",textAlign:"center"}}>
               {smartDate(monthLongPress.day)}
             </div>
-            <button onClick={()=>{
-              setBaseDate(monthLongPress.day);
-              setView("Day");
-              setMonthLongPress(null);
-            }} style={{display:"block",width:"100%",padding:"12px",background:"#1a1a1a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",marginBottom:"10px"}}>
+            <button onClick={()=>{setBaseDate(monthLongPress.day);setView("Day");setMonthLongPress(null);}} style={{display:"block",width:"100%",padding:"12px",background:"#1a1a1a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",marginBottom:"10px"}}>
               Add appointment
             </button>
-            <button onClick={()=>{
-              setHolidayModal({dateKey:monthLongPress.dateKey});
-              setMonthLongPress(null);
-            }} style={{display:"block",width:"100%",padding:"12px",background:"#fff",border:"1px solid #d8d8d6",borderRadius:"8px",color:"#666",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",marginBottom:"10px"}}>
+            <button onClick={()=>{setHolidayModal({dateKey:monthLongPress.dateKey});setMonthLongPress(null);}} style={{display:"block",width:"100%",padding:"12px",background:"#fff",border:"1px solid #d8d8d6",borderRadius:"8px",color:"#666",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",marginBottom:"10px"}}>
               Mark as holiday
             </button>
             <button onClick={()=>setMonthLongPress(null)} style={{display:"block",width:"100%",padding:"8px",background:"none",border:"none",color:"#bbb",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>
@@ -749,7 +673,6 @@ export default function TheList() {
         </div>
       )}
 
-      {/* GROUP CONFIRM MODAL */}
       {groupConfirm && (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center"}}>
           <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"24px",width:"min(320px,92vw)"}}>
@@ -779,7 +702,6 @@ export default function TheList() {
         </div>
       )}
 
-      {/* GROUP RECUR MODAL */}
       {groupRecurModal && (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center"}}>
           <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"24px",width:"min(340px,92vw)"}}>
@@ -788,78 +710,50 @@ export default function TheList() {
             <div style={{fontSize:"12px",color:"#888",marginBottom:"16px"}}>
               This slot is part of a group of {groupRecurModal.groupSlots.length}. How many slots should recur?
             </div>
-
-            {/* Slot count options */}
             <div style={{display:"flex",gap:"8px",marginBottom:"16px"}}>
-              <button
-                onClick={()=>setGroupRecurModal(prev=>({...prev,recurCount:1}))}
-                style={{flex:1,padding:"10px",background:groupRecurModal.recurCount===1?"#1a1a1a":"#f4f4f2",border:(groupRecurModal.recurCount===1?"1px solid #1a1a1a":"1px solid #d8d8d6"),borderRadius:"8px",color:groupRecurModal.recurCount===1?"#fff":"#666",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}
-              >Just this slot</button>
+              <button onClick={()=>setGroupRecurModal(prev=>({...prev,recurCount:1}))} style={{flex:1,padding:"10px",background:groupRecurModal.recurCount===1?"#1a1a1a":"#f4f4f2",border:(groupRecurModal.recurCount===1?"1px solid #1a1a1a":"1px solid #d8d8d6"),borderRadius:"8px",color:groupRecurModal.recurCount===1?"#fff":"#666",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Just this slot</button>
               {groupRecurModal.groupSlots.map((_,i)=> i===0 ? null : (
-                <button key={i+1}
-                  onClick={()=>setGroupRecurModal(prev=>({...prev,recurCount:i+1}))}
-                  style={{flex:1,padding:"10px",background:groupRecurModal.recurCount===i+1?"#1a1a1a":"#f4f4f2",border:(groupRecurModal.recurCount===i+1?"1px solid #1a1a1a":"1px solid #d8d8d6"),borderRadius:"8px",color:groupRecurModal.recurCount===i+1?"#fff":"#666",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}
-                >All {i+1} slots</button>
+                <button key={i+1} onClick={()=>setGroupRecurModal(prev=>({...prev,recurCount:i+1}))} style={{flex:1,padding:"10px",background:groupRecurModal.recurCount===i+1?"#1a1a1a":"#f4f4f2",border:(groupRecurModal.recurCount===i+1?"1px solid #1a1a1a":"1px solid #d8d8d6"),borderRadius:"8px",color:groupRecurModal.recurCount===i+1?"#fff":"#666",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>All {i+1} slots</button>
               ))}
             </div>
-
-            {/* Week interval picker */}
             {groupRecurModal.recurCount && (
-              <>
+              <div>
                 <div style={{fontSize:"11px",letterSpacing:"0.1em",textTransform:"uppercase",color:"#aaa",marginBottom:"8px"}}>Every how many weeks?</div>
                 <div style={{display:"flex",flexWrap:"wrap",gap:"6px",marginBottom:"16px"}}>
                   {[1,2,3,4,5,6,7,8].map(w=>(
-                    <button key={w}
-                      onClick={()=>setGroupRecurModal(prev=>({...prev,weeks:w}))}
-                      style={{padding:"7px 12px",borderRadius:"6px",border:"1px solid",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",background:groupRecurModal.weeks===w?"#1a1a1a":"#f4f4f2",borderColor:groupRecurModal.weeks===w?"#1a1a1a":"#d8d8d6",color:groupRecurModal.weeks===w?"#fff":"#666"}}
-                    >{w===1?"Weekly":(w+"w")}</button>
+                    <button key={w} onClick={()=>setGroupRecurModal(prev=>({...prev,weeks:w}))} style={{padding:"7px 12px",borderRadius:"6px",border:"1px solid",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",background:groupRecurModal.weeks===w?"#1a1a1a":"#f4f4f2",borderColor:groupRecurModal.weeks===w?"#1a1a1a":"#d8d8d6",color:groupRecurModal.weeks===w?"#fff":"#666"}}>{w===1?"Weekly":(w+"w")}</button>
                   ))}
                 </div>
                 {groupRecurModal.weeks && (
                   <button onClick={()=>{
                     const {dateKey,idx,slot,groupSlots,recurCount,weeks} = groupRecurModal;
                     if(recurCount===1){
-                      // Just this slot
                       setRecurringModal({dateKey,idx,slot});
                       setGroupRecurModal(null);
-                      // Pre-select the weeks
                       setTimeout(()=>setRecurring(dateKey,idx,weeks),50);
                     } else {
-                      // Recur all slots in group — apply setRecurring to each, keeping groupId
-                      const allSlots = [...getSlots(dateKey)];
                       const slotsToRecur = groupSlots.slice(0, recurCount);
-                      // We'll call setRecurring for the first one, then manually handle the rest
-                      // to preserve groupId linkage in future occurrences
-                      const gid = slot.groupId;
-                      slotsToRecur.forEach(gs => {
-                        setRecurring(dateKey, gs.i, weeks);
-                      });
+                      slotsToRecur.forEach(gs => { setRecurring(dateKey, gs.i, weeks); });
                       setGroupRecurModal(null);
                     }
                   }} style={{width:"100%",padding:"11px",background:"#1a1a1a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",marginBottom:"8px"}}>
                     Confirm — every {groupRecurModal.weeks===1?"week":(groupRecurModal.weeks+" weeks")}
                   </button>
                 )}
-              </>
+              </div>
             )}
             <button onClick={()=>setGroupRecurModal(null)} style={{display:"block",width:"100%",padding:"8px",background:"none",border:"none",color:"#bbb",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>Cancel</button>
           </div>
         </div>
       )}
 
-      {/* BLOCK LABEL MODAL */}
       {blockLabelModal && (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center"}}>
           <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"24px",width:"min(300px,90vw)"}}>
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#aaa",marginBottom:"8px"}}>Block This Slot</div>
-            <input
-              autoFocus
-              value={blockLabel}
-              onChange={e=>setBlockLabel(e.target.value)}
+            <input autoFocus value={blockLabel} onChange={e=>setBlockLabel(e.target.value)}
               onKeyDown={e=>{if(e.key==="Enter")toggleBlockSlot(blockLabelModal.dateKey,blockLabelModal.idx,blockLabel);if(e.key==="Escape"){setBlockLabelModal(null);}}}
-              placeholder="Lunch, Break, etc."
-              style={{...inputStyle,width:"100%",boxSizing:"border-box",marginBottom:"14px",fontSize:"15px"}}
-            />
+              placeholder="Lunch, Break, etc." style={{...inputStyle,width:"100%",boxSizing:"border-box",marginBottom:"14px",fontSize:"15px"}} />
             <div style={{display:"flex",gap:"8px"}}>
               <button onClick={()=>toggleBlockSlot(blockLabelModal.dateKey,blockLabelModal.idx,blockLabel)} style={{flex:1,padding:"10px",background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Block</button>
               <button onClick={()=>setBlockLabelModal(null)} style={{padding:"10px 16px",background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Cancel</button>
@@ -868,19 +762,13 @@ export default function TheList() {
         </div>
       )}
 
-      {/* HOLIDAY MODAL */}
       {holidayModal && (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center"}}>
           <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"24px",width:"min(320px,90vw)"}}>
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#aaa",marginBottom:"8px"}}>Mark Holiday</div>
             <div style={{fontSize:"13px",color:"#888",marginBottom:"14px"}}>{friendlyDate(holidayModal.dateKey)}</div>
-            <input
-              autoFocus
-              value={newHolidayName}
-              onChange={e=>setNewHolidayName(e.target.value)}
-              placeholder="Holiday name"
-              style={{...inputStyle,width:"100%",boxSizing:"border-box",marginBottom:"10px"}}
-            />
+            <input autoFocus value={newHolidayName} onChange={e=>setNewHolidayName(e.target.value)}
+              placeholder="Holiday name" style={{...inputStyle,width:"100%",boxSizing:"border-box",marginBottom:"10px"}} />
             <label style={{display:"flex",alignItems:"center",gap:"8px",fontSize:"13px",color:"#666",marginBottom:"16px",cursor:"pointer"}}>
               <input type="checkbox" checked={newHolidayYearly} onChange={e=>setNewHolidayYearly(e.target.checked)} />
               Repeat every year
@@ -897,14 +785,13 @@ export default function TheList() {
         </div>
       )}
 
-      {/* CONFLICT MODAL */}
       {conflictModal && (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.88)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center"}}>
           <div style={{background:"#ffffff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"28px 28px 24px",width:"min(400px,92vw)",maxHeight:"80vh",overflowY:"auto"}}>
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#c0392b",marginBottom:"8px"}}>⚠ Scheduling Conflicts</div>
             <div style={{fontSize:"15px",color:"#1a1a1a",marginBottom:"6px"}}>Some slots are already taken</div>
             <div style={{fontSize:"12px",color:"#888",marginBottom:"16px"}}>
-              {conflictModal.conflicts[0] && conflictModal.conflicts[0].name} will be placed on all open dates. The following dates need your attention — tap Jump to sort them out directly.
+              {conflictModal.conflicts[0] && conflictModal.conflicts[0].name} will be placed on all open dates. The following dates need your attention.
             </div>
             <div style={{marginBottom:"20px"}}>
               {conflictModal.conflicts.map((c,i)=>(
@@ -913,19 +800,12 @@ export default function TheList() {
                     <div style={{fontSize:"12px",color:"#1a1a1a"}}>{friendlyDate(c.dateKey)} · {c.time}</div>
                     <div style={{fontSize:"11px",color:"#c0392b",marginTop:"2px"}}>{c.existingName} is already here</div>
                   </div>
-                  <button
-                    onClick={()=>{
-                      const remaining = conflictModal.conflicts.filter((_,j)=>j!==i);
-                      conflictModal.onCancel();
-                      setReassignMode({
-                        client:{name:c.name,price:c.price||"",recurWeeks:c.recurWeeks},
-                        currentDateKey:c.dateKey,
-                        remainingConflicts:remaining
-                      });
-                      jumpToDate(c.dateKey);
-                    }}
-                    style={{padding:"6px 12px",background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.05em",flexShrink:0,marginLeft:"10px"}}
-                  >Jump →</button>
+                  <button onClick={()=>{
+                    const remaining = conflictModal.conflicts.filter((_,j)=>j!==i);
+                    conflictModal.onCancel();
+                    setReassignMode({client:{name:c.name,price:c.price||"",recurWeeks:c.recurWeeks},currentDateKey:c.dateKey,remainingConflicts:remaining});
+                    jumpToDate(c.dateKey);
+                  }} style={{padding:"6px 12px",background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.05em",flexShrink:0,marginLeft:"10px"}}>Jump →</button>
                 </div>
               ))}
             </div>
@@ -935,10 +815,10 @@ export default function TheList() {
             <button onClick={()=>setConflictModal(null)} style={{display:"block",width:"100%",padding:"8px",background:"none",border:"none",color:"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>
               Cancel
             </button>
+          </div>
         </div>
       )}
 
-      {/* REASSIGN MODE BANNER */}
       {reassignMode && (
         <div style={{position:"fixed",top:0,left:0,right:0,zIndex:900,background:"#1a1a1a",color:"#fff",padding:"12px 20px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
           <div>
@@ -949,7 +829,6 @@ export default function TheList() {
         </div>
       )}
 
-      {/* APPLY ALT TIME TO ALL CONFLICTS */}
       {reassignApplyAll && (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.88)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center"}}>
           <div style={{background:"#ffffff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"28px 28px 24px",width:"min(380px,92vw)"}}>
@@ -967,16 +846,10 @@ export default function TheList() {
               ))}
             </div>
             <div style={{display:"flex",gap:"8px",marginBottom:"8px"}}>
-              <button
-                onClick={()=>applyAltTimeToConflicts(reassignApplyAll.altTime,reassignApplyAll.remainingConflicts,reassignApplyAll.client)}
-                style={{flex:1,padding:"10px",background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}
-              >
+              <button onClick={()=>applyAltTimeToConflicts(reassignApplyAll.altTime,reassignApplyAll.remainingConflicts,reassignApplyAll.client)} style={{flex:1,padding:"10px",background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>
                 Yes — use {reassignApplyAll.altTime} for all
               </button>
-              <button
-                onClick={()=>setReassignApplyAll(null)}
-                style={{flex:1,padding:"10px",background:"#fff",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#666",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}
-              >
+              <button onClick={()=>setReassignApplyAll(null)} style={{flex:1,padding:"10px",background:"#fff",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#666",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>
                 No — handle individually
               </button>
             </div>
@@ -984,7 +857,6 @@ export default function TheList() {
         </div>
       )}
 
-      {/* CLIENT PROFILE MODAL */}
       {clientProfile && (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.88)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center"}}>
           <div style={{background:"#ffffff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"28px 28px 24px",width:"min(400px,92vw)",maxHeight:"80vh",display:"flex",flexDirection:"column"}}>
@@ -1021,18 +893,12 @@ export default function TheList() {
                   </div>
                   {!b.done&&(
                     <div style={{display:"flex",gap:"6px",marginLeft:"10px",flexShrink:0}}>
-                      <button
-                        onClick={()=>{
-                          setClientProfile(null);
-                          setReassignMode({client:{name:clientProfile.name,price:b.price,recurWeeks:b.recurWeeks},currentDateKey:b.dateKey,remainingConflicts:[]});
-                          jumpToDate(b.dateKey);
-                        }}
+                      <button onClick={()=>{setClientProfile(null);setReassignMode({client:{name:clientProfile.name,price:b.price,recurWeeks:b.recurWeeks},currentDateKey:b.dateKey,remainingConflicts:[]});jumpToDate(b.dateKey);}}
                         style={{background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",padding:"5px 10px",fontFamily:"inherit",fontSize:"11px"}}
                         onMouseEnter={e=>{e.currentTarget.style.borderColor="#1a1a1a";e.currentTarget.style.color="#1a1a1a";}}
                         onMouseLeave={e=>{e.currentTarget.style.borderColor="#d8d8d6";e.currentTarget.style.color="#888";}}
                       >Edit</button>
-                      <button
-                        onClick={()=>removeClientBooking(b.dateKey, clientProfile.name)}
+                      <button onClick={()=>removeClientBooking(b.dateKey, clientProfile.name)}
                         style={{background:"none",border:"1px solid #e8e8e6",borderRadius:"6px",color:"#ccc",cursor:"pointer",padding:"5px 10px",fontFamily:"inherit",fontSize:"11px"}}
                         onMouseEnter={e=>{e.currentTarget.style.borderColor="#c0392b";e.currentTarget.style.color="#c0392b";}}
                         onMouseLeave={e=>{e.currentTarget.style.borderColor="#e8e8e6";e.currentTarget.style.color="#ccc";}}
@@ -1046,7 +912,6 @@ export default function TheList() {
         </div>
       )}
 
-      {/* RECURRING MODAL */}
       {recurringModal && (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.88)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center"}}>
           <div style={{background:"#f8f8f6",border:"1px solid #d8d8d6",borderRadius:"12px",padding:"28px 28px 24px",width:"min(340px,92vw)"}}>
@@ -1056,12 +921,7 @@ export default function TheList() {
             <div style={{fontSize:"11px",letterSpacing:"0.1em",textTransform:"uppercase",color:"#999",marginBottom:"10px"}}>Every how many weeks?</div>
             <div style={{display:"flex",flexWrap:"wrap",gap:"8px",marginBottom:"20px"}}>
               {WEEK_OPTIONS.map(w=>(
-                <button key={w} onClick={()=>setRecurring(recurringModal.dateKey,recurringModal.idx,w)} style={{
-                  padding:"8px 14px",borderRadius:"6px",border:"1px solid",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",
-                  background:recurringModal.slot.recurWeeks===w?"#1a1a1a":"#f4f4f2",
-                  borderColor:recurringModal.slot.recurWeeks===w?"#1a1a1a":"#d8d8d6",
-                  color:recurringModal.slot.recurWeeks===w?"#ffffff":"#666",
-                }}>
+                <button key={w} onClick={()=>setRecurring(recurringModal.dateKey,recurringModal.idx,w)} style={{padding:"8px 14px",borderRadius:"6px",border:"1px solid",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",background:recurringModal.slot.recurWeeks===w?"#1a1a1a":"#f4f4f2",borderColor:recurringModal.slot.recurWeeks===w?"#1a1a1a":"#d8d8d6",color:recurringModal.slot.recurWeeks===w?"#ffffff":"#666"}}>
                   {w === 1 ? "Weekly" : (w+"w")}
                 </button>
               ))}
@@ -1076,18 +936,14 @@ export default function TheList() {
         </div>
       )}
 
-      {/* CHECKOFF MODAL */}
       {checkoffModal && (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.88)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center"}}>
           <div style={{background:"#f8f8f6",border:"1px solid #d8d8d6",borderRadius:"12px",padding:"28px 28px 24px",width:"min(360px,92vw)"}}>
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#4a8a5a",marginBottom:"8px"}}>✓ Done</div>
             <div style={{fontSize:"18px",marginBottom:"16px"}}>{checkoffModal.slot.name}</div>
-
             {checkoffModal.notRecurring ? (
-              <>
+              <div>
                 <div style={{fontSize:"13px",color:"#888",marginBottom:"20px"}}>Not recurring. When's the next one?</div>
-
-                {/* Quick week options */}
                 <div style={{fontSize:"11px",letterSpacing:"0.1em",textTransform:"uppercase",color:"#aaa",marginBottom:"8px"}}>Quick book</div>
                 <div style={{display:"flex",gap:"6px",flexWrap:"wrap",marginBottom:"16px"}}>
                   {[2,3,4,5,6].map(w=>{
@@ -1106,15 +962,8 @@ export default function TheList() {
                     );
                   })}
                 </div>
-
-                {/* Calendar picker */}
                 <div style={{fontSize:"11px",letterSpacing:"0.1em",textTransform:"uppercase",color:"#aaa",marginBottom:"8px"}}>Or pick a date</div>
-                <input
-                  type="date"
-                  value={nudgedDate||""}
-                  onChange={e=>setNudgedDate(e.target.value)}
-                  style={{...inputStyle,width:"100%",boxSizing:"border-box",marginBottom:"10px"}}
-                />
+                <input type="date" value={nudgedDate||""} onChange={e=>setNudgedDate(e.target.value)} style={{...inputStyle,width:"100%",boxSizing:"border-box",marginBottom:"10px"}} />
                 {nudgedDate && (
                   <button onClick={()=>{
                     const slot = checkoffModal.slot;
@@ -1126,38 +975,27 @@ export default function TheList() {
                     Go to {friendlyDate(nudgedDate)} →
                   </button>
                 )}
-              </>
+              </div>
             ) : (
-              <>
+              <div>
                 <div style={{fontSize:"12px",color:"#999",marginBottom:"6px"}}>Every {checkoffModal.slot.recurWeeks === 1 ? "week" : (checkoffModal.slot.recurWeeks+" weeks")} · {checkoffModal.slot.time} · {DAYS[dayOfWeek(checkoffModal.dateKey)]}s</div>
-
-                {/* Nudge date */}
                 <div style={{fontSize:"11px",letterSpacing:"0.1em",textTransform:"uppercase",color:"#999",margin:"16px 0 8px"}}>Next appointment</div>
-                <input
-                  type="date"
-                  value={effectiveNextDate||""}
-                  onChange={e=>setNudgedDate(e.target.value)}
-                  style={{...inputStyle,width:"100%",boxSizing:"border-box",marginBottom:"10px"}}
-                />
-
+                <input type="date" value={effectiveNextDate||""} onChange={e=>setNudgedDate(e.target.value)} style={{...inputStyle,width:"100%",boxSizing:"border-box",marginBottom:"10px"}} />
                 {nudgedDate && nudgedDate !== checkoffModal.nextDateKey && (
                   <div style={{fontSize:"11px",color:"#a07830",marginBottom:"10px"}}>
-                    ↳ Nudged by {Math.round((parseDateKey(nudgedDate)-parseDateKey(checkoffModal.nextDateKey))/(1000*60*60*24))} days · schedule resumes every {checkoffModal.slot.recurWeeks === 1 ? "week" : (checkoffModal.slot.recurWeeks+" weeks")} after this
+                    ↳ Nudged · schedule resumes every {checkoffModal.slot.recurWeeks === 1 ? "week" : (checkoffModal.slot.recurWeeks+" weeks")} after this
                   </div>
                 )}
-
                 {nudgeConflict && (
-                  <div style={{background:"#fff0ee",border:"1px solid #5a2a1a",borderRadius:"6px",padding:"10px 12px",marginBottom:"12px",fontSize:"12px",color:"#fff"}}>
+                  <div style={{background:"#fff0ee",border:"1px solid #5a2a1a",borderRadius:"6px",padding:"10px 12px",marginBottom:"12px",fontSize:"12px",color:"#c0392b"}}>
                     ⚠ That slot is already taken on {friendlyDate(effectiveNextDate)}
                   </div>
                 )}
-
                 {!nudgeConflict && effectiveNextDate && (
                   <div style={{background:"#f0fff0",border:"1px solid #a0d0a0",borderRadius:"6px",padding:"10px 12px",marginBottom:"12px",fontSize:"12px",color:"#2a7a2a"}}>
                     ✓ {checkoffModal.slot.time} is open on {friendlyDate(effectiveNextDate)}
                   </div>
                 )}
-
                 <div style={{display:"flex",gap:"8px",marginBottom:"12px"}}>
                   <button onClick={()=>confirmNextBooking(effectiveNextDate)} style={{flex:1,padding:"10px",background:nudgeConflict?"#5a2a1a":"#c9a96e",border:"none",borderRadius:"6px",color:nudgeConflict?"#e8b84b":"#0f0f0f",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>
                     {nudgeConflict ? "Book anyway" : ("Book "+friendlyDate(effectiveNextDate))}
@@ -1166,9 +1004,8 @@ export default function TheList() {
                     Jump →
                   </button>
                 </div>
-              </>
+              </div>
             )}
-
             <button onClick={()=>{setCheckoffModal(null);setNudgedDate(null);}} style={{display:"block",width:"100%",padding:"8px",background:"none",border:"none",color:"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>
               Dismiss
             </button>
@@ -1176,45 +1013,72 @@ export default function TheList() {
         </div>
       )}
 
-      {/* CONFIRM DELETE MODAL */}
       {confirmDelete && (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.85)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center"}}>
           <div style={{background:"#f8f8f6",border:"1px solid #d8d8d6",borderRadius:"10px",padding:"28px 32px",maxWidth:"320px",width:"90%",textAlign:"center"}}>
-            <div style={{fontSize:"11px",letterSpacing:"0.15em",textTransform:"uppercase",color:"#888",marginBottom:"12px"}}>Remove Slot</div>
+            <div style={{fontSize:"11px",letterSpacing:"0.15em",textTransform:"uppercase",color:"#888",marginBottom:"12px"}}>Cancel Appointment</div>
             <div style={{fontSize:"16px",marginBottom:"6px"}}>
-              {confirmDelete.slot.name ? <><span style={{color:"#fff"}}>{confirmDelete.slot.name}</span> at {confirmDelete.slot.time}</> : <>Empty slot at {confirmDelete.slot.time}</>}
+              {confirmDelete.slot.name ? <span style={{color:"#1a1a1a"}}>{confirmDelete.slot.name} at {confirmDelete.slot.time}</span> : <span>Empty slot at {confirmDelete.slot.time}</span>}
             </div>
             <div style={{fontSize:"12px",color:"#999",marginBottom:"24px"}}>This will be logged in your history.</div>
             <div style={{display:"flex",gap:"10px",justifyContent:"center"}}>
-              <button onClick={()=>setConfirmDelete(null)} style={{padding:"9px 20px",background:"#e8e8e6",border:"1px solid #d8d8d6",color:"#888",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Cancel</button>
-              <button onClick={confirmRemoveSlot} style={{padding:"9px 20px",background:"#c0392b",border:"1px solid #c0392b",color:"#fff",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Remove</button>
+              <button onClick={()=>setConfirmDelete(null)} style={{padding:"9px 20px",background:"#e8e8e6",border:"1px solid #d8d8d6",color:"#888",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Keep</button>
+              <button onClick={confirmRemoveSlot} style={{padding:"9px 20px",background:"#c0392b",border:"1px solid #c0392b",color:"#fff",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Cancel appointment</button>
             </div>
           </div>
         </div>
       )}
 
-      {/* HISTORY DRAWER */}
       {showHistory && (
         <div style={{position:"fixed",top:0,right:0,bottom:0,width:"min(340px,90vw)",zIndex:500,background:"#fafaf8",borderLeft:"1px solid #e4e4e2",overflowY:"auto",padding:"24px 20px",boxShadow:"-4px 0 20px rgba(0,0,0,0.08)"}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"20px"}}>
-              <div style={{fontSize:"11px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#888"}}>Change History</div>
-              <button onClick={()=>setShowHistory(false)} style={{background:"none",border:"none",color:"#999",fontSize:"18px",cursor:"pointer"}}>×</button>
-            </div>
-            {history.length===0 && <div style={{color:"#bbb",fontSize:"13px",fontStyle:"italic"}}>No changes yet.</div>}
-            {history.map((entry,i)=>(
-              <div key={i} style={{padding:"10px 12px",marginBottom:"6px",borderRadius:"6px",background:(entry.type==="removed"||entry.type==="slot_removed")?"#fff0ee":"#fafaf8",border:((entry.type==="removed"||entry.type==="slot_removed")?"1px solid #e0b0a8":"1px solid #e4e4e2")}}>
-                <div style={{display:"flex",justifyContent:"space-between",marginBottom:"3px"}}>
-                  <span style={{fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",color:entry.type==="added"?"#4a8a5a":(entry.type==="removed"||entry.type==="slot_removed")?"#8a3a2a":entry.type==="recurring_set"?"#c9a96e":"#666"}}>
-                    {entry.type==="added"?"Added":entry.type==="removed"?"Removed":entry.type==="slot_removed"?"Slot Deleted":entry.type==="slot_added"?"Slot Added":entry.type==="recurring_set"?("Set Recurring ("+entry.weeks+"w)"):"Edited"}
-                  </span>
-                  <span style={{fontSize:"10px",color:"#bbb"}}>{entry.timestamp}</span>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"20px"}}>
+            <div style={{fontSize:"11px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#888"}}>Change History</div>
+            <button onClick={()=>setShowHistory(false)} style={{background:"none",border:"none",color:"#999",fontSize:"18px",cursor:"pointer"}}>×</button>
+          </div>
+          {clientMemory.length>0 && (
+            <div style={{marginBottom:"24px"}}>
+              <div style={{fontSize:"10px",letterSpacing:"0.15em",textTransform:"uppercase",color:"#aaa",marginBottom:"10px"}}>Saved Clients</div>
+              {clientMemory.map((c,i)=>(
+                <div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 10px",marginBottom:"3px",background:"#f8f8f6",border:"1px solid #e8e8e6",borderRadius:"6px"}}>
+                  <div>
+                    <span style={{fontSize:"13px",color:"#1a1a1a"}}>{c.name}</span>
+                    {c.price&&<span style={{fontSize:"11px",color:"#a07830",marginLeft:"8px"}}>{c.price}</span>}
+                  </div>
+                  <button onClick={()=>setClientMemory(mem=>mem.filter((_,j)=>j!==i))}
+                    style={{background:"none",border:"none",color:"#ccc",cursor:"pointer",fontSize:"14px",padding:"2px 6px",fontFamily:"inherit"}}
+                    onMouseEnter={e=>e.currentTarget.style.color="#c0392b"}
+                    onMouseLeave={e=>e.currentTarget.style.color="#ccc"}
+                  >×</button>
                 </div>
-                <div style={{fontSize:"13px",color:"#999"}}>
-                  {entry.time} {entry.name&&<span style={{color:"#1a1a1a"}}>— {entry.name}</span>}
-                  {entry.prevName&&<span style={{color:"#999"}}> (was {entry.prevName})</span>}
+              ))}
+            </div>
+          )}
+          <div style={{fontSize:"10px",letterSpacing:"0.15em",textTransform:"uppercase",color:"#aaa",marginBottom:"10px"}}>Change Log</div>
+          {history.length===0 && <div style={{color:"#bbb",fontSize:"13px",fontStyle:"italic"}}>No changes yet.</div>}
+          {history.map((entry,i)=>(
+            <div key={i} style={{padding:"10px 12px",marginBottom:"6px",borderRadius:"6px",background:(entry.type==="removed"||entry.type==="slot_removed")?"#fff0ee":"#fafaf8",border:((entry.type==="removed"||entry.type==="slot_removed")?"1px solid #e0b0a8":"1px solid #e4e4e2")}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"3px"}}>
+                <span style={{fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",color:entry.type==="added"?"#4a8a5a":(entry.type==="removed"||entry.type==="slot_removed")?"#8a3a2a":entry.type==="recurring_set"?"#c9a96e":"#666"}}>
+                  {entry.type==="added"?"Added":entry.type==="removed"?"Removed":entry.type==="slot_removed"?"Slot Deleted":entry.type==="slot_added"?"Slot Added":entry.type==="recurring_set"?("Set Recurring ("+entry.weeks+"w)"):entry.type==="blocked"?"Blocked":entry.type==="unblocked"?"Unblocked":"Edited"}
+                </span>
+                <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
+                  <span style={{fontSize:"10px",color:"#bbb"}}>{entry.timestamp}</span>
+                  {["added","removed","edited","recurring_set","blocked"].includes(entry.type) && (
+                    <button onClick={()=>undoHistoryEntry(entry)}
+                      style={{background:"none",border:"1px solid #d8d8d6",borderRadius:"4px",color:"#888",cursor:"pointer",fontSize:"9px",padding:"2px 6px",fontFamily:"inherit",letterSpacing:"0.05em"}}
+                      onMouseEnter={e=>{e.currentTarget.style.borderColor="#1a1a1a";e.currentTarget.style.color="#1a1a1a";}}
+                      onMouseLeave={e=>{e.currentTarget.style.borderColor="#d8d8d6";e.currentTarget.style.color="#888";}}
+                    >Undo</button>
+                  )}
                 </div>
               </div>
-            ))}
+              <div style={{fontSize:"13px",color:"#888"}}>
+                {entry.time} {entry.name&&<span style={{color:"#1a1a1a"}}>— {entry.name}</span>}
+                {entry.prevName&&<span style={{color:"#aaa"}}> (was {entry.prevName})</span>}
+                {entry.dateKey&&<span style={{color:"#ccc",fontSize:"11px"}}> · {friendlyDate(entry.dateKey)}</span>}
+              </div>
+            </div>
+          ))}
         </div>
       )}
 
@@ -1225,13 +1089,13 @@ export default function TheList() {
             <button key={v} onClick={()=>setView(v)} style={{padding:"5px 12px",fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",border:"none",borderRadius:"4px",cursor:"pointer",background:view===v?"#1a1a1a":"transparent",color:view===v?"#ffffff":"#999",fontFamily:"inherit",transition:"all 0.15s"}}>{v}</button>
           ))}
         </div>
-        {view==="Month"&&(
+        {view==="Month" && (
           <div style={{fontSize:"14px",color:"#1a1a1a",letterSpacing:"0.01em"}}>
             {baseDate.toLocaleDateString("en-US",{month:"long",year:"numeric"})}
           </div>
         )}
         <div style={{display:"flex",gap:"4px",alignItems:"center"}}>
-          {view!=="Month"&&(
+          {view!=="Month" && (
             <button onClick={()=>setBaseDate(d=>addDays(d,-7))} style={{...navBtn,fontSize:"11px",letterSpacing:"-1px"}}>‹‹</button>
           )}
           <button onClick={()=>{
@@ -1243,17 +1107,15 @@ export default function TheList() {
             if(view==="Month"){const d=new Date(baseDate);d.setMonth(d.getMonth()+1);setBaseDate(d);}
             else setBaseDate(d=>addDays(d,1));
           }} style={navBtn}>›</button>
-          {view!=="Month"&&(
+          {view!=="Month" && (
             <button onClick={()=>setBaseDate(d=>addDays(d,7))} style={{...navBtn,fontSize:"11px",letterSpacing:"-1px"}}>››</button>
           )}
           <button onClick={()=>setShowHistory(true)} style={{...navBtn,background:"#f0f0ee",border:"1px solid #d8d8d6",color:"#666"}}>≡</button>
         </div>
       </div>
 
-      {/* MONTH VIEW */}
       {view==="Month" && (()=>{
         const monthDays = getMonthDays();
-        const monthName = baseDate.toLocaleDateString("en-US",{month:"long",year:"numeric"});
         return (
           <div style={{padding:"0"}}>
             <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",background:"#e8e8e6",gap:"1px",borderBottom:"1px solid #e8e8e6"}}>
@@ -1263,7 +1125,7 @@ export default function TheList() {
             </div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:"1px",background:"#e8e8e6"}}>
               {monthDays.map((day,i)=>{
-                if (!day) return <div key={("empty-"+i)} style={{background:"#f8f8f6",minHeight:"80px"}}/>;
+                if (!day) return <div key={"empty-"+i} style={{background:"#f8f8f6",minHeight:"80px"}}/>;
                 const dk = toDateKey(day);
                 const slots = getSlots(dk);
                 const booked = slots.filter(s=>s.name);
@@ -1298,207 +1160,151 @@ export default function TheList() {
         );
       })()}
 
-      {/* DAY COLUMNS */}
-      {view!=="Month" && (<div style={{display:"grid",gridTemplateColumns:("repeat("+getDayCount()+",1fr)"),gap:"1px",background:"#d8d8d6"}}>
-        {dates.map(date=>{
-          const dateKey = toDateKey(date);
-          const slots = getSlots(dateKey);
-          const summary = getDaySummary(dateKey);
-          return (
-            <div key={dateKey} style={{background:"#ffffff",display:"flex",flexDirection:"column"}}>
-              {/* Day header */}
-              <div style={{padding:"12px 14px 10px",borderBottom:"1px solid #ebebea",display:"flex",justifyContent:"space-between",alignItems:"flex-end"}}>
-                <div>
-                  {(()=>{
-                    const sz = view==="Day"?"22px":"16px";
-                    const mo = date.getMonth();
-                    const monthStr = [3,4,5,6].includes(mo)
-                      ? date.toLocaleDateString("en-US",{month:"long",day:"numeric"})
-                      : date.toLocaleDateString("en-US",{month:"short",day:"numeric"});
-                    const wdStr = isToday(date)?"Today":date.toLocaleDateString("en-US",{weekday:"short"});
-                    return (<>
-                      <div style={{fontSize:sz,color:isToday(date)?"#c9893a":"#b89a5a",lineHeight:1.25}}>{wdStr}</div>
-                      <div style={{fontSize:sz,color:"#1a1a1a",lineHeight:1.25}}>{monthStr}</div>
-                      {getHolidayForDate(dateKey)&&<div style={{fontSize:"9px",color:"#a07830",letterSpacing:"0.08em",textTransform:"uppercase",marginTop:"3px"}}>{getHolidayForDate(dateKey)}</div>}
-                    </>);
-                  })()}
+      {view!=="Month" && (
+        <div style={{display:"grid",gridTemplateColumns:("repeat("+getDayCount()+",1fr)"),gap:"1px",background:"#d8d8d6"}}>
+          {dates.map(date=>{
+            const dateKey = toDateKey(date);
+            const slots = getSlots(dateKey);
+            const summary = getDaySummary(dateKey);
+            return (
+              <div key={dateKey} style={{background:"#ffffff",display:"flex",flexDirection:"column"}}>
+                <div style={{padding:"12px 14px 10px",borderBottom:"1px solid #ebebea",display:"flex",justifyContent:"space-between",alignItems:"flex-end"}}>
+                  <div>
+                    {(()=>{
+                      const sz = view==="Day"?"22px":"16px";
+                      const mo = date.getMonth();
+                      const monthStr = [3,4,5,6].includes(mo)
+                        ? date.toLocaleDateString("en-US",{month:"long",day:"numeric"})
+                        : date.toLocaleDateString("en-US",{month:"short",day:"numeric"});
+                      const wdStr = isToday(date)?"Today":date.toLocaleDateString("en-US",{weekday:"short"});
+                      return (
+                        <div>
+                          <div style={{fontSize:sz,color:isToday(date)?"#c9893a":"#b89a5a",lineHeight:1.25}}>{wdStr}</div>
+                          <div style={{fontSize:sz,color:"#1a1a1a",lineHeight:1.25}}>{monthStr}</div>
+                          {getHolidayForDate(dateKey)&&<div style={{fontSize:"9px",color:"#a07830",letterSpacing:"0.08em",textTransform:"uppercase",marginTop:"3px"}}>{getHolidayForDate(dateKey)}</div>}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                </div>
+                <div style={{flex:1,padding:"6px 0"}}>
+                  {slots.map((slot,idx)=>{
+                    const isEditing = editingCell&&editingCell.dateKey===dateKey&&editingCell.idx===idx;
+                    const filled = !!slot.name;
+                    const wasRemoved = recentlyRemoved[(dateKey+"-"+idx)];
+                    const isSwiped = swipedSlot===(dateKey+"-"+idx);
+                    const rowKey = (dateKey+"-"+idx);
+                    return (
+                      <div key={rowKey} style={{position:"relative",overflow:"hidden",borderBottom:"1px solid #efefed"}}>
+                        {filled && (
+                          <div style={{position:"absolute",right:0,top:0,bottom:0,width:"160px",display:"flex",alignItems:"stretch",opacity:isSwiped?1:0,pointerEvents:isSwiped?"auto":"none",transition:"opacity 0.2s"}}>
+                            <button onClick={()=>{
+                              setSwipedSlot(null);
+                              if(slot.groupId){const gs=getSlots(dateKey).filter(s=>s.groupId===slot.groupId&&s.name);if(gs.length>1){setGroupConfirm({action:'reschedule',dateKey,idx,name:slot.name,groupId:slot.groupId});return;}}
+                              setReassignMode({client:{name:slot.name,price:slot.price,recurWeeks:slot.recurWeeks},currentDateKey:dateKey,remainingConflicts:[]});
+                              jumpToDate(dateKey);
+                            }} style={{flex:1,background:"#2a6a9a",border:"none",color:"#fff",fontSize:"11px",letterSpacing:"0.08em",textTransform:"uppercase",cursor:"pointer",fontFamily:"inherit"}}>Move</button>
+                            <button onClick={()=>requestRemoveSlot(dateKey,idx)} style={{flex:1,background:"#c0392b",border:"none",color:"#fff",fontSize:"11px",letterSpacing:"0.08em",textTransform:"uppercase",cursor:"pointer",fontFamily:"inherit"}}>Cancel</button>
+                          </div>
+                        )}
+                        <div
+                          style={{display:"flex",alignItems:"center",padding:"0 14px",height:"46px",background:slot.blocked?"#f4f4f2":wasRemoved?"#fff0ee":slot.done?"#f4faf4":isEditing?"#f8f8f6":filled?"#fcfcfa":"transparent",transition:"transform 0.2s, background 0.3s",transform:isSwiped?"translateX(-160px)":"translateX(0)",position:"relative",opacity:slot.blocked?0.6:1}}
+                          onTouchStart={e=>handleTouchStart(e,dateKey,idx)}
+                          onTouchEnd={e=>handleTouchEnd(e,dateKey,idx)}
+                        >
+                          {wasRemoved&&<div style={{position:"absolute",left:0,top:0,bottom:0,width:"3px",background:"#c0392b"}}/>}
+                          {slot.groupId&&!wasRemoved&&(()=>{
+                            const daySlots = getSlots(dateKey);
+                            const gSlots = daySlots.map((s,i)=>({...s,i})).filter(s=>s.groupId===slot.groupId&&s.name);
+                            const first = gSlots[0] && gSlots[0].i === idx;
+                            const last = gSlots[gSlots.length-1] && gSlots[gSlots.length-1].i === idx;
+                            const inGroup = gSlots.some(s=>s.i===idx);
+                            if (!inGroup) return null;
+                            return (
+                              <div style={{position:"absolute",left:0,top:first?"50%":"0",bottom:last?"50%":"0",width:"3px",background:"#a07830",borderRadius:first?"3px 3px 0 0":last?"0 0 3px 3px":"0"}}/>
+                            );
+                          })()}
+                          <button onClick={()=>handleCheckoff(dateKey,idx)} style={{width:"18px",height:"18px",borderRadius:"50%",border:(slot.done?"1.5px solid #2a7a2a":filled?"1.5px solid #aaaaaa":"1.5px solid #dddddd"),background:slot.done?"#2a7a2a":"transparent",cursor:filled?"pointer":"default",flexShrink:0,marginRight:"10px",display:"flex",alignItems:"center",justifyContent:"center",transition:"all 0.15s"}}>
+                            {slot.done&&<span style={{color:"#fff",fontSize:"10px",lineHeight:1}}>✓</span>}
+                          </button>
+                          <div style={{fontSize:"12px",color:filled?"#c9a96e":"#2e2e2e",width:"40px",flexShrink:0,fontVariantNumeric:"tabular-nums",letterSpacing:"0.02em"}}>
+                            {slot.time}
+                          </div>
+                          {slot.recurWeeks&&!isEditing&&(
+                            <div onClick={()=>filled&&openClientProfile(slot.name)} style={{fontSize:"9px",color:slot.isException?"#a07830":"#6a8aaa",marginRight:"6px",flexShrink:0,letterSpacing:"0.05em",cursor:filled?"pointer":"default"}}>
+                              ↺{slot.recurWeeks===1?"w":(slot.recurWeeks+"w")}{slot.isException?"*":""}
+                            </div>
+                          )}
+                          {slot.blocked ? (
+                            <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                              <span style={{fontSize:"12px",color:"#aaa",fontStyle:"italic",letterSpacing:"0.05em"}}>{slot.blockLabel||"Blocked"}</span>
+                              <span style={{fontSize:"9px",color:"#ccc",letterSpacing:"0.1em",textTransform:"uppercase"}}>swipe to unblock</span>
+                            </div>
+                          ) : reassignMode&&!filled&&reassignMode.currentDateKey===dateKey ? (
+                            <div onClick={()=>handleReassignSlotTap(dateKey,idx)} style={{flex:1,fontSize:"13px",color:"#2a7a2a",cursor:"pointer",padding:"0 2px"}}>
+                              tap to place
+                            </div>
+                          ) : (
+                            <div style={{flex:1,display:"flex",alignItems:"center",gap:"4px"}}>
+                              {isEditing && slot.name && capitalizeFirst(editValues.name.trim())!==slot.name && editValues.name && (
+                                <div style={{position:"absolute",top:"2px",left:"70px",fontSize:"9px",color:"#c0392b"}}>⚠ Replacing {slot.name}</div>
+                              )}
+                              <input
+                                value={isEditing ? editValues.name : (wasRemoved?"":slot.name)}
+                                readOnly={!isEditing}
+                                onFocus={()=>{ if(!isEditing) startEdit(dateKey,idx); }}
+                                onChange={e=>{ if(isEditing) setEditValues(v=>({...v,name:e.target.value})); }}
+                                onKeyDown={e=>{ if(isEditing) handleKeyDown(e,dateKey,idx); }}
+                                onBlur={e=>{ if(isEditing) handleBlur(e); }}
+                                onMouseDown={()=>{ if(filled&&!isEditing) startLongPress(slot.name); }}
+                                onMouseUp={cancelLongPress}
+                                onTouchStart={()=>{ if(filled&&!isEditing) startLongPress(slot.name); }}
+                                onTouchEnd={cancelLongPress}
+                                onTouchMove={cancelLongPress}
+                                placeholder=""
+                                data-rowkey={rowKey}
+                                style={{flex:1,fontSize:"13px",color:wasRemoved?"#c0392b":slot.done?"#2a6a2a":filled?"#1a1a1a":"#999",textDecoration:slot.done?"line-through":"none",background:isEditing?"#efefed":"transparent",border:"none",outline:"none",padding:isEditing?"4px 6px":"0 2px",borderRadius:isEditing?"4px":"0",fontFamily:"Georgia,serif",cursor:isEditing?"text":"pointer",caretColor:isEditing?"auto":"transparent",WebkitUserSelect:isEditing?"text":"none",transition:"background 0.1s, padding 0.1s"}}
+                              />
+                              {!isEditing && (
+                                <div style={{display:"flex",alignItems:"center",gap:"6px",flexShrink:0}}>
+                                  {filled&&slot.price&&<span style={{fontSize:"12px",color:slot.done?"#3a5a3a":"#a07830"}}>{slot.price}</span>}
+                                  {filled&&(
+                                    <button onClick={e=>{
+                                      e.stopPropagation();
+                                      if(slot.groupId){const allSlots=getSlots(dateKey);const gSlots=allSlots.map((s,i)=>({...s,i})).filter(s=>s.groupId===slot.groupId&&s.name);if(gSlots.length>1){setGroupRecurModal({dateKey,idx,slot,groupSlots:gSlots,weeks:null});return;}}
+                                      setRecurringModal({dateKey,idx,slot});
+                                    }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 4px",color:slot.recurWeeks?"#4a8a9a":"#ccc",fontSize:"13px",lineHeight:1}}>↺</button>
+                                  )}
+                                </div>
+                              )}
+                              {isEditing && (
+                                <input value={editValues.price} onChange={e=>setEditValues(v=>({...v,price:e.target.value}))} onKeyDown={e=>handleKeyDown(e,dateKey,idx)} onBlur={handleBlur} data-rowkey={rowKey} placeholder="$" style={{width:"52px",fontSize:"13px",color:"#1a1a1a",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"4px",outline:"none",padding:"2px 5px",fontFamily:"Georgia,serif"}} />
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {addSlotDay===dateKey ? (
+                    <div style={{display:"flex",gap:"6px",padding:"10px 14px",alignItems:"center"}}>
+                      <input autoFocus value={newSlotTime} onChange={e=>setNewSlotTime(e.target.value)}
+                        onKeyDown={e=>{if(e.key==="Enter")addCustomSlot(dateKey);if(e.key==="Escape")setAddSlotDay(null);}}
+                        placeholder="9:47" style={{...inputStyle,width:"72px"}}/>
+                      <button onClick={()=>addCustomSlot(dateKey)} style={actionBtn("#c9a96e","#0f0f0f")}>Add</button>
+                      <button onClick={()=>setAddSlotDay(null)} style={actionBtn("#1a1a1a","#555")}>Cancel</button>
+                    </div>
+                  ) : (
+                    <button onClick={()=>setAddSlotDay(dateKey)} style={{display:"block",width:"100%",padding:"11px 14px",background:"none",border:"none",color:"#ddd",fontSize:"10px",letterSpacing:"0.15em",textTransform:"uppercase",cursor:"pointer",textAlign:"left",fontFamily:"inherit"}}
+                      onMouseEnter={e=>e.target.style.color="#444"} onMouseLeave={e=>e.target.style.color="#222"}>
+                      + Add slot
+                    </button>
+                  )}
                 </div>
               </div>
-
-
-
-              <div style={{flex:1,padding:"6px 0"}}>
-                {slots.map((slot,idx)=>{
-                  const isEditing = editingCell&&editingCell.dateKey===dateKey&&editingCell.idx===idx;
-                  const filled = !!slot.name;
-                  const wasRemoved = recentlyRemoved[(dateKey+"-"+idx)];
-                  const isSwiped = swipedSlot===(dateKey+"-"+idx);
-                  const rowKey = (dateKey+"-"+idx);
-                  return (
-                    <div key={rowKey} style={{position:"relative",overflow:"hidden",borderBottom:"1px solid #efefed"}}>
-                      {/* Swipe reveal — Reschedule + Cancel */}
-                      {filled && (
-                        <div style={{position:"absolute",right:0,top:0,bottom:0,width:"160px",display:"flex",alignItems:"stretch",opacity:isSwiped?1:0,pointerEvents:isSwiped?"auto":"none",transition:"opacity 0.2s"}}>
-                          <button onClick={()=>{
-                            setSwipedSlot(null);
-                            if(slot.groupId){
-                              const gs=getSlots(dateKey).filter(s=>s.groupId===slot.groupId&&s.name);
-                              if(gs.length>1){setGroupConfirm({action:'reschedule',dateKey,idx,name:slot.name,groupId:slot.groupId});return;}
-                            }
-                            setReassignMode({client:{name:slot.name,price:slot.price,recurWeeks:slot.recurWeeks},currentDateKey:dateKey,remainingConflicts:[]});
-                            jumpToDate(dateKey);
-                          }} style={{flex:1,background:"#2a6a9a",border:"none",color:"#fff",fontSize:"11px",letterSpacing:"0.08em",textTransform:"uppercase",cursor:"pointer",fontFamily:"inherit"}}>Move</button>
-                          <button onClick={()=>requestRemoveSlot(dateKey,idx)} style={{flex:1,background:"#c0392b",border:"none",color:"#fff",fontSize:"11px",letterSpacing:"0.08em",textTransform:"uppercase",cursor:"pointer",fontFamily:"inherit"}}>Cancel</button>
-                        </div>
-                      )}
-
-                      <div
-                        style={{display:"flex",alignItems:"center",padding:"0 14px",height:"46px",background:slot.blocked?"#f4f4f2":wasRemoved?"#fff0ee":slot.done?"#f4faf4":isEditing?"#f8f8f6":filled?"#fcfcfa":"transparent",transition:"transform 0.2s, background 0.3s",transform:isSwiped?"translateX(-160px)":"translateX(0)",position:"relative",opacity:slot.blocked?0.6:1}}
-                        onTouchStart={e=>handleTouchStart(e,dateKey,idx)}
-                        onTouchEnd={e=>handleTouchEnd(e,dateKey,idx)}
-                      >
-                        {wasRemoved&&<div style={{position:"absolute",left:0,top:0,bottom:0,width:"3px",background:"#c0392b"}}/>}
-                        {slot.groupId&&!wasRemoved&&(()=>{
-                          const daySlots = getSlots(dateKey);
-                          const gSlots = daySlots.map((s,i)=>({...s,i})).filter(s=>s.groupId===slot.groupId&&s.name);
-                          const first = gSlots[0] && gSlots[0].i === idx;
-                          const last = gSlots[gSlots.length-1] && gSlots[gSlots.length-1].i === idx;
-                          const inGroup = gSlots.some(s=>s.i===idx);
-                          if (!inGroup) return null;
-                          return (
-                            <div style={{
-                              position:"absolute",left:0,
-                              top: first ? "50%" : "0",
-                              bottom: last ? "50%" : "0",
-                              width:"3px",background:"#a07830",borderRadius: first?"3px 3px 0 0": last?"0 0 3px 3px":"0"
-                            }}/>
-                          );
-                        })()}
-
-                        {/* Checkoff button */}
-                        <button
-                          onClick={()=>handleCheckoff(dateKey,idx)}
-                          style={{width:"18px",height:"18px",borderRadius:"50%",border:(slot.done?"1.5px solid #2a7a2a":filled?"1.5px solid #aaaaaa":"1.5px solid #dddddd"),background:slot.done?"#2a7a2a":"transparent",cursor:filled?"pointer":"default",flexShrink:0,marginRight:"10px",display:"flex",alignItems:"center",justifyContent:"center",transition:"all 0.15s"}}
-                        >
-                          {slot.done&&<span style={{color:"#fff",fontSize:"10px",lineHeight:1}}>✓</span>}
-                        </button>
-
-                        {/* Time */}
-                        <div style={{fontSize:"12px",color:filled?"#c9a96e":"#2e2e2e",width:"40px",flexShrink:0,fontVariantNumeric:"tabular-nums",letterSpacing:"0.02em"}}>
-                          {slot.time}
-                        </div>
-
-                        {/* Recurring badge */}
-                        {slot.recurWeeks&&!isEditing&&(
-                          <div
-                            onClick={()=>filled&&openClientProfile(slot.name)}
-                            style={{fontSize:"9px",color:slot.isException?"#a07830":"#6a8aaa",marginRight:"6px",flexShrink:0,letterSpacing:"0.05em",cursor:filled?"pointer":"default"}}
-                          >
-                            ↺{slot.recurWeeks===1?"w":(slot.recurWeeks+"w")}{slot.isException?"*":""}
-                          </div>
-                        )}
-
-                        {slot.blocked ? (
-                          <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-                            <span style={{fontSize:"12px",color:"#aaa",fontStyle:"italic",letterSpacing:"0.05em"}}>{slot.blockLabel||"Blocked"}</span>
-                            <span style={{fontSize:"9px",color:"#ccc",letterSpacing:"0.1em",textTransform:"uppercase"}}>swipe to unblock</span>
-                          </div>
-                        ) : reassignMode&&!filled&&reassignMode.currentDateKey===dateKey ? (
-                          <div onClick={()=>handleReassignSlotTap(dateKey,idx)} style={{flex:1,fontSize:"13px",color:"#2a7a2a",cursor:"pointer",padding:"0 2px"}}>
-                            tap to place
-                          </div>
-                        ) : (
-                          <div style={{flex:1,display:"flex",alignItems:"center",gap:"4px"}}>
-                            {isEditing && slot.name && capitalizeFirst(editValues.name.trim())!==slot.name && editValues.name && (
-                              <div style={{position:"absolute",top:"2px",left:"70px",fontSize:"9px",color:"#c0392b"}}>⚠ Replacing {slot.name}</div>
-                            )}
-                            <input
-                              value={isEditing ? editValues.name : (wasRemoved?"":slot.name)}
-                              readOnly={!isEditing}
-                              onFocus={()=>{ if(!isEditing) startEdit(dateKey,idx); }}
-                              onChange={e=>{ if(isEditing) setEditValues(v=>({...v,name:e.target.value})); }}
-                              onKeyDown={e=>{ if(isEditing) handleKeyDown(e,dateKey,idx); }}
-                              onBlur={e=>{ if(isEditing) handleBlur(e); }}
-                              onMouseDown={()=>{ if(filled&&!isEditing) startLongPress(slot.name); }}
-                              onMouseUp={cancelLongPress}
-                              onTouchStart={()=>{ if(filled&&!isEditing) startLongPress(slot.name); }}
-                              onTouchEnd={cancelLongPress}
-                              onTouchMove={cancelLongPress}
-                              placeholder=""
-                              data-rowkey={rowKey}
-                              style={{
-                                flex:1,
-                                fontSize:"13px",
-                                color:wasRemoved?"#c0392b":slot.done?"#2a6a2a":filled?"#1a1a1a":"#999",
-                                textDecoration:slot.done?"line-through":"none",
-                                background: isEditing?"#efefed":"transparent",
-                                border:"none",
-                                outline:"none",
-                                padding: isEditing?"4px 6px":"0 2px",
-                                borderRadius: isEditing?"4px":"0",
-                                fontFamily:"Georgia,serif",
-                                cursor:isEditing?"text":"pointer",
-                                caretColor: isEditing?"auto":"transparent",
-                                WebkitUserSelect: isEditing?"text":"none",
-                                transition:"background 0.1s, padding 0.1s",
-                              }}
-                            />
-                            {(!isEditing) && (
-                              <div style={{display:"flex",alignItems:"center",gap:"6px",flexShrink:0}}>
-                                {filled&&slot.price&&<span style={{fontSize:"12px",color:slot.done?"#3a5a3a":"#a07830"}}>{slot.price}</span>}
-                                {filled&&(
-                                  <button
-                                    onClick={e=>{
-                                      e.stopPropagation();
-                                      if(slot.groupId){
-                                        const allSlots=getSlots(dateKey);
-                                        const gSlots=allSlots.map((s,i)=>({...s,i})).filter(s=>s.groupId===slot.groupId&&s.name);
-                                        if(gSlots.length>1){setGroupRecurModal({dateKey,idx,slot,groupSlots:gSlots,weeks:null});return;}
-                                      }
-                                      setRecurringModal({dateKey,idx,slot});
-                                    }}
-                                    style={{background:"none",border:"none",cursor:"pointer",padding:"2px 4px",color:slot.recurWeeks?"#4a8a9a":"#ccc",fontSize:"13px",lineHeight:1}}
-                                  >↺</button>
-                                )}
-                              </div>
-                            )}
-                            {isEditing && (
-                              <input
-                                value={editValues.price}
-                                onChange={e=>setEditValues(v=>({...v,price:e.target.value}))}
-                                onKeyDown={e=>handleKeyDown(e,dateKey,idx)}
-                                onBlur={handleBlur}
-                                data-rowkey={rowKey}
-                                placeholder="$"
-                                style={{width:"52px",fontSize:"13px",color:"#1a1a1a",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"4px",outline:"none",padding:"2px 5px",fontFamily:"Georgia,serif"}}
-                              />
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-
-                {addSlotDay===dateKey?(
-                  <div style={{display:"flex",gap:"6px",padding:"10px 14px",alignItems:"center"}}>
-                    <input autoFocus value={newSlotTime} onChange={e=>setNewSlotTime(e.target.value)}
-                      onKeyDown={e=>{if(e.key==="Enter")addCustomSlot(dateKey);if(e.key==="Escape")setAddSlotDay(null);}}
-                      placeholder="9:47" style={{...inputStyle,width:"72px"}}/>
-                    <button onClick={()=>addCustomSlot(dateKey)} style={actionBtn("#c9a96e","#0f0f0f")}>Add</button>
-                    <button onClick={()=>setAddSlotDay(null)} style={actionBtn("#1a1a1a","#555")}>Cancel</button>
-                  </div>
-                ):(
-                  <button onClick={()=>setAddSlotDay(dateKey)} style={{display:"block",width:"100%",padding:"11px 14px",background:"none",border:"none",color:"#ddd",fontSize:"10px",letterSpacing:"0.15em",textTransform:"uppercase",cursor:"pointer",textAlign:"left",fontFamily:"inherit"}}
-                    onMouseEnter={e=>e.target.style.color="#444"} onMouseLeave={e=>e.target.style.color="#222"}>
-                    + Add slot
-                  </button>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
       )}
     </div>
   );
