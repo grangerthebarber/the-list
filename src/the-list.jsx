@@ -238,20 +238,12 @@ export default function TheList() {
     setHistory(prev=>prev.filter(h=>h.id!==entry.id));
   };
 
-  const nameInputFocusRef = useRef(null);
-
   const startEdit = (dateKey, idx) => {
     const slot = getSlots(dateKey)[idx];
     editingRef.current = {dateKey,idx};
     setEditingCell({dateKey,idx});
     setEditValues({name:slot.name||"",price:slot.price||""});
     setSwipedSlot(null);
-    // Focus input after render — critical for iPad keyboard
-    setTimeout(()=>{
-      if (nameInputFocusRef.current) {
-        nameInputFocusRef.current.focus();
-      }
-    }, 50);
   };
 
   const doCommit = useCallback((dateKey, idx, values) => {
@@ -1437,7 +1429,6 @@ export default function TheList() {
                             )}
                             <div style={{display:"flex",gap:"5px",alignItems:"center"}}>
                               <input
-                                ref={editingCell?.dateKey===dateKey&&editingCell?.idx===idx ? nameInputFocusRef : null}
                                 autoFocus
                                 data-rowkey={rowKey}
                                 value={editValues.name}
@@ -1455,7 +1446,17 @@ export default function TheList() {
                         ) : (
                           <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer",padding:"0 2px"}}>
                             <span
-                              onClick={()=>{
+                              onClick={(e)=>{
+                                e.preventDefault();
+                                cancelLongPress();
+                                if (reassignMode && !filled && reassignMode.currentDateKey===dateKey) {
+                                  handleReassignSlotTap(dateKey,idx);
+                                } else {
+                                  startEdit(dateKey,idx);
+                                }
+                              }}
+                              onTouchEnd={(e)=>{
+                                e.preventDefault();
                                 cancelLongPress();
                                 if (reassignMode && !filled && reassignMode.currentDateKey===dateKey) {
                                   handleReassignSlotTap(dateKey,idx);
