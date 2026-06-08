@@ -95,7 +95,7 @@ export default function TheList() {
   const [reassignMode, setReassignMode] = useState(null); // {client:{name,price,recurWeeks}, currentDateKey, remainingConflicts}
   const [reassignApplyAll, setReassignApplyAll] = useState(null);
   const [groupConfirm, setGroupConfirm] = useState(null);
-  const [groupRecurModal, setGroupRecurModal] = useState(null); // {dateKey, idx, slot, groupSlots, weeks} // {action:'cancel'|'reschedule', dateKey, idx, name, groupId} // {altTime, remainingConflicts, client}
+  const [groupRecurModal, setGroupRecurModal] = useState(null); // {dateKey, idx, slot, groupSlots, recurCount, weeks}
   const [clientMemory, setClientMemory] = useState(() => loadFromStorage("tl_clients", []));
   const [customHolidays, setCustomHolidays] = useState(() => loadFromStorage("tl_holidays", [])); // [{dateKey, name, yearly}]
   const [holidayModal, setHolidayModal] = useState(null); // {dateKey} or null
@@ -105,7 +105,6 @@ export default function TheList() {
   const [blockLabel, setBlockLabel] = useState("Lunch");
   const [clientProfile, setClientProfile] = useState(null); // {name, price, recurWeeks, usualTime}
   const longPressTimer = useRef(null);
-  const hiddenInputRef = useRef(null);
   const [monthLongPress, setMonthLongPress] = useState(null); // {dateKey, day}
 
   const editingRef = useRef(null);
@@ -241,12 +240,15 @@ export default function TheList() {
 
   const startEdit = (dateKey, idx) => {
     const slot = getSlots(dateKey)[idx];
-    // Focus hidden input first to signal to iOS that keyboard should open
-    if (hiddenInputRef.current) hiddenInputRef.current.focus();
     editingRef.current = {dateKey,idx};
     setEditingCell({dateKey,idx});
     setEditValues({name:slot.name||"",price:slot.price||""});
     setSwipedSlot(null);
+    // Use requestAnimationFrame to focus after React renders the input
+    requestAnimationFrame(()=>{
+      const input = document.getElementById(`input-${dateKey}-${idx}`);
+      if (input) input.focus();
+    });
   };
 
   const doCommit = useCallback((dateKey, idx, values) => {
@@ -255,12 +257,6 @@ export default function TheList() {
     const newName = capitalizeFirst((values.name||"").trim());
     const newPrice = (values.price||"").trim();
     if (newName!==prev.name || newPrice!==prev.price) {
-      // Check if we're putting a new name into a slot that already has someone different
-      if (newName && prev.name && newName!==prev.name) {
-        // Editing existing — just a rename, no conflict
-      } else if (newName && !prev.name) {
-        // Placing someone new — no conflict since slot was empty
-      }
       slots[idx] = {...prev,name:newName,price:newPrice};
       setSlots(dateKey,slots);
       if (prev.name&&!newName) addHistoryEntry({type:"removed",time:prev.time,name:prev.name,dateKey});
@@ -723,12 +719,7 @@ export default function TheList() {
   return (
     <div style={{minHeight:"100vh",background:"#ffffff",fontFamily:"'Georgia',serif",color:"#1a1a1a",paddingTop:reassignMode?"52px":"0"}}
       onClick={()=>swipedSlot&&setSwipedSlot(null)}>
-      {/* Hidden input to trigger iPad keyboard reliably */}
-      <input
-        ref={hiddenInputRef}
-        style={{position:"fixed",top:"-200px",left:0,width:"1px",height:"1px",opacity:0,pointerEvents:"none"}}
-        readOnly
-      />
+
 
       {/* MONTH LONG PRESS MODAL */}
       {monthLongPress && (
@@ -1250,17 +1241,10 @@ export default function TheList() {
           <button onClick={()=>{
             if(view==="Month"){const d=new Date(baseDate);d.setMonth(d.getMonth()-1);setBaseDate(d);}
             else setBaseDate(d=>addDays(d,-1));
-          }} style={{...navBtn,width:"36px",textAlign:"center",justifyContent:"center"}}>‹</button>
+          }} style={navBtn}>‹</button>
           <button onClick={()=>setBaseDate(new Date())} style={{...navBtn,fontSize:"9px",letterSpacing:"0.1em",padding:"0 12px"}}>TODAY</button>
           <button onClick={()=>{
             if(view==="Month"){const d=new Date(baseDate);d.setMonth(d.getMonth()+1);setBaseDate(d);}
-            else if(view==="Week"){
-              const d=new Date(baseDate);
-              const day=d.getDay();
-              const diff=day===0?-6:1-day;
-              const thisMon=addDays(d,diff);
-              setBaseDate(addDays(thisMon,7));
-            }
             else setBaseDate(d=>addDays(d,1));
           }} style={navBtn}>›</button>
           {view!=="Month"&&(
@@ -1432,14 +1416,17 @@ export default function TheList() {
                             )}
                             <div style={{display:"flex",gap:"5px",alignItems:"center"}}>
                               <input
-                                autoFocus
+                                id={`input-${dateKey}-${idx}`}
                                 data-rowkey={rowKey}
                                 value={editValues.name}
                                 onChange={e=>setEditValues(v=>({...v,name:e.target.value}))}
                                 onKeyDown={e=>handleKeyDown(e,dateKey,idx)}
+                                onFocus={e=>{ editingRef.current={dateKey,idx}; }}
                                 onBlur={handleBlur}
                                 placeholder="Name"
-                                style={inputStyle}/>
+                                style={inputStyle}
+                                autoComplete="off"
+                              />
                               <input data-rowkey={rowKey} value={editValues.price}
                                 onChange={e=>setEditValues(v=>({...v,price:e.target.value}))}
                                 onKeyDown={e=>handleKeyDown(e,dateKey,idx)}
@@ -1450,16 +1437,6 @@ export default function TheList() {
                           <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer",padding:"0 2px"}}>
                             <span
                               onClick={(e)=>{
-                                e.preventDefault();
-                                cancelLongPress();
-                                if (reassignMode && !filled && reassignMode.currentDateKey===dateKey) {
-                                  handleReassignSlotTap(dateKey,idx);
-                                } else {
-                                  startEdit(dateKey,idx);
-                                }
-                              }}
-                              onTouchEnd={(e)=>{
-                                e.preventDefault();
                                 cancelLongPress();
                                 if (reassignMode && !filled && reassignMode.currentDateKey===dateKey) {
                                   handleReassignSlotTap(dateKey,idx);
@@ -1472,13 +1449,17 @@ export default function TheList() {
                               onMouseLeave={cancelLongPress}
                               onTouchStart={(e)=>{
                                 if(filled){
-                                  // Long press for filled slots
                                   longPressTimer.current = setTimeout(()=>openClientProfile(slot.name), 600);
                                 }
-                                // Don't preventDefault — let click fire naturally for empty slots
                               }}
                               onTouchEnd={(e)=>{
+                                e.preventDefault();
                                 cancelLongPress();
+                                if (reassignMode && !filled && reassignMode.currentDateKey===dateKey) {
+                                  handleReassignSlotTap(dateKey,idx);
+                                } else {
+                                  startEdit(dateKey,idx);
+                                }
                               }}
                               onTouchMove={cancelLongPress}
                               style={{fontSize:"13px",color:reassignMode&&!filled&&reassignMode.currentDateKey===dateKey?"#2a7a2a":wasRemoved?"#c0392b":slot.done?"#2a6a2a":filled?"#1a1a1a":"#ccc",fontStyle:filled?"normal":"italic",textDecoration:slot.done?"line-through":"none",flex:1,cursor:"pointer",userSelect:"none"}}
