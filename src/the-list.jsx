@@ -244,11 +244,6 @@ export default function TheList() {
     setEditingCell({dateKey,idx});
     setEditValues({name:slot.name||"",price:slot.price||""});
     setSwipedSlot(null);
-    // Use requestAnimationFrame to focus after React renders the input
-    requestAnimationFrame(()=>{
-      const input = document.getElementById(`input-${dateKey}-${idx}`);
-      if (input) input.focus();
-    });
   };
 
   const doCommit = useCallback((dateKey, idx, values) => {
@@ -1407,87 +1402,76 @@ export default function TheList() {
                             <span style={{fontSize:"12px",color:"#aaa",fontStyle:"italic",letterSpacing:"0.05em"}}>{slot.blockLabel||"Blocked"}</span>
                             <span style={{fontSize:"9px",color:"#ccc",letterSpacing:"0.1em",textTransform:"uppercase"}}>swipe to unblock</span>
                           </div>
-                        ) : isEditing ? (
-                          <div style={{display:"flex",flex:1,flexDirection:"column",gap:"3px",justifyContent:"center"}}>
-                            {slot.name && editValues.name && capitalizeFirst(editValues.name.trim())!==slot.name && (
-                              <div style={{fontSize:"10px",color:"#c0392b",letterSpacing:"0.02em",paddingLeft:"2px"}}>
-                                ⚠ Replacing {slot.name}
-                              </div>
-                            )}
-                            <div style={{display:"flex",gap:"5px",alignItems:"center"}}>
-                              <input
-                                id={`input-${dateKey}-${idx}`}
-                                data-rowkey={rowKey}
-                                value={editValues.name}
-                                onChange={e=>setEditValues(v=>({...v,name:e.target.value}))}
-                                onKeyDown={e=>handleKeyDown(e,dateKey,idx)}
-                                onFocus={e=>{ editingRef.current={dateKey,idx}; }}
-                                onBlur={handleBlur}
-                                placeholder="Name"
-                                style={inputStyle}
-                                autoComplete="off"
-                              />
-                              <input data-rowkey={rowKey} value={editValues.price}
-                                onChange={e=>setEditValues(v=>({...v,price:e.target.value}))}
-                                onKeyDown={e=>handleKeyDown(e,dateKey,idx)}
-                                onBlur={handleBlur} placeholder="$" style={{...inputStyle,width:"52px"}}/>
-                            </div>
+                        ) : reassignMode&&!filled&&reassignMode.currentDateKey===dateKey ? (
+                          <div onClick={()=>handleReassignSlotTap(dateKey,idx)} style={{flex:1,fontSize:"13px",color:"#2a7a2a",cursor:"pointer",padding:"0 2px"}}>
+                            tap to place
                           </div>
                         ) : (
-                          <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer",padding:"0 2px"}}>
-                            <span
-                              onClick={(e)=>{
-                                cancelLongPress();
-                                if (reassignMode && !filled && reassignMode.currentDateKey===dateKey) {
-                                  handleReassignSlotTap(dateKey,idx);
-                                } else {
-                                  startEdit(dateKey,idx);
-                                }
+                          <div style={{flex:1,display:"flex",alignItems:"center",gap:"4px"}}>
+                            {isEditing && slot.name && capitalizeFirst(editValues.name.trim())!==slot.name && editValues.name && (
+                              <div style={{position:"absolute",top:"2px",left:"70px",fontSize:"9px",color:"#c0392b"}}>⚠ Replacing {slot.name}</div>
+                            )}
+                            <input
+                              value={isEditing ? editValues.name : (wasRemoved?"":slot.name)}
+                              readOnly={!isEditing}
+                              onFocus={()=>{
+                                if(!isEditing) startEdit(dateKey,idx);
                               }}
-                              onMouseDown={()=>{ if(filled) startLongPress(slot.name); }}
+                              onChange={e=>{ if(isEditing) setEditValues(v=>({...v,name:e.target.value})); }}
+                              onKeyDown={e=>{ if(isEditing) handleKeyDown(e,dateKey,idx); }}
+                              onBlur={e=>{ if(isEditing) handleBlur(e); }}
+                              onMouseDown={()=>{ if(filled&&!isEditing) startLongPress(slot.name); }}
                               onMouseUp={cancelLongPress}
-                              onMouseLeave={cancelLongPress}
-                              onTouchStart={(e)=>{
-                                if(filled){
-                                  longPressTimer.current = setTimeout(()=>openClientProfile(slot.name), 600);
-                                }
-                              }}
-                              onTouchEnd={(e)=>{
-                                e.preventDefault();
-                                cancelLongPress();
-                                if (reassignMode && !filled && reassignMode.currentDateKey===dateKey) {
-                                  handleReassignSlotTap(dateKey,idx);
-                                } else {
-                                  startEdit(dateKey,idx);
-                                }
-                              }}
+                              onTouchStart={()=>{ if(filled&&!isEditing) startLongPress(slot.name); }}
+                              onTouchEnd={cancelLongPress}
                               onTouchMove={cancelLongPress}
-                              style={{fontSize:"13px",color:reassignMode&&!filled&&reassignMode.currentDateKey===dateKey?"#2a7a2a":wasRemoved?"#c0392b":slot.done?"#2a6a2a":filled?"#1a1a1a":"#ccc",fontStyle:filled?"normal":"italic",textDecoration:slot.done?"line-through":"none",flex:1,cursor:"pointer",userSelect:"none"}}
-                            >
-                              {wasRemoved?"removed":filled?slot.name:reassignMode&&reassignMode.currentDateKey===dateKey?"tap to place":""}
-                            </span>
-                            <div style={{display:"flex",alignItems:"center",gap:"8px"}}>
-                              {filled&&slot.price&&<span style={{fontSize:"12px",color:slot.done?"#3a5a3a":"#c9a96e"}}>{slot.price}</span>}
-                              {filled&&(
-                                <button
-                                  onClick={()=>{
-                                    if(slot.groupId){
-                                      const allSlots = getSlots(dateKey);
-                                      const gSlots = allSlots.map((s,i)=>({...s,i})).filter(s=>s.groupId===slot.groupId&&s.name);
-                                      if(gSlots.length>1){
-                                        setGroupRecurModal({dateKey,idx,slot,groupSlots:gSlots,weeks:null});
-                                        return;
+                              placeholder={wasRemoved?"removed":""}
+                              data-rowkey={rowKey}
+                              style={{
+                                flex:1,
+                                fontSize:"13px",
+                                color:wasRemoved?"#c0392b":slot.done?"#2a6a2a":filled?"#1a1a1a":"#aaa",
+                                fontStyle:"normal",
+                                textDecoration:slot.done?"line-through":"none",
+                                background:"transparent",
+                                border:"none",
+                                outline:"none",
+                                padding:"0 2px",
+                                fontFamily:"Georgia,serif",
+                                cursor:isEditing?"text":"pointer",
+                                WebkitUserSelect: isEditing?"text":"none",
+                              }}
+                            />
+                            {(!isEditing) && (
+                              <div style={{display:"flex",alignItems:"center",gap:"6px",flexShrink:0}}>
+                                {filled&&slot.price&&<span style={{fontSize:"12px",color:slot.done?"#3a5a3a":"#a07830"}}>{slot.price}</span>}
+                                {filled&&(
+                                  <button
+                                    onClick={e=>{
+                                      e.stopPropagation();
+                                      if(slot.groupId){
+                                        const allSlots=getSlots(dateKey);
+                                        const gSlots=allSlots.map((s,i)=>({...s,i})).filter(s=>s.groupId===slot.groupId&&s.name);
+                                        if(gSlots.length>1){setGroupRecurModal({dateKey,idx,slot,groupSlots:gSlots,weeks:null});return;}
                                       }
-                                    }
-                                    setRecurringModal({dateKey,idx,slot});
-                                  }}
-                                  title="Set recurring"
-                                  style={{background:"none",border:"none",cursor:"pointer",padding:"2px 4px",color:slot.recurWeeks?"#4a8a9a":"#2a2a2a",fontSize:"13px",lineHeight:1,transition:"color 0.15s"}}
-                                  onMouseEnter={e=>e.currentTarget.style.color="#c9a96e"}
-                                  onMouseLeave={e=>e.currentTarget.style.color=slot.recurWeeks?"#4a8a9a":"#2a2a2a"}
-                                >↺</button>
-                              )}
-                            </div>
+                                      setRecurringModal({dateKey,idx,slot});
+                                    }}
+                                    style={{background:"none",border:"none",cursor:"pointer",padding:"2px 4px",color:slot.recurWeeks?"#4a8a9a":"#ccc",fontSize:"13px",lineHeight:1}}
+                                  >↺</button>
+                                )}
+                              </div>
+                            )}
+                            {isEditing && (
+                              <input
+                                value={editValues.price}
+                                onChange={e=>setEditValues(v=>({...v,price:e.target.value}))}
+                                onKeyDown={e=>handleKeyDown(e,dateKey,idx)}
+                                onBlur={handleBlur}
+                                data-rowkey={rowKey}
+                                placeholder="$"
+                                style={{width:"52px",fontSize:"13px",color:"#1a1a1a",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"4px",outline:"none",padding:"2px 5px",fontFamily:"Georgia,serif"}}
+                              />
+                            )}
                           </div>
                         )}
                       </div>
