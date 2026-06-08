@@ -1215,7 +1215,6 @@ export default function TheList() {
                 </div>
               </div>
             ))}
-          </div>
         </div>
       )}
 
