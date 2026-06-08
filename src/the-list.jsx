@@ -105,6 +105,7 @@ export default function TheList() {
   const [blockLabel, setBlockLabel] = useState("Lunch");
   const [clientProfile, setClientProfile] = useState(null); // {name, price, recurWeeks, usualTime}
   const longPressTimer = useRef(null);
+  const hiddenInputRef = useRef(null);
   const [monthLongPress, setMonthLongPress] = useState(null); // {dateKey, day}
 
   const editingRef = useRef(null);
@@ -240,6 +241,8 @@ export default function TheList() {
 
   const startEdit = (dateKey, idx) => {
     const slot = getSlots(dateKey)[idx];
+    // Focus hidden input first to signal to iOS that keyboard should open
+    if (hiddenInputRef.current) hiddenInputRef.current.focus();
     editingRef.current = {dateKey,idx};
     setEditingCell({dateKey,idx});
     setEditValues({name:slot.name||"",price:slot.price||""});
@@ -720,6 +723,12 @@ export default function TheList() {
   return (
     <div style={{minHeight:"100vh",background:"#ffffff",fontFamily:"'Georgia',serif",color:"#1a1a1a",paddingTop:reassignMode?"52px":"0"}}
       onClick={()=>swipedSlot&&setSwipedSlot(null)}>
+      {/* Hidden input to trigger iPad keyboard reliably */}
+      <input
+        ref={hiddenInputRef}
+        style={{position:"fixed",top:"-200px",left:0,width:"1px",height:"1px",opacity:0,pointerEvents:"none"}}
+        readOnly
+      />
 
       {/* MONTH LONG PRESS MODAL */}
       {monthLongPress && (
@@ -1240,14 +1249,6 @@ export default function TheList() {
           )}
           <button onClick={()=>{
             if(view==="Month"){const d=new Date(baseDate);d.setMonth(d.getMonth()-1);setBaseDate(d);}
-            else if(view==="Week"){
-              // Move to Monday of previous week
-              const d=new Date(baseDate);
-              const day=d.getDay();
-              const diff=day===0?-6:1-day; // current Monday
-              const thisMon=addDays(d,diff);
-              setBaseDate(addDays(thisMon,-7));
-            }
             else setBaseDate(d=>addDays(d,-1));
           }} style={{...navBtn,width:"36px",textAlign:"center",justifyContent:"center"}}>‹</button>
           <button onClick={()=>setBaseDate(new Date())} style={{...navBtn,fontSize:"9px",letterSpacing:"0.1em",padding:"0 12px"}}>TODAY</button>
@@ -1299,8 +1300,10 @@ export default function TheList() {
                     style={{background:isT?"#fffbf0":"#ffffff",minHeight:"80px",padding:"6px 8px",cursor:"pointer",borderTop:isT?"2px solid #a07830":"2px solid transparent",transition:"background 0.1s",userSelect:"none"}}
                     onMouseEnter={e=>e.currentTarget.style.background=isT?"#fff8e8":"#f4f4f2"}
                   >
-                    <div style={{fontSize:"13px",color:isT?"#a07830":"#1a1a1a",fontWeight:isT?"bold":"normal",marginBottom:"2px"}}>{day.getDate()}</div>
-                    {getHolidayForDate(dk)&&<div style={{fontSize:"8px",color:"#a07830",letterSpacing:"0.05em",textTransform:"uppercase",marginBottom:"2px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{getHolidayForDate(dk)}</div>}
+                    <div style={{display:"flex",alignItems:"baseline",gap:"5px",marginBottom:"3px"}}>
+                      <div style={{fontSize:"13px",color:isT?"#a07830":"#1a1a1a",fontWeight:isT?"bold":"normal"}}>{day.getDate()}</div>
+                      {getHolidayForDate(dk)&&<div style={{fontSize:"8px",color:"#a07830",letterSpacing:"0.04em",textTransform:"uppercase",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{getHolidayForDate(dk)}</div>}
+                    </div>
                     {booked.slice(0,3).map((s,j)=>(
                       <div key={j} style={{fontSize:"10px",color:s.recurWeeks?"#6a8aaa":"#666",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",marginBottom:"1px",letterSpacing:"0.02em"}}>
                         {s.recurWeeks?"↺ ":""}{s.name}
