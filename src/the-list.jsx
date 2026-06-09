@@ -29,30 +29,6 @@ const OLD_DEFAULT_TIMES_B = [
   "1:13","1:36","1:58","2:21"
 ];
 
-function isOldDefault(slots) {
-  var checkOld=function(old) {
-    if(!slots||slots.length!==old.length) return false;
-    for(var i=0;i<slots.length;i++) { if(slots[i].time!==old[i]) return false; if(slots[i].name) return false; }
-    return true;
-  };
-  return checkOld(OLD_DEFAULT_TIMES_A)||checkOld(OLD_DEFAULT_TIMES_B);
-}
-function migrateSchedules(raw) {
-  var result={}; var keys=Object.keys(raw);
-  for(var i=0;i<keys.length;i++) {
-    var dk=keys[i];
-    if(isOldDefault(raw[dk])) result[dk]=DEFAULT_TIMES.map(function(t){ return {time:t,name:"",price:"",done:false,recurWeeks:null,isCustom:false}; });
-    else result[dk]=raw[dk];
-  }
-  return result;
-}
-
-const OLD_DEFAULT_TIMES = [
-  "6:51","7:13","7:36","7:58",
-  "8:21","8:43","9:06","9:28","9:51","10:13","10:36","10:58",
-  "11:21","11:43","12:06","12:28","12:51",
-  "1:13","1:36","1:58","2:21","2:43","3:06","3:28"
-];
 
 const WEEK_OPTIONS = [1,2,3,4,5,6,7,8];
 
@@ -95,12 +71,15 @@ function friendlyDateTime(time, dateKey) { return time + ", " + friendlyDateLong
 function dayOfWeek(dateKey) { return parseDateKey(dateKey).getDay(); }
 
 function isOldDefault(slots) {
-  if (!slots || slots.length !== OLD_DEFAULT_TIMES.length) return false;
-  for (var i = 0; i < slots.length; i++) {
-    if (slots[i].time !== OLD_DEFAULT_TIMES[i]) return false;
-    if (slots[i].name) return false;
-  }
-  return true;
+  var checkOld = function(old) {
+    if (!slots || slots.length !== old.length) return false;
+    for (var i = 0; i < slots.length; i++) {
+      if (slots[i].time !== old[i]) return false;
+      if (slots[i].name) return false;
+    }
+    return true;
+  };
+  return checkOld(OLD_DEFAULT_TIMES_A) || checkOld(OLD_DEFAULT_TIMES_B);
 }
 
 function migrateSchedules(raw) {
