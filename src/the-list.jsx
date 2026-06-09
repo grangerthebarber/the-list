@@ -52,6 +52,15 @@ function friendlyDateTime(time, dateKey) {
   return time + ", " + friendlyDateLong(dateKey);
 }
 function dayOfWeek(dateKey) { return parseDateKey(dateKey).getDay(); }
+function describeEntry(entry) {
+  if (!entry) return "";
+  var type = entry.type;
+  var label = type==="added"?"Added":type==="removed"?"Removed":type==="edited"?"Edited":type==="recurring_set"?"Set recurring":type==="blocked"?"Blocked":type==="unblocked"?"Unblocked":type==="slot_added"?"Added slot":type==="slot_removed"?"Removed slot":"Changed";
+  var name = entry.name ? (" " + entry.name) : "";
+  var time = entry.time ? (" at " + entry.time) : "";
+  var date = entry.dateKey ? (" · " + friendlyDate(entry.dateKey)) : "";
+  return label + name + time + date;
+}
 
 const VIEWS = ["Day","3-Day","Wknd","Week","Month"];
 
@@ -129,7 +138,9 @@ export default function TheList() {
   const [clientProfile, setClientProfile] = useState(null);
   const [checkoffCalMonth, setCheckoffCalMonth] = useState(null);
   const [editingOccupied, setEditingOccupied] = useState(false);
+  const [undoConfirm, setUndoConfirm] = useState(false);
   const longPressTimer = useRef(null);
+  const checkoffLongPress = useRef(null);
   const [monthLongPress, setMonthLongPress] = useState(null);
 
   const editingRef = useRef(null);
@@ -165,6 +176,7 @@ export default function TheList() {
     }
     return null;
   };
+
   const schedulesRef = useRef(schedules);
   schedulesRef.current = schedules;
 
@@ -191,7 +203,7 @@ export default function TheList() {
 
   const getSlots = useCallback(function(dateKey) {
     var custom = schedulesRef.current[dateKey];
-    if (!custom) return DEFAULT_TIMES.map(function(t){ return {time:t,name:"",price:"",done:false,recurWeeks:null}; });
+    if (!custom) return DEFAULT_TIMES.map(function(t){ return {time:t,name:"",price:"",done:false,recurWeeks:null,isCustom:false}; });
     return custom;
   }, []);
 
@@ -201,11 +213,20 @@ export default function TheList() {
     setHistory(function(prev){ return [{...entry,timestamp:new Date().toLocaleTimeString(),id:Date.now()+Math.random()},...prev].slice(0,200); });
   };
 
+  const getDayTimeRange = function(dateKey) {
+    var slots = getSlots(dateKey);
+    var booked = slots.filter(function(s){ return s.name && !s.blocked; });
+    if (booked.length === 0) return null;
+    var sorted = booked.slice().sort(function(a,b){ return parseTime(a.time)-parseTime(b.time); });
+    if (sorted.length === 1) return sorted[0].time;
+    return sorted[0].time + "–" + sorted[sorted.length-1].time;
+  };
+
   const undoHistoryEntry = function(entry) {
     if (entry.type === "added" || entry.type === "recurring_set") {
       var slots0 = getSlots(entry.dateKey);
       var idx0 = slots0.findIndex(function(s){ return s.time===entry.time&&s.name===entry.name; });
-      if (idx0<0) { alert("Can't undo — "+entry.name+" is no longer at "+entry.time+" on "+friendlyDate(entry.dateKey)+"."); return; }
+      if (idx0<0) { alert("Can't undo — slot no longer matches."); return; }
     }
     if (entry.type === "removed") {
       var slots1 = getSlots(entry.dateKey);
@@ -244,6 +265,10 @@ export default function TheList() {
       var slots5 = [...getSlots(entry.dateKey)];
       var idx5 = slots5.findIndex(function(s){ return s.time===entry.time; });
       if (idx5>=0) { slots5[idx5]={...slots5[idx5],blocked:false,blockLabel:""}; setSlots(entry.dateKey,slots5); }
+    } else if (entry.type === "slot_added") {
+      var slots6 = [...getSlots(entry.dateKey)];
+      var idx6 = slots6.findIndex(function(s){ return s.time===entry.time&&s.isCustom; });
+      if (idx6>=0) { slots6.splice(idx6,1); setSlots(entry.dateKey,slots6); }
     }
     setHistory(function(prev){ return prev.filter(function(h){ return h.id!==entry.id; }); });
   };
@@ -345,6 +370,21 @@ export default function TheList() {
     return slots.some(function(s) {
       return s.time===time && s.name && (!excludeName || s.name.toLowerCase()!==excludeName.toLowerCase());
     });
+  };
+
+  const startCheckoffLongPress = function(dateKey, idx) {
+    checkoffLongPress.current = setTimeout(function() {
+      var slots = [...getSlots(dateKey)];
+      var slot = slots[idx];
+      if (slot.done) {
+        slots[idx] = {...slot, done:false};
+        setSlots(dateKey, slots);
+      }
+    }, 600);
+  };
+
+  const cancelCheckoffLongPress = function() {
+    if (checkoffLongPress.current) { clearTimeout(checkoffLongPress.current); checkoffLongPress.current = null; }
   };
 
   const handleCheckoff = function(dateKey, idx) {
@@ -653,29 +693,38 @@ export default function TheList() {
   };
 
   const addSlotToBeginning = function(dateKey) {
-    var slots = [...getSlots(dateKey)];
-    var existingTimes = slots.map(function(s){ return s.time; });
-    var allTimes = ALL_TIMES;
-    var firstTime = slots.length > 0 ? slots[0].time : DEFAULT_TIMES[0];
-    var firstIdx = allTimes.indexOf(firstTime);
+    var currentSlots = getSlots(dateKey);
+    var existingTimes = currentSlots.map(function(s){ return s.time; });
+    var firstTime = currentSlots.length > 0 ? currentSlots[0].time : DEFAULT_TIMES[0];
+    var firstIdx = ALL_TIMES.indexOf(firstTime);
     if (firstIdx <= 0) return;
-    var newTime = allTimes[firstIdx - 1];
+    var newTime = ALL_TIMES[firstIdx - 1];
     if (existingTimes.includes(newTime)) return;
-    slots.unshift({time:newTime,name:"",price:"",done:false,recurWeeks:null});
-    setSlots(dateKey, slots);
+    var newSlots = [{time:newTime,name:"",price:"",done:false,recurWeeks:null,isCustom:true}].concat(currentSlots);
+    setSlots(dateKey, newSlots);
+    addHistoryEntry({type:"slot_added",time:newTime,dateKey});
   };
 
   const addSlotToEnd = function(dateKey) {
-    var slots = [...getSlots(dateKey)];
-    var existingTimes = slots.map(function(s){ return s.time; });
-    var allTimes = ALL_TIMES;
-    var lastTime = slots.length > 0 ? slots[slots.length-1].time : DEFAULT_TIMES[DEFAULT_TIMES.length-1];
-    var lastIdx = allTimes.indexOf(lastTime);
-    if (lastIdx < 0 || lastIdx >= allTimes.length - 1) return;
-    var newTime = allTimes[lastIdx + 1];
+    var currentSlots = getSlots(dateKey);
+    var existingTimes = currentSlots.map(function(s){ return s.time; });
+    var lastTime = currentSlots.length > 0 ? currentSlots[currentSlots.length-1].time : DEFAULT_TIMES[DEFAULT_TIMES.length-1];
+    var lastIdx = ALL_TIMES.indexOf(lastTime);
+    if (lastIdx < 0 || lastIdx >= ALL_TIMES.length - 1) return;
+    var newTime = ALL_TIMES[lastIdx + 1];
     if (existingTimes.includes(newTime)) return;
-    slots.push({time:newTime,name:"",price:"",done:false,recurWeeks:null});
+    var newSlots = currentSlots.concat([{time:newTime,name:"",price:"",done:false,recurWeeks:null,isCustom:true}]);
+    setSlots(dateKey, newSlots);
+    addHistoryEntry({type:"slot_added",time:newTime,dateKey});
+  };
+
+  const removeCustomSlot = function(dateKey, idx) {
+    var slots = [...getSlots(dateKey)];
+    var slot = slots[idx];
+    slots.splice(idx, 1);
     setSlots(dateKey, slots);
+    addHistoryEntry({type:"slot_removed",time:slot.time,dateKey});
+    setSwipedSlot(null);
   };
 
   const toggleBlockSlot = function(dateKey, idx, label) {
@@ -701,11 +750,14 @@ export default function TheList() {
     if (dx<-50&&touchStart.current.dateKey===dateKey&&touchStart.current.idx===idx) {
       var slots = getSlots(dateKey);
       var slot = slots[idx];
-      if (!slot.name && !slot.blocked) {
+      var isCustomSlot = slot.isCustom || !DEFAULT_TIMES.includes(slot.time);
+      if (slot.blocked) {
+        toggleBlockSlot(dateKey, idx, null);
+      } else if (!slot.name && isCustomSlot) {
+        removeCustomSlot(dateKey, idx);
+      } else if (!slot.name && !isCustomSlot) {
         setBlockLabelModal({dateKey, idx});
         setBlockLabel("Lunch");
-      } else if (slot.blocked) {
-        toggleBlockSlot(dateKey, idx, null);
       } else {
         setSwipedSlot((dateKey+"-"+idx));
       }
@@ -716,6 +768,7 @@ export default function TheList() {
   const dates = getDates();
   const effectiveNextDate = nudgedDate || (checkoffModal && checkoffModal.nextDateKey);
   const nudgeConflict = effectiveNextDate ? isSlotTaken(effectiveNextDate, checkoffModal && checkoffModal.slot && checkoffModal.slot.time, checkoffModal && checkoffModal.slot && checkoffModal.slot.name) : false;
+  const lastHistoryEntry = history.length > 0 ? history[0] : null;
 
   const renderCheckoffCalendar = function() {
     if (!checkoffModal || !checkoffCalMonth) return null;
@@ -723,7 +776,6 @@ export default function TheList() {
     var today = new Date();
     var sixMonthsOut = new Date();
     sixMonthsOut.setMonth(sixMonthsOut.getMonth()+6);
-
     var year = checkoffCalMonth.getFullYear();
     var month = checkoffCalMonth.getMonth();
     var firstDay = new Date(year, month, 1);
@@ -732,11 +784,9 @@ export default function TheList() {
     var cells = [];
     for (var i=0; i<startDow; i++) cells.push(null);
     for (var d=1; d<=lastDay.getDate(); d++) cells.push(new Date(year,month,d));
-
     var monthLabel = checkoffCalMonth.toLocaleDateString("en-US",{month:"long",year:"numeric"});
     var canGoPrev = new Date(year,month-1,1) >= new Date(today.getFullYear(),today.getMonth(),1);
     var canGoNext = new Date(year,month+1,1) <= new Date(sixMonthsOut.getFullYear(),sixMonthsOut.getMonth(),1);
-
     return (
       <div style={{marginTop:"4px"}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:"10px"}}>
@@ -745,13 +795,13 @@ export default function TheList() {
           <button onClick={function(){ if(canGoNext) setCheckoffCalMonth(new Date(year,month+1,1)); }} style={{background:"none",border:"none",color:canGoNext?"#666":"#ddd",cursor:canGoNext?"pointer":"default",fontSize:"20px",padding:"2px 10px",fontFamily:"inherit"}}>{"›"}</button>
         </div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:"1px",marginBottom:"3px"}}>
-          {["M","T","W","T","F","S","S"].map(function(d,i){ return (
-            <div key={i} style={{textAlign:"center",fontSize:"10px",color:"#aaa",letterSpacing:"0.05em",padding:"3px 0"}}>{d}</div>
+          {["M","T","W","T","F","S","S"].map(function(lbl,i){ return (
+            <div key={i} style={{textAlign:"center",fontSize:"10px",color:"#aaa",padding:"3px 0"}}>{lbl}</div>
           ); })}
         </div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:"3px"}}>
           {cells.map(function(day, i) {
-            if (!day) return <div key={"e"+i} style={{height:"42px"}}/>;
+            if (!day) return <div key={"e"+i} style={{height:"44px"}}/>;
             var dk = toDateKey(day);
             var isPast = day < today && !isToday(day);
             var isFuture = day > sixMonthsOut;
@@ -762,19 +812,22 @@ export default function TheList() {
             var isT = isToday(day);
             var disabled = isPast || isFuture;
             var bgColor = disabled?"#f8f8f8":holiday?"#fffbf0":isT?"#fffbf0":"#ffffff";
-            var borderTop = isT ? "2px solid #a07830" : "2px solid transparent";
+            var range = getDayTimeRange(dk);
             return (
               <div key={dk}
                 onClick={function(){ if(disabled) return; jumpToDateForBooking(dk, slot); }}
-                style={{height:"42px",background:bgColor,borderTop:borderTop,padding:"4px 5px",cursor:disabled?"default":"pointer",borderRadius:"3px",position:"relative",opacity:disabled?0.35:1}}
+                style={{height:"44px",background:bgColor,borderTop:isT?"2px solid #a07830":"2px solid transparent",padding:"4px 5px",cursor:disabled?"default":"pointer",borderRadius:"3px",position:"relative",opacity:disabled?0.35:1,boxSizing:"border-box"}}
               >
                 <div style={{fontSize:"12px",color:isT?"#a07830":disabled?"#ccc":"#1a1a1a",fontWeight:isT?"bold":"normal",lineHeight:1}}>{day.getDate()}</div>
                 {!disabled && (
-                  <div style={{display:"flex",flexWrap:"wrap",gap:"2px",marginTop:"3px"}}>
-                    {bookedSlots.slice(0,4).map(function(s,j){
-                      return <div key={j} style={{width:"5px",height:"5px",borderRadius:"50%",background:s.recurWeeks?"#6a8aaa":"#c9a96e"}}/>;
-                    })}
-                    {slotTakenByOther && <div style={{width:"5px",height:"5px",borderRadius:"50%",background:"#c0392b"}}/>}
+                  <div style={{marginTop:"3px"}}>
+                    <div style={{display:"flex",flexWrap:"wrap",gap:"2px",marginBottom:"1px"}}>
+                      {bookedSlots.slice(0,4).map(function(s,j){
+                        return <div key={j} style={{width:"5px",height:"5px",borderRadius:"50%",background:s.recurWeeks?"#6a8aaa":"#c9a96e"}}/>;
+                      })}
+                      {slotTakenByOther && <div style={{width:"5px",height:"5px",borderRadius:"50%",background:"#c0392b"}}/>}
+                    </div>
+                    {range && <div style={{fontSize:"7px",color:"#aaa",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{range}</div>}
                   </div>
                 )}
               </div>
@@ -793,6 +846,19 @@ export default function TheList() {
   return (
     <div style={{minHeight:"100vh",background:"#ffffff",fontFamily:"Georgia,serif",color:"#1a1a1a",paddingTop:reassignMode?"52px":"0"}}
       onClick={function(){ if(swipedSlot) setSwipedSlot(null); }}>
+
+      {undoConfirm && lastHistoryEntry && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center"}}>
+          <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"24px",width:"min(320px,90vw)"}}>
+            <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#aaa",marginBottom:"8px"}}>Undo last change?</div>
+            <div style={{fontSize:"14px",color:"#1a1a1a",marginBottom:"20px"}}>{describeEntry(lastHistoryEntry)}</div>
+            <div style={{display:"flex",gap:"8px"}}>
+              <button onClick={function(){ undoHistoryEntry(lastHistoryEntry); setUndoConfirm(false); }} style={{flex:1,padding:"10px",background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Undo</button>
+              <button onClick={function(){ setUndoConfirm(false); }} style={{flex:1,padding:"10px",background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {monthLongPress && (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center"}}
@@ -977,7 +1043,7 @@ export default function TheList() {
               <button onClick={function(){ setClientProfile(null); }} style={{background:"none",border:"none",color:"#aaa",fontSize:"20px",cursor:"pointer",padding:"0 4px"}}>×</button>
             </div>
             {clientProfile.recurWeeks && (
-              <div style={{fontSize:"12px",color:"#6a8aaa",marginBottom:"16px"}}>↺ Every {clientProfile.recurWeeks===1?"week":(clientProfile.recurWeeks+" weeks")} · usual time {clientProfile.usualTime}</div>
+              <div style={{fontSize:"12px",color:"#6a8aaa",marginBottom:"16px"}}>{"↺"} Every {clientProfile.recurWeeks===1?"week":(clientProfile.recurWeeks+" weeks")} · usual time {clientProfile.usualTime}</div>
             )}
             <div style={{overflowY:"auto",flex:1}}>
               {clientProfile.bookings.length===0 && <div style={{fontSize:"13px",color:"#aaa",fontStyle:"italic"}}>No upcoming bookings.</div>}
@@ -1040,11 +1106,11 @@ export default function TheList() {
       )}
 
       {checkoffModal && (
-        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1000,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
-          <div style={{background:"#f8f8f6",border:"1px solid #d8d8d6",borderRadius:"16px 16px 0 0",padding:"20px 20px 36px",width:"100%",maxHeight:"95vh",overflowY:"auto",boxSizing:"border-box"}}>
-            <div style={{width:"36px",height:"4px",background:"#ddd",borderRadius:"2px",margin:"0 auto 18px"}}/>
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:"20px",boxSizing:"border-box"}}>
+          <div style={{background:"#f8f8f6",border:"1px solid #d8d8d6",borderRadius:"16px",padding:"24px 24px 28px",width:"100%",maxWidth:"560px",maxHeight:"90vh",overflowY:"auto",boxSizing:"border-box",position:"relative"}}>
+            <button onClick={function(){ setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null); }} style={{position:"absolute",top:"16px",right:"16px",background:"none",border:"none",color:"#aaa",fontSize:"22px",cursor:"pointer",lineHeight:1,padding:"0 4px"}}>×</button>
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#4a8a5a",marginBottom:"4px"}}>Done</div>
-            <div style={{fontSize:"22px",marginBottom:"2px"}}>{checkoffModal.slot.name}</div>
+            <div style={{fontSize:"22px",marginBottom:"2px",paddingRight:"32px"}}>{checkoffModal.slot.name}</div>
             <div style={{fontSize:"12px",color:"#999",marginBottom:"18px"}}>{checkoffModal.slot.time} · {friendlyDate(checkoffModal.dateKey)}</div>
 
             {checkoffModal.notRecurring ? (
@@ -1072,12 +1138,12 @@ export default function TheList() {
                 <div style={{fontSize:"12px",color:"#999",marginBottom:"16px"}}>Every {checkoffModal.slot.recurWeeks===1?"week":(checkoffModal.slot.recurWeeks+" weeks")} · {checkoffModal.slot.time} · {DAYS[dayOfWeek(checkoffModal.dateKey)]}s</div>
                 {effectiveNextDate && !nudgeConflict && (
                   <div style={{background:"#f0fff0",border:"1px solid #a0d0a0",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#2a7a2a"}}>
-                    ✓ {friendlyDateTime(checkoffModal.slot.time, effectiveNextDate)} is open
+                    {"✓"} {friendlyDateTime(checkoffModal.slot.time, effectiveNextDate)} is open
                   </div>
                 )}
                 {effectiveNextDate && nudgeConflict && (
                   <div style={{background:"#fff0ee",border:"1px solid #e0b0a8",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#1a1a1a"}}>
-                    ⚠ That slot is already taken on {friendlyDateTime(checkoffModal.slot.time, effectiveNextDate)}
+                    {"⚠"} That slot is already taken on {friendlyDateTime(checkoffModal.slot.time, effectiveNextDate)}
                   </div>
                 )}
                 {nudgedDate && nudgedDate !== checkoffModal.nextDateKey && (
@@ -1093,7 +1159,6 @@ export default function TheList() {
                 {renderCheckoffCalendar()}
               </div>
             )}
-            <button onClick={function(){ setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null); }} style={{display:"block",width:"100%",padding:"12px",background:"none",border:"none",color:"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",marginTop:"18px"}}>Dismiss</button>
           </div>
         </div>
       )}
@@ -1143,12 +1208,12 @@ export default function TheList() {
           {history.map(function(entry,i){ return (
             <div key={i} style={{padding:"10px 12px",marginBottom:"6px",borderRadius:"6px",background:(entry.type==="removed"||entry.type==="slot_removed")?"#fff0ee":"#fafaf8",border:(entry.type==="removed"||entry.type==="slot_removed")?"1px solid #e0b0a8":"1px solid #e4e4e2"}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"3px"}}>
-                <span style={{fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",color:entry.type==="added"?"#4a8a5a":(entry.type==="removed"||entry.type==="slot_removed")?"#8a3a2a":entry.type==="recurring_set"?"#c9a96e":"#666"}}>
-                  {entry.type==="added"?"Added":entry.type==="removed"?"Removed":entry.type==="slot_removed"?"Slot Deleted":entry.type==="slot_added"?"Slot Added":entry.type==="recurring_set"?("Set Recurring ("+entry.weeks+"w)"):entry.type==="blocked"?"Blocked":entry.type==="unblocked"?"Unblocked":"Edited"}
+                <span style={{fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",color:entry.type==="added"?"#4a8a5a":(entry.type==="removed"||entry.type==="slot_removed")?"#8a3a2a":entry.type==="recurring_set"?"#c9a96e":entry.type==="slot_added"?"#6a8aaa":"#666"}}>
+                  {entry.type==="added"?"Added":entry.type==="removed"?"Removed":entry.type==="slot_removed"?"Slot Removed":entry.type==="slot_added"?"Slot Added":entry.type==="recurring_set"?("Set Recurring ("+entry.weeks+"w)"):entry.type==="blocked"?"Blocked":entry.type==="unblocked"?"Unblocked":"Edited"}
                 </span>
                 <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
                   <span style={{fontSize:"10px",color:"#bbb"}}>{entry.timestamp}</span>
-                  {["added","removed","edited","recurring_set","blocked"].includes(entry.type) && (
+                  {["added","removed","edited","recurring_set","blocked","slot_added"].includes(entry.type) && (
                     <button onClick={function(){ undoHistoryEntry(entry); }}
                       style={{background:"none",border:"1px solid #d8d8d6",borderRadius:"4px",color:"#888",cursor:"pointer",fontSize:"9px",padding:"2px 6px",fontFamily:"inherit"}}
                       onMouseEnter={function(e){ e.currentTarget.style.borderColor="#1a1a1a";e.currentTarget.style.color="#1a1a1a"; }}
@@ -1199,6 +1264,8 @@ export default function TheList() {
           {view!=="Month" && (
             <button onClick={function(){ setBaseDate(function(d){ return addDays(d,7); }); }} style={{...navBtn,fontSize:"11px",letterSpacing:"-1px"}}>{"››"}</button>
           )}
+          <div style={{width:"12px"}}/>
+          <button onClick={function(){ if(lastHistoryEntry) setUndoConfirm(true); }} style={{...navBtn,background:lastHistoryEntry?"#f0f0ee":"#f8f8f6",border:"1px solid #d8d8d6",color:lastHistoryEntry?"#666":"#ccc",fontSize:"11px",padding:"0 10px",letterSpacing:"0.05em"}} title={lastHistoryEntry?("Undo: "+describeEntry(lastHistoryEntry)):"Nothing to undo"}>Undo</button>
           <button onClick={function(){ setShowHistory(true); }} style={{...navBtn,background:"#f0f0ee",border:"1px solid #d8d8d6",color:"#666"}}>{"≡"}</button>
         </div>
       </div>
@@ -1214,12 +1281,13 @@ export default function TheList() {
             </div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:"1px",background:"#e8e8e6"}}>
               {monthDays.map(function(day,i){
-                if (!day) return <div key={"empty-"+i} style={{background:"#f8f8f6",minHeight:"90px"}}/>;
+                if (!day) return <div key={"empty-"+i} style={{background:"#f8f8f6",minHeight:"100px"}}/>;
                 var dk = toDateKey(day);
                 var slots = getSlots(dk);
                 var booked = slots.filter(function(s){ return s.name; });
                 var isT = isToday(day);
                 var holiday = getHolidayForDate(dk);
+                var range = getDayTimeRange(dk);
                 return (
                   <div key={dk}
                     onClick={function(){ setBaseDate(day); setView("Day"); }}
@@ -1229,16 +1297,19 @@ export default function TheList() {
                     onTouchStart={function(){ longPressTimer.current = setTimeout(function(){ setMonthLongPress({dateKey:dk, day}); }, 600); }}
                     onTouchEnd={cancelLongPress}
                     onTouchMove={cancelLongPress}
-                    style={{background:isT?"#fffbf0":"#ffffff",minHeight:"90px",padding:"6px 8px",cursor:"pointer",borderTop:isT?"2px solid #a07830":"2px solid transparent",transition:"background 0.1s",userSelect:"none"}}
+                    style={{background:isT?"#fffbf0":"#ffffff",minHeight:"100px",padding:"7px 8px",cursor:"pointer",borderTop:isT?"2px solid #a07830":"2px solid transparent",transition:"background 0.1s",userSelect:"none",boxSizing:"border-box"}}
                     onMouseEnter={function(e){ e.currentTarget.style.background=isT?"#fff8e8":"#f4f4f2"; }}
                   >
-                    <div style={{fontSize:"13px",color:isT?"#a07830":"#1a1a1a",fontWeight:isT?"bold":"normal",marginBottom:"2px"}}>{day.getDate()}</div>
+                    <div style={{fontSize:"14px",color:isT?"#a07830":"#1a1a1a",fontWeight:isT?"bold":"normal",marginBottom:"3px"}}>{day.getDate()}</div>
                     {holiday&&<div style={{fontSize:"8px",color:"#a07830",letterSpacing:"0.04em",textTransform:"uppercase",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginBottom:"4px"}}>{holiday}</div>}
                     {booked.length > 0 && (
-                      <div style={{display:"flex",flexWrap:"wrap",gap:"3px",marginTop:"2px"}}>
-                        {booked.map(function(s,j){ return (
-                          <div key={j} style={{width:"7px",height:"7px",borderRadius:"50%",background:s.recurWeeks?"#6a8aaa":"#c9a96e"}}/>
-                        ); })}
+                      <div>
+                        <div style={{display:"flex",flexWrap:"wrap",gap:"3px",marginBottom:"3px"}}>
+                          {booked.map(function(s,j){ return (
+                            <div key={j} style={{width:"8px",height:"8px",borderRadius:"50%",background:s.recurWeeks?"#6a8aaa":"#c9a96e"}}/>
+                          ); })}
+                        </div>
+                        {range && <div style={{fontSize:"9px",color:"#aaa",letterSpacing:"0.02em"}}>{range}</div>}
                       </div>
                     )}
                   </div>
@@ -1314,7 +1385,15 @@ export default function TheList() {
                               <div style={{position:"absolute",left:0,top:first?"50%":"0",bottom:last?"50%":"0",width:"3px",background:"#a07830",borderRadius:first?"3px 3px 0 0":last?"0 0 3px 3px":"0"}}/>
                             );
                           })()}
-                          <button onClick={function(){ handleCheckoff(dateKey,idx); }} style={{width:"18px",height:"18px",borderRadius:"50%",border:slot.done?"1.5px solid #2a7a2a":filled?"1.5px solid #aaaaaa":"1.5px solid #dddddd",background:slot.done?"#2a7a2a":"transparent",cursor:filled?"pointer":"default",flexShrink:0,marginRight:"10px",display:"flex",alignItems:"center",justifyContent:"center",transition:"all 0.15s"}}>
+                          <button
+                            onClick={function(){ handleCheckoff(dateKey,idx); }}
+                            onMouseDown={function(){ if(slot.done) startCheckoffLongPress(dateKey,idx); }}
+                            onMouseUp={cancelCheckoffLongPress}
+                            onMouseLeave={cancelCheckoffLongPress}
+                            onTouchStart={function(){ if(slot.done) startCheckoffLongPress(dateKey,idx); }}
+                            onTouchEnd={cancelCheckoffLongPress}
+                            onTouchMove={cancelCheckoffLongPress}
+                            style={{width:"18px",height:"18px",borderRadius:"50%",border:slot.done?"1.5px solid #2a7a2a":filled?"1.5px solid #aaaaaa":"1.5px solid #dddddd",background:slot.done?"#2a7a2a":"transparent",cursor:filled?"pointer":"default",flexShrink:0,marginRight:"10px",display:"flex",alignItems:"center",justifyContent:"center",transition:"all 0.15s"}}>
                             {slot.done&&<span style={{color:"#fff",fontSize:"10px",lineHeight:1}}>{"✓"}</span>}
                           </button>
                           <div style={{fontSize:"12px",color:filled?"#c9a96e":"#2e2e2e",width:"40px",flexShrink:0,fontVariantNumeric:"tabular-nums",letterSpacing:"0.02em"}}>
