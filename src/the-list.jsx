@@ -53,11 +53,6 @@ function addDays(date, n) { var d = new Date(date); d.setDate(d.getDate()+n); re
 function addWeeks(date, n) { return addDays(date, n*7); }
 function isToday(date) { return date.toDateString() === new Date().toDateString(); }
 function capitalizeFirst(str) { if (!str) return str; return str.charAt(0).toUpperCase()+str.slice(1); }
-function clientDisplayName(str) {
-  if (!str) return str;
-  var match = str.match(/^[\d\s:]+([A-Za-z].*)/);
-  return match ? match[1] : str;
-}
 function parseDateKey(key) { var parts = key.split("-").map(Number); return new Date(parts[0],parts[1]-1,parts[2]); }
 function formatDateKey(date) { return toDateKey(date); }
 function friendlyDate(dateKey) {
@@ -102,16 +97,15 @@ function migrateSchedules(raw) {
 }
 
 function getBannerColor(type) {
-  if (type==="added"||type==="slot_added"||type==="unblocked"||type==="redo"||type==="checkedoff") return "#2a7a2a";
+  if (type==="added"||type==="slot_added"||type==="unblocked") return "#2a7a2a";
   if (type==="removed"||type==="slot_removed"||type==="blocked") return "#c0392b";
-  if (type==="undo") return "#666";
   return "#555";
 }
 
 function describeBanner(entry) {
   if (!entry) return "";
   var type = entry.type;
-  var prefix = type==="added"?"Added":type==="removed"?"Removed":type==="edited"?"Edited":type==="recurring_set"?"Set recurring":type==="blocked"?"Blocked":type==="unblocked"?"Unblocked":type==="slot_added"?"Added slot":type==="slot_removed"?"Removed slot":type==="undo"?"Undone":type==="redo"?"Redone":type==="checkedoff"?"Checked off":"Changed";
+  var prefix = type==="added"?"Added":type==="removed"?"Removed":type==="edited"?"Edited":type==="recurring_set"?"Set recurring":type==="blocked"?"Blocked":type==="unblocked"?"Unblocked":type==="slot_added"?"Added slot":type==="slot_removed"?"Removed slot":type==="undo"?"Undone":type==="redo"?"Redone":"Changed";
   var name = entry.name ? (" " + entry.name) : "";
   var time = entry.time ? (" at " + entry.time) : "";
   var date = entry.dateKey ? (" · " + friendlyDate(entry.dateKey)) : "";
@@ -220,17 +214,15 @@ export default function TheList() {
   const [clientProfile, setClientProfile] = useState(null);
   const [checkoffCalMonth, setCheckoffCalMonth] = useState(null);
   const [editingOccupied, setEditingOccupied] = useState(false);
-  const [notePopup, setNotePopup] = useState(null);
-  const [noteText, setNoteText] = useState("");
+  const [monthLongPress, setMonthLongPress] = useState(null);
   const [banner, setBanner] = useState(null);
   const [clientSearch, setClientSearch] = useState("");
-  const [logSearch, setLogSearch] = useState("");
   const [selectMode, setSelectMode] = useState(false);
   const [selectedSlots, setSelectedSlots] = useState({});
   const [dragState, setDragState] = useState(null);
   const [dragCalOpen, setDragCalOpen] = useState(false);
   const [dragCalMonth, setDragCalMonth] = useState(null);
-  const [dragSelectStart, setDragSelectStart] = useState(null);
+  const [dragCalHover, setDragCalHover] = useState(false);
   const [reassignQueue, setReassignQueue] = useState([]);
   const bannerTimer = useRef(null);
   const longPressTimer = useRef(null);
@@ -323,53 +315,8 @@ export default function TheList() {
   };
 
   const pushUndo = function(snapshot) {
-    undoStackRef.current = [...undoStackRef.current, snapshot].slice(-50);
-    redoStackRef.current = [];
-    setUndoStack(undoStackRef.current.slice());
+    setUndoStack(function(prev){ return [...prev, snapshot].slice(-50); });
     setRedoStack([]);
-  };
-
-  const undoHistoryEntryWithConflict = function(entry) {
-    var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
-    if (entry.type === "added") {
-      var slots0 = getSlots(entry.dateKey);
-      var i0 = slots0.findIndex(function(s){ return s.time===entry.time&&s.name===entry.name; });
-      if (i0<0) { alert("Can't undo — "+entry.name+" is no longer at "+entry.time+" on "+friendlyDate(entry.dateKey)+"."); return; }
-      pushUndo(snapshot);
-      var newSlots0 = [...slots0]; newSlots0[i0]={...newSlots0[i0],name:"",price:"",done:false,recurWeeks:null,isException:false};
-      setSlots(entry.dateKey,newSlots0); setHistory(function(prev){ return prev.filter(function(h){ return h.id!==entry.id; }); });
-      showBanner({type:"undo",name:entry.name,time:entry.time,dateKey:entry.dateKey});
-    } else if (entry.type === "removed") {
-      var slots1 = getSlots(entry.dateKey);
-      var i1 = slots1.findIndex(function(s){ return s.time===entry.time; });
-      if (i1>=0 && slots1[i1].name && slots1[i1].name!==entry.name) {
-        if (!window.confirm(slots1[i1].name+" is now in that slot. Restore "+entry.name+" here anyway? This will displace "+slots1[i1].name+".")) return;
-      }
-      pushUndo(snapshot);
-      var newSlots1 = [...slots1]; newSlots1[i1]={...newSlots1[i1],name:entry.name,price:entry.price||"",done:false};
-      setSlots(entry.dateKey,newSlots1); setHistory(function(prev){ return prev.filter(function(h){ return h.id!==entry.id; }); });
-      showBanner({type:"added",name:entry.name,time:entry.time,dateKey:entry.dateKey});
-    } else if (entry.type === "edited") {
-      var slots2 = getSlots(entry.dateKey);
-      var i2 = slots2.findIndex(function(s){ return s.time===entry.time; });
-      if (i2>=0) {
-        pushUndo(snapshot);
-        var newSlots2=[...slots2]; newSlots2[i2]={...newSlots2[i2],name:entry.prevName};
-        setSlots(entry.dateKey,newSlots2); setHistory(function(prev){ return prev.filter(function(h){ return h.id!==entry.id; }); });
-        showBanner({type:"undo",name:entry.prevName,time:entry.time,dateKey:entry.dateKey});
-      }
-    } else if (entry.type === "blocked") {
-      var slots3 = getSlots(entry.dateKey);
-      var i3 = slots3.findIndex(function(s){ return s.time===entry.time; });
-      if (i3>=0) {
-        pushUndo(snapshot);
-        var newSlots3=[...slots3]; newSlots3[i3]={...newSlots3[i3],blocked:false,blockLabel:""};
-        setSlots(entry.dateKey,newSlots3); setHistory(function(prev){ return prev.filter(function(h){ return h.id!==entry.id; }); });
-        showBanner({type:"unblocked",name:entry.name,time:entry.time,dateKey:entry.dateKey});
-      }
-    } else {
-      showBanner({type:"undo",name:"Cannot undo this type",dateKey:null,time:null});
-    }
   };
 
   const getDayTimeRange = function(dateKey) {
@@ -381,29 +328,20 @@ export default function TheList() {
     return sorted[0].time + "–" + sorted[sorted.length-1].time;
   };
 
-  const undoStackRef = useRef([]);
-  const redoStackRef = useRef([]);
-
   const handleUndo = function() {
-    if (undoStackRef.current.length === 0) return;
-    var snapshot = undoStackRef.current[undoStackRef.current.length-1];
-    var redoSnap = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
-    undoStackRef.current = undoStackRef.current.slice(0,-1);
-    redoStackRef.current = [...redoStackRef.current, redoSnap];
-    setUndoStack(undoStackRef.current.slice());
-    setRedoStack(redoStackRef.current.slice());
+    if (undoStack.length === 0) return;
+    var snapshot = undoStack[undoStack.length-1];
+    setRedoStack(function(prev){ return [...prev, {schedules: JSON.parse(JSON.stringify(schedulesRef.current))}]; });
+    setUndoStack(function(prev){ return prev.slice(0,-1); });
     setSchedules(snapshot.schedules);
     showBanner({type:"undo", name:"last change", dateKey:null, time:null});
   };
 
   const handleRedo = function() {
-    if (redoStackRef.current.length === 0) return;
-    var snapshot = redoStackRef.current[redoStackRef.current.length-1];
-    var undoSnap = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
-    redoStackRef.current = redoStackRef.current.slice(0,-1);
-    undoStackRef.current = [...undoStackRef.current, undoSnap];
-    setUndoStack(undoStackRef.current.slice());
-    setRedoStack(redoStackRef.current.slice());
+    if (redoStack.length === 0) return;
+    var snapshot = redoStack[redoStack.length-1];
+    setUndoStack(function(prev){ return [...prev, {schedules: JSON.parse(JSON.stringify(schedulesRef.current))}]; });
+    setRedoStack(function(prev){ return prev.slice(0,-1); });
     setSchedules(snapshot.schedules);
     showBanner({type:"redo", name:"last change", dateKey:null, time:null});
   };
@@ -435,34 +373,17 @@ export default function TheList() {
     var newName = capitalizeFirst((values.name||"").trim());
     var newPrice = (values.price||"").trim();
     if (newName!==prev.name || newPrice!==prev.price) {
-      if (prev.name && !newName) {
-        editingRef.current = null; setEditingCell(null); setEditingOccupied(false);
-        if (prev.groupId) {
-          var groupSlots2 = getSlots(dateKey).filter(function(s){ return s.groupId===prev.groupId&&s.name; });
-          if (groupSlots2.length > 1) { setGroupConfirm({action:"cancel",dateKey,idx,name:prev.name,groupId:prev.groupId}); return; }
-        }
-        var snap0 = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
-        pushUndo(snap0);
-        var slots0 = [...getSlots(dateKey)];
-        slots0[idx] = {...prev,name:"",price:"",done:false,recurWeeks:null,isException:false};
-        setSlots(dateKey,slots0);
-        addHistoryEntry({type:"removed",time:prev.time,name:prev.name,dateKey});
-        var rkey = dateKey+"-"+idx;
-        setRecentlyRemoved(function(r){ return {...r,[rkey]:true}; });
-        setTimeout(function(){ setRecentlyRemoved(function(r){ var n={...r}; delete n[rkey]; return n; }); },8000);
-        return;
-      }
       var snapshot = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
       pushUndo(snapshot);
       slots[idx] = {...prev,name:newName,price:newPrice};
       setSlots(dateKey,slots);
-      if (!prev.name&&newName) {
+      if (prev.name&&!newName) addHistoryEntry({type:"removed",time:prev.time,name:prev.name,dateKey});
+      else if (!prev.name&&newName) {
         addHistoryEntry({type:"added",time:slots[idx].time,name:newName,price:newPrice,dateKey});
         setClientMemory(function(mem) {
-          var displayName = clientDisplayName(newName);
-          var existing = mem.findIndex(function(c){ return c.name.toLowerCase()===displayName.toLowerCase(); });
-          if (existing>=0) { var updated=[...mem]; updated[existing]={name:displayName,price:newPrice||mem[existing].price}; return updated; }
-          return [...mem,{name:displayName,price:newPrice}];
+          var existing = mem.findIndex(function(c){ return c.name.toLowerCase()===newName.toLowerCase(); });
+          if (existing>=0) { var updated=[...mem]; updated[existing]={name:newName,price:newPrice||mem[existing].price}; return updated; }
+          return [...mem,{name:newName,price:newPrice}];
         });
       } else if (prev.name&&newName) addHistoryEntry({type:"edited",time:slots[idx].time,name:newName,prevName:prev.name,dateKey});
     }
@@ -827,13 +748,6 @@ export default function TheList() {
     setSlots(dateKey,slots); setBlockLabelModal(null); setBlockLabel("Lunch"); setSwipedSlot(null);
   };
 
-  const saveNote = function(dateKey, idx, note) {
-    var slots = [...getSlots(dateKey)];
-    slots[idx] = {...slots[idx], note:note};
-    setSlots(dateKey, slots);
-    setNotePopup(null);
-  };
-
   const exportData = function() {
     var data = {schedules:schedulesRef.current, clients:clientMemory, holidays:customHolidays, exportedAt:new Date().toISOString()};
     var blob = new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
@@ -894,7 +808,7 @@ export default function TheList() {
       }
       setDragCalOpen(true); setDragCalMonth(new Date()); setDragCalHover(false);
       playSound("tap");
-    }, 1000);
+    }, 500);
   };
   const cancelDragLongPress = function() {
     if (dragLongPress.current) { clearTimeout(dragLongPress.current); dragLongPress.current = null; }
@@ -1018,36 +932,16 @@ export default function TheList() {
   var canRedo = redoStack.length>0;
 
   return (
-    <div style={{minHeight:"100vh",background:"#ffffff",fontFamily:"Georgia,serif",color:"#1a1a1a",paddingTop:reassignMode?"calc(env(safe-area-inset-top,0px) + 52px)":"0"}}
+    <div style={{minHeight:"100vh",background:"#ffffff",fontFamily:"Georgia,serif",color:"#1a1a1a",paddingTop:reassignMode?"calc(env(safe-area-inset-top,0px) + 52px)":"0",userSelect:"none",WebkitUserSelect:"none"}}
       onClick={function(){ if(swipedSlot) setSwipedSlot(null); }}
       onMouseUp={function(){ if(dragState&&!dragCalHover) { setDragState(null); setDragCalOpen(false); } }}>
 
       {banner && (
-        <div style={{position:"fixed",top:"calc(env(safe-area-inset-top,0px) + 8px)",left:"50%",transform:"translateX(-50%)",zIndex:2000,background:getBannerColor(banner.type),color:"#fff",padding:"9px 16px",borderRadius:"20px",fontSize:"12px",letterSpacing:"0.04em",boxShadow:"0 2px 12px rgba(0,0,0,0.2)",display:"flex",alignItems:"center",gap:"12px",maxWidth:"90vw",pointerEvents:"auto"}}>
+        <div style={{position:"fixed",top:"calc(env(safe-area-inset-top,0px) + 60px)",left:"50%",transform:"translateX(-50%)",zIndex:2000,background:getBannerColor(banner.type),color:"#fff",padding:"9px 16px",borderRadius:"20px",fontSize:"12px",letterSpacing:"0.04em",boxShadow:"0 2px 12px rgba(0,0,0,0.2)",display:"flex",alignItems:"center",gap:"12px",maxWidth:"90vw",pointerEvents:"auto"}}>
           <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{describeBanner(banner)}</span>
           {(banner.type!=="undo"&&banner.type!=="redo"&&canUndo)&&(
-            <button onClick={handleUndo} style={{background:"rgba(255,255,255,0.22)",border:"none",borderRadius:"10px",color:"#fff",padding:"3px 10px",cursor:"pointer",fontFamily:"inherit",fontSize:"16px",flexShrink:0,lineHeight:1}}>{"↺"}</button>
+            <button onClick={handleUndo} style={{background:"rgba(255,255,255,0.22)",border:"none",borderRadius:"10px",color:"#fff",padding:"3px 10px",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",flexShrink:0}}>Undo</button>
           )}
-        </div>
-      )}
-
-      {notePopup && (
-        <div style={{position:"fixed",zIndex:1600,background:"#fff",border:"1px solid #d8d8d6",borderRadius:"10px",boxShadow:"0 4px 20px rgba(0,0,0,0.15)",padding:"14px 16px",width:"220px",top:notePopup.y,left:notePopup.x}} onClick={function(e){ e.stopPropagation(); }}>
-          <div style={{fontSize:"10px",letterSpacing:"0.15em",textTransform:"uppercase",color:"#aaa",marginBottom:"8px"}}>Note</div>
-          <textarea
-            autoFocus
-            value={noteText}
-            onChange={function(e){ setNoteText(e.target.value); }}
-            onKeyDown={function(e){ if(e.key==="Escape") setNotePopup(null); if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); saveNote(notePopup.dateKey,notePopup.idx,noteText); } }}
-            placeholder="Short note..."
-            rows={3}
-            style={{width:"100%",boxSizing:"border-box",border:"1px solid #e0e0de",borderRadius:"6px",padding:"6px 8px",fontSize:"12px",fontFamily:"Georgia,serif",resize:"none",outline:"none",color:"#1a1a1a"}}
-          />
-          <div style={{display:"flex",gap:"6px",marginTop:"8px"}}>
-            <button onClick={function(){ saveNote(notePopup.dateKey,notePopup.idx,noteText); }} style={{flex:1,padding:"6px",background:"#1a1a1a",border:"none",borderRadius:"5px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"11px"}}>Save</button>
-            {notePopup.hasNote&&<button onClick={function(){ saveNote(notePopup.dateKey,notePopup.idx,""); }} style={{padding:"6px 10px",background:"none",border:"1px solid #e0e0de",borderRadius:"5px",color:"#c0392b",cursor:"pointer",fontFamily:"inherit",fontSize:"11px"}}>Clear</button>}
-            <button onClick={function(){ setNotePopup(null); }} style={{padding:"6px 10px",background:"none",border:"1px solid #e0e0de",borderRadius:"5px",color:"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"11px"}}>×</button>
-          </div>
         </div>
       )}
 
@@ -1398,23 +1292,15 @@ export default function TheList() {
                 ); })}
               </div>
             )}
-            <div style={{fontSize:"10px",letterSpacing:"0.15em",textTransform:"uppercase",color:"#aaa",marginBottom:"8px"}}>Change Log</div>
-            <input value={logSearch} onChange={function(e){ setLogSearch(e.target.value); }} placeholder="Search log..." style={{...inputStyle,width:"100%",boxSizing:"border-box",marginBottom:"10px",fontSize:"12px"}}/>
+            <div style={{fontSize:"10px",letterSpacing:"0.15em",textTransform:"uppercase",color:"#aaa",marginBottom:"10px"}}>Change Log</div>
             {history.length===0&&<div style={{color:"#bbb",fontSize:"13px",fontStyle:"italic"}}>No changes yet.</div>}
-            {history.filter(function(entry){ return !logSearch||JSON.stringify(entry).toLowerCase().includes(logSearch.toLowerCase()); }).map(function(entry,i){ return (
+            {history.map(function(entry,i){ return (
               <div key={i} style={{padding:"10px 12px",marginBottom:"6px",borderRadius:"6px",background:(entry.type==="removed"||entry.type==="slot_removed")?"#fff0ee":"#fafaf8",border:(entry.type==="removed"||entry.type==="slot_removed")?"1px solid #e0b0a8":"1px solid #e4e4e2"}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"3px"}}>
                   <span style={{fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",color:entry.type==="added"?"#4a8a5a":(entry.type==="removed"||entry.type==="slot_removed")?"#8a3a2a":entry.type==="recurring_set"?"#c9a96e":entry.type==="slot_added"?"#6a8aaa":"#666"}}>
-                    {entry.type==="added"?"Added":entry.type==="removed"?"Removed":entry.type==="slot_removed"?"Slot Removed":entry.type==="slot_added"?"Slot Added":entry.type==="recurring_set"?("Recurring ("+entry.weeks+"w)"):entry.type==="blocked"?"Blocked":entry.type==="unblocked"?"Unblocked":entry.type==="checkedoff"?"Checked off":"Edited"}
+                    {entry.type==="added"?"Added":entry.type==="removed"?"Removed":entry.type==="slot_removed"?"Slot Removed":entry.type==="slot_added"?"Slot Added":entry.type==="recurring_set"?("Recurring ("+entry.weeks+"w)"):entry.type==="blocked"?"Blocked":entry.type==="unblocked"?"Unblocked":"Edited"}
                   </span>
-                  <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
-                    <span style={{fontSize:"10px",color:"#bbb"}}>{entry.timestamp}</span>
-                    <button onClick={function(){ undoHistoryEntryWithConflict(entry); }}
-                      style={{background:"none",border:"1px solid #d8d8d6",borderRadius:"4px",color:"#888",cursor:"pointer",fontSize:"9px",padding:"2px 6px",fontFamily:"inherit",letterSpacing:"0.05em"}}
-                      onMouseEnter={function(e){ e.currentTarget.style.borderColor="#1a1a1a";e.currentTarget.style.color="#1a1a1a"; }}
-                      onMouseLeave={function(e){ e.currentTarget.style.borderColor="#d8d8d6";e.currentTarget.style.color="#888"; }}
-                    >Undo</button>
-                  </div>
+                  <span style={{fontSize:"10px",color:"#bbb"}}>{entry.timestamp}</span>
                 </div>
                 <div style={{fontSize:"13px",color:"#888"}}>
                   {entry.time} {entry.name&&<span style={{color:"#1a1a1a"}}>— {entry.name}</span>}
@@ -1428,7 +1314,7 @@ export default function TheList() {
       )}
 
       {/* HEADER */}
-      <div style={{borderBottom:"1px solid #e8e8e6",padding:"18px 20px 14px",paddingTop:"calc(env(safe-area-inset-top,0px) / 2 + 8px)",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,background:"#ffffff",zIndex:100}}>
+      <div style={{borderBottom:"1px solid #e8e8e6",padding:"18px 20px 14px",paddingTop:"calc(env(safe-area-inset-top,0px) + 14px)",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,background:"#ffffff",zIndex:100}}>
         <div style={{display:"flex",gap:"2px",background:"#e8e8e6",padding:"3px",borderRadius:"6px"}}>
           {VIEWS.map(function(v){ return (
             <button key={v} onClick={function(){ if(v==="Wknd") setBaseDate(getUpcomingWeekend()); else if(v==="3-Day"||v==="Week") setBaseDate(new Date()); setView(v); }} style={{padding:"5px 12px",fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",border:"none",borderRadius:"4px",cursor:"pointer",background:view===v?"#1a1a1a":"transparent",color:view===v?"#ffffff":"#999",fontFamily:"inherit",transition:"all 0.15s"}}>{v}</button>
@@ -1442,8 +1328,8 @@ export default function TheList() {
           <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()+1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,1); }); }} style={navBtn}>{"›"}</button>
           {view!=="Month"&&<button onClick={function(){ setBaseDate(function(d){ return addDays(d,7); }); }} style={{...navBtn,fontSize:"11px",letterSpacing:"-1px"}}>{"››"}</button>}
           <div style={{width:"10px"}}/>
-          <button onClick={handleUndo} title="Undo" style={{...navBtn,background:canUndo?"#f0f0ee":"#f8f8f6",border:"1px solid #d8d8d6",color:canUndo?"#4a8a9a":"#ccc",width:"32px",padding:"0",fontSize:"17px",lineHeight:1}}>{"↺"}</button>
-          <button onClick={handleRedo} title="Redo" style={{...navBtn,background:canRedo?"#f0f0ee":"#f8f8f6",border:"1px solid #d8d8d6",color:canRedo?"#4a8a9a":"#ccc",width:"32px",padding:"0",fontSize:"17px",lineHeight:1}}>{"↻"}</button>
+          <button onClick={handleUndo} title="Undo" style={{...navBtn,background:canUndo?"#f0f0ee":"#f8f8f6",border:"1px solid #d8d8d6",color:canUndo?"#555":"#ccc",width:"32px",padding:"0",fontSize:"16px"}} dangerouslySetInnerHTML={{__html:"&#8630;"}}/>
+          <button onClick={handleRedo} title="Redo" style={{...navBtn,background:canRedo?"#f0f0ee":"#f8f8f6",border:"1px solid #d8d8d6",color:canRedo?"#555":"#ccc",width:"32px",padding:"0",fontSize:"16px"}} dangerouslySetInnerHTML={{__html:"&#8631;"}}/>
           <button onClick={function(){ setShowHistory(true); }} style={{...navBtn,background:"#f0f0ee",border:"1px solid #d8d8d6",color:"#666"}}>{"≡"}</button>
         </div>
       </div>
@@ -1521,7 +1407,8 @@ export default function TheList() {
                     return (
                       <div key={rowKey} style={{position:"relative",overflow:"hidden",borderBottom:"1px solid #efefed",opacity:isDragging?0.4:1}}>
                         {filled&&(
-                          <div style={{position:"absolute",right:0,top:0,bottom:0,width:"100px",display:"flex",alignItems:"stretch",opacity:isSwiped?1:0,pointerEvents:isSwiped?"auto":"none",transition:"opacity 0.2s"}}>
+                          <div style={{position:"absolute",right:0,top:0,bottom:0,width:"160px",display:"flex",alignItems:"stretch",opacity:isSwiped?1:0,pointerEvents:isSwiped?"auto":"none",transition:"opacity 0.2s"}}>
+                            <button onClick={function(){ setSwipedSlot(null); if(slot.groupId){var gs=getSlots(dateKey).filter(function(s){ return s.groupId===slot.groupId&&s.name; });if(gs.length>1){setGroupConfirm({action:'reschedule',dateKey,idx,name:slot.name,groupId:slot.groupId});return;}} setReassignMode({client:{name:slot.name,price:slot.price,recurWeeks:slot.recurWeeks},currentDateKey:dateKey,originalDateKey:dateKey,originalIdx:idx,remainingConflicts:[]}); setView("Day"); }} style={{flex:1,background:"#2a6a9a",border:"none",color:"#fff",fontSize:"11px",letterSpacing:"0.08em",textTransform:"uppercase",cursor:"pointer",fontFamily:"inherit"}}>Move</button>
                             <button onClick={function(){ requestRemoveSlot(dateKey,idx); }} style={{flex:1,background:"#c0392b",border:"none",color:"#fff",fontSize:"11px",letterSpacing:"0.08em",textTransform:"uppercase",cursor:"pointer",fontFamily:"inherit"}}>Cancel</button>
                           </div>
                         )}
@@ -1547,27 +1434,9 @@ export default function TheList() {
                             if (!inG) return null;
                             return <div style={{position:"absolute",left:0,top:first?"50%":"0",bottom:last?"50%":"0",width:"3px",background:"#a07830",borderRadius:first?"3px 3px 0 0":last?"0 0 3px 3px":"0"}}/>;
                           })()}
-                          {selectMode&&(filled||slot.blocked) ? (
-                            <div
-                              onMouseDown={function(){
-                                setDragSelectStart(idx);
-                                setSelectedSlots(function(prev){ var n={...prev}; if(n[rowKey]) delete n[rowKey]; else n[rowKey]=true; return n; });
-                              }}
-                              onMouseEnter={function(){
-                                if(dragSelectStart!==null&&dragSelectStart!==idx){
-                                  var slots2=getSlots(dateKey);
-                                  var lo=Math.min(dragSelectStart,idx); var hi=Math.max(dragSelectStart,idx);
-                                  setSelectedSlots(function(prev){
-                                    var n={...prev};
-                                    for(var k=lo;k<=hi;k++){
-                                      if(slots2[k]&&(slots2[k].name||slots2[k].blocked)) n[dateKey+"-"+k]=true;
-                                    }
-                                    return n;
-                                  });
-                                }
-                              }}
-                              onMouseUp={function(){ setDragSelectStart(null); }}
-                              style={{width:"18px",height:"18px",borderRadius:"4px",border:isSelected?"1.5px solid #4a7aaa":"1.5px solid #ccc",background:isSelected?"#4a7aaa":"transparent",flexShrink:0,marginRight:"8px",display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",userSelect:"none",WebkitUserSelect:"none"}}>
+                          {selectMode&&filled ? (
+                            <div onClick={function(){ setSelectedSlots(function(prev){ var n={...prev}; if(n[rowKey]) delete n[rowKey]; else n[rowKey]=true; return n; }); }}
+                              style={{width:"18px",height:"18px",borderRadius:"4px",border:isSelected?"1.5px solid #4a7aaa":"1.5px solid #ccc",background:isSelected?"#4a7aaa":"transparent",flexShrink:0,marginRight:"8px",display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer"}}>
                               {isSelected&&<span style={{color:"#fff",fontSize:"11px",lineHeight:1}}>{"✓"}</span>}
                             </div>
                           ) : (
@@ -1615,19 +1484,11 @@ export default function TheList() {
                                 onTouchStart={function(){ if(filled&&!isEditing&&!selectMode) startLongPress(slot.name); }}
                                 onTouchEnd={cancelLongPress} onTouchMove={cancelLongPress}
                                 placeholder="" data-rowkey={rowKey}
-                                style={{flex:1,fontSize:"13px",color:wasRemoved?"#c0392b":slot.done?"#2a6a2a":filled?"#1a1a1a":"#999",textDecoration:slot.done?"line-through":"none",background:"transparent",border:"none",outline:"none",padding:"0 2px",fontFamily:"Georgia,serif",cursor:isEditing?"text":"pointer",caretColor:isEditing?"#444":"transparent"}}
+                                style={{flex:1,fontSize:"13px",color:wasRemoved?"#c0392b":slot.done?"#2a6a2a":filled?"#1a1a1a":"#999",textDecoration:slot.done?"line-through":"none",background:"transparent",border:"none",outline:"none",padding:"0 2px",fontFamily:"Georgia,serif",cursor:isEditing?"text":"pointer",caretColor:isEditing?"#444":"transparent",WebkitUserSelect:isEditing?"text":"none",userSelect:isEditing?"text":"none",WebkitAppearance:"none",appearance:"none"}}
                               />
                               {!isEditing&&(
-                                <div style={{display:"flex",alignItems:"center",gap:"4px",flexShrink:0}}>
+                                <div style={{display:"flex",alignItems:"center",gap:"6px",flexShrink:0}}>
                                   {filled&&slot.price&&<span style={{fontSize:"12px",color:slot.done?"#3a5a3a":"#a07830"}}>{slot.price}</span>}
-                                  {filled&&<button onClick={function(e){
-                                    e.stopPropagation();
-                                    var rect=e.currentTarget.getBoundingClientRect();
-                                    var px=Math.min(rect.left,window.innerWidth-240);
-                                    var py=Math.min(rect.bottom+4,window.innerHeight-180);
-                                    setNoteText(slot.note||"");
-                                    setNotePopup({dateKey,idx,x:px,y:py,hasNote:!!slot.note});
-                                  }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 3px",color:slot.note?"#a07830":"#ddd",fontSize:"11px",lineHeight:1}} title={slot.note||"Add note"}>{"✎"}</button>}
                                   {filled&&<button onClick={function(e){ e.stopPropagation(); if(slot.groupId){var aS=getSlots(dateKey);var gS=aS.map(function(s,i){ return {...s,i}; }).filter(function(s){ return s.groupId===slot.groupId&&s.name; });if(gS.length>1){setGroupRecurModal({dateKey,idx,slot,groupSlots:gS,weeks:null});return;}} setRecurringModal({dateKey,idx,slot}); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 4px",color:slot.recurWeeks?"#4a8a9a":"#ccc",fontSize:"13px",lineHeight:1}}>{"↺"}</button>}
                                 </div>
                               )}
