@@ -13,7 +13,7 @@ const DEFAULT_TIMES = [
   "7:13","7:36","7:58",
   "8:21","8:43","9:06","9:28","9:51","10:13","10:36","10:58",
   "11:21","11:43","12:06","12:28","12:51",
-  "1:13"
+  "1:13","1:36"
 ];
 
 const OLD_DEFAULT_TIMES_A = [
@@ -230,6 +230,12 @@ export default function TheList() {
   const [dragCalMonth, setDragCalMonth] = useState(null);
   const [dragCalHover, setDragCalHover] = useState(false);
   const [reassignQueue, setReassignQueue] = useState([]);
+  const [isLiveDragging, setIsLiveDragging] = useState(false);
+  const [dragOverKey, setDragOverKey] = useState(null);
+  const dragChipRef = useRef(null);
+  const dragPosRef = useRef({x:0,y:0});
+  const dragOverRef = useRef(null);
+  const dragStateRef = useRef(null);
   const bannerTimer = useRef(null);
   const longPressTimer = useRef(null);
   const checkoffLongPress = useRef(null);
@@ -242,6 +248,7 @@ export default function TheList() {
   const selectDragAnchor = useRef(null);
   const schedulesRef = useRef(schedules);
   schedulesRef.current = schedules;
+  dragStateRef.current = dragState;
 
   useEffect(function() { try { localStorage.setItem("tl_schedules", JSON.stringify(schedules)); } catch(e) {} }, [schedules]);
   useEffect(function() { try { localStorage.setItem("tl_clients", JSON.stringify(clientMemory)); } catch(e) {} }, [clientMemory]);
@@ -870,30 +877,42 @@ export default function TheList() {
     touchStart.current=null;
   };
 
-  const startDragLongPress = function(dateKey, idx, touchX, touchY) {
+  const startDragLongPress = function(dateKey, idx, touchX, touchY, isTouch) {
     if (dragLongPress.current) { clearTimeout(dragLongPress.current); dragLongPress.current = null; }
     dragTouchStart.current = {x: touchX||0, y: touchY||0};
     dragLongPress.current = setTimeout(function() {
       dragLongPress.current = null;
+      var startX = dragTouchStart.current ? dragTouchStart.current.x : (touchX||0);
+      var startY = dragTouchStart.current ? dragTouchStart.current.y : (touchY||0);
       dragTouchStart.current = null;
       var slot = getSlots(dateKey)[idx];
       if (!slot.name) return;
-      var clients;
-      if (selectMode && selectedSlots[dateKey+"-"+idx]) {
+      var isMulti = selectMode && selectedSlots[dateKey+"-"+idx];
+      if (isMulti) {
         var entries = Object.keys(selectedSlots).filter(function(k){ return selectedSlots[k]; });
-        clients = entries.map(function(k){
+        var mClients = entries.map(function(k){
           var parts = k.split("-"); var di = parseInt(parts[parts.length-1]); var dk2 = parts.slice(0,parts.length-1).join("-");
           var sl = getSlots(dk2)[di]; return {name:sl.name,price:sl.price,recurWeeks:sl.recurWeeks,originalDateKey:dk2,originalIdx:di};
         }).filter(function(c){ return c.name; });
-        setDragState({clients,sourceKey:dateKey+"-"+idx,multi:true});
-      } else {
-        clients = [{name:slot.name,price:slot.price,recurWeeks:slot.recurWeeks,originalDateKey:dateKey,originalIdx:idx}];
-        setDragState({clients,sourceKey:dateKey+"-"+idx,multi:false});
+        setDragState({clients:mClients,sourceKey:dateKey+"-"+idx,multi:true});
+        setDragCalOpen(true); setDragCalMonth(new Date()); setDragCalHover(true);
+        playSound("lock");
+        return;
       }
-      // Tap-to-drop model: open the calendar already expanded so dates are tappable immediately.
-      setDragCalOpen(true); setDragCalMonth(new Date()); setDragCalHover(true);
-      playSound("lock");
-    }, 1000);
+      var clients = [{name:slot.name,price:slot.price,recurWeeks:slot.recurWeeks,originalDateKey:dateKey,originalIdx:idx}];
+      setDragState({clients,sourceKey:dateKey+"-"+idx,multi:false});
+      if (isTouch) {
+        // True drag-and-drop: lift the appointment and let it follow the finger.
+        dragPosRef.current = {x:startX, y:startY};
+        dragOverRef.current = null; setDragOverKey(null);
+        setIsLiveDragging(true);
+        playSound("lock");
+      } else {
+        // Mouse / desktop fallback: open the date picker.
+        setDragCalOpen(true); setDragCalMonth(new Date()); setDragCalHover(true);
+        playSound("lock");
+      }
+    }, 500);
   };
   const cancelDragLongPress = function() {
     if (dragLongPress.current) { clearTimeout(dragLongPress.current); dragLongPress.current = null; }
@@ -908,6 +927,88 @@ export default function TheList() {
   const cancelDragPickup = function() {
     setDragState(null); setDragCalOpen(false); setDragCalHover(false);
   };
+
+  // Drop a picked-up appointment onto a visible empty slot (handles same-day and cross-day).
+  const dropPickedUpOnSlot = function(targetDateKey, targetIdx) {
+    var ds = dragStateRef.current;
+    if (!ds || ds.multi) return false;
+    var client = ds.clients[0];
+    if (!client) return false;
+    if (client.originalDateKey === targetDateKey && client.originalIdx === targetIdx) return false;
+    var targetSlot = getSlots(targetDateKey)[targetIdx];
+    if (!targetSlot || targetSlot.name || targetSlot.blocked) return false;
+    var sameDay = client.originalDateKey === targetDateKey;
+    var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
+    pushUndo(snapshot);
+    if (sameDay) {
+      var arr = [...getSlots(targetDateKey)];
+      arr[targetIdx] = {...arr[targetIdx],name:client.name,price:client.price,recurWeeks:client.recurWeeks,isException:true,done:false};
+      arr[client.originalIdx] = {...arr[client.originalIdx],name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null};
+      setSlots(targetDateKey, arr);
+    } else {
+      var ts = [...getSlots(targetDateKey)];
+      ts[targetIdx] = {...ts[targetIdx],name:client.name,price:client.price,recurWeeks:client.recurWeeks,isException:true,done:false};
+      setSlots(targetDateKey, ts);
+      var os = [...getSlots(client.originalDateKey)];
+      os[client.originalIdx] = {...os[client.originalIdx],name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null};
+      setSlots(client.originalDateKey, os);
+    }
+    addHistoryEntry({type:"added",time:targetSlot.time,name:client.name,price:client.price,dateKey:targetDateKey});
+    return true;
+  };
+
+  useEffect(function() {
+    if (!isLiveDragging) return;
+    if (dragChipRef.current) {
+      dragChipRef.current.style.transform = "translate(" + (dragPosRef.current.x + 14) + "px," + (dragPosRef.current.y - 22) + "px)";
+    }
+    var findDropKey = function(x, y) {
+      var el = document.elementFromPoint(x, y);
+      while (el && !(el.dataset && el.dataset.droprow)) el = el.parentElement;
+      if (el && el.dataset && el.dataset.droprow && el.dataset.dropfilled === "0" && el.dataset.dropblocked === "0") return el.dataset.droprow;
+      return null;
+    };
+    var onMove = function(e) {
+      var t = e.touches && e.touches[0];
+      if (!t) return;
+      e.preventDefault();
+      dragPosRef.current = {x:t.clientX, y:t.clientY};
+      if (dragChipRef.current) dragChipRef.current.style.transform = "translate(" + (t.clientX + 14) + "px," + (t.clientY - 22) + "px)";
+      var key = findDropKey(t.clientX, t.clientY);
+      if (key !== dragOverRef.current) { dragOverRef.current = key; setDragOverKey(key); }
+    };
+    var onEnd = function(e) {
+      if (e.cancelable) e.preventDefault();
+      var key = dragOverRef.current;
+      if (!key) {
+        var t = e.changedTouches && e.changedTouches[0];
+        if (t) key = findDropKey(t.clientX, t.clientY);
+      }
+      var handled = false;
+      if (key) {
+        var parts = key.split("-"); var di = parseInt(parts[parts.length-1]); var dk2 = parts.slice(0,parts.length-1).join("-");
+        handled = dropPickedUpOnSlot(dk2, di);
+      }
+      setIsLiveDragging(false);
+      dragOverRef.current = null; setDragOverKey(null);
+      if (handled) {
+        setDragState(null);
+      } else if (dragStateRef.current && !dragStateRef.current.multi) {
+        // Released over nothing — fall back to the date picker for moves to another day/month.
+        setDragCalOpen(true); setDragCalMonth(new Date()); setDragCalHover(true);
+      } else {
+        setDragState(null);
+      }
+    };
+    window.addEventListener("touchmove", onMove, {passive:false});
+    window.addEventListener("touchend", onEnd);
+    window.addEventListener("touchcancel", onEnd);
+    return function() {
+      window.removeEventListener("touchmove", onMove, {passive:false});
+      window.removeEventListener("touchend", onEnd);
+      window.removeEventListener("touchcancel", onEnd);
+    };
+  }, [isLiveDragging]);
 
   const selectRangeInDay = function(dateKey, fromIdx, toIdx) {
     var lo=Math.min(fromIdx,toIdx); var hi=Math.max(fromIdx,toIdx);
@@ -1047,7 +1148,7 @@ export default function TheList() {
   var canRedo = redoStack.length>0;
 
   return (
-    <div style={{minHeight:"100vh",background:"#ffffff",fontFamily:"Georgia,serif",color:"#1a1a1a",paddingTop:reassignMode?"calc(env(safe-area-inset-top,0px) + 52px)":"0"}}
+    <div style={{minHeight:"100dvh",display:"flex",flexDirection:"column",background:"#ffffff",fontFamily:"Georgia,serif",color:"#1a1a1a",paddingTop:reassignMode?"calc(env(safe-area-inset-top,0px) + 52px)":"0"}}
       onMouseUp={function(){ endSelectDrag(); if(dragState&&!dragCalHover) { setDragState(null); setDragCalOpen(false); } }}
       onTouchEnd={function(){ endSelectDrag(); }}>
 
@@ -1057,6 +1158,13 @@ export default function TheList() {
           {(banner.type!=="undo"&&banner.type!=="redo"&&canUndo)&&(
             <button onClick={handleUndo} style={{background:"rgba(255,255,255,0.22)",border:"none",borderRadius:"10px",color:"#fff",padding:"3px 10px",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",flexShrink:0}}>Undo</button>
           )}
+        </div>
+      )}
+
+      {isLiveDragging && dragState && (
+        <div ref={dragChipRef}
+          style={{position:"fixed",left:0,top:0,zIndex:3000,pointerEvents:"none",background:"#1a1a1a",color:"#fff",padding:"8px 14px",borderRadius:"9px",fontSize:"14px",fontFamily:"Georgia,serif",boxShadow:"0 8px 24px rgba(0,0,0,0.35)",whiteSpace:"nowrap",transform:"translate(" + (dragPosRef.current.x + 14) + "px," + (dragPosRef.current.y - 22) + "px)"}}>
+          {dragState.clients.length>1 ? (dragState.clients.length+" appointments") : dragState.clients[0].name}
         </div>
       )}
 
@@ -1483,7 +1591,7 @@ export default function TheList() {
       )}
 
       {/* HEADER */}
-      <div style={{borderBottom:"1px solid #e8e8e6",padding:"18px 20px 14px",paddingTop:"calc(env(safe-area-inset-top,0px) + 14px)",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,background:"#ffffff",zIndex:100}}>
+      <div style={{borderBottom:"1px solid #e8e8e6",padding:"6px 20px 6px",paddingTop:"calc(env(safe-area-inset-top,0px) + 6px)",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,background:"#ffffff",zIndex:100,flexShrink:0}}>
         <div style={{display:"flex",gap:"2px",background:"#e8e8e6",padding:"3px",borderRadius:"6px"}}>
           {VIEWS.map(function(v){ return (
             <button key={v} onClick={function(){ if(v==="Wknd") setBaseDate(getUpcomingWeekend()); else if(v==="3-Day"||v==="Week") setBaseDate(new Date()); setView(v); }} style={{padding:"5px 12px",fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",border:"none",borderRadius:"4px",cursor:"pointer",background:view===v?"#1a1a1a":"transparent",color:view===v?"#ffffff":"#999",fontFamily:"inherit",transition:"all 0.15s"}}>{v}</button>
@@ -1506,13 +1614,13 @@ export default function TheList() {
       {view==="Month"&&(function(){
         var monthDays=getMonthDays();
         return (
-          <div style={{width:"100vw",position:"relative",left:"50%",right:"50%",marginLeft:"-50vw",marginRight:"-50vw",boxSizing:"border-box",textAlign:"left"}}>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",background:"#e8e8e6",gap:"1px",borderBottom:"1px solid #e8e8e6"}}>
+          <div style={{width:"100vw",position:"relative",left:"50%",right:"50%",marginLeft:"-50vw",marginRight:"-50vw",boxSizing:"border-box",textAlign:"left",flex:"1 1 auto",display:"flex",flexDirection:"column",minHeight:0}}>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",background:"#e8e8e6",gap:"1px",borderBottom:"1px solid #e8e8e6",flexShrink:0}}>
               {["Mon","Tue","Wed","Thu","Fri","Sat","Sun"].map(function(d){ return <div key={d} style={{padding:"8px 0",textAlign:"center",fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",color:"#aaa",background:"#fafaf8"}}>{d}</div>; })}
             </div>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:"1px",background:"#e8e8e6"}}>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:"1px",background:"#e8e8e6",flex:"1 1 auto",gridAutoRows:"1fr",minHeight:0}}>
               {monthDays.map(function(day,i){
-                if (!day) return <div key={"empty-"+i} style={{background:"#f8f8f6",minHeight:"110px"}}/>;
+                if (!day) return <div key={"empty-"+i} style={{background:"#f8f8f6",minHeight:"64px"}}/>;
                 var dk=toDateKey(day); var slots=getSlots(dk); var booked=slots.filter(function(s){ return s.name; });
                 var isT=isToday(day); var holiday=getHolidayForDate(dk); var range=getDayTimeRange(dk);
                 return (
@@ -1522,7 +1630,7 @@ export default function TheList() {
                     onMouseUp={cancelLongPress} onMouseLeave={function(e){ cancelLongPress();e.currentTarget.style.background=isT?"#fffbf0":"#ffffff"; }}
                     onTouchStart={function(){ longPressTimer.current=setTimeout(function(){ setMonthLongPress({dateKey:dk,day}); },600); }}
                     onTouchEnd={cancelLongPress} onTouchMove={cancelLongPress}
-                    style={{background:isT?"#fffbf0":"#ffffff",minHeight:"110px",padding:"7px 8px",cursor:"pointer",borderTop:isT?"2px solid #a07830":"2px solid transparent",transition:"background 0.1s",userSelect:"none",boxSizing:"border-box"}}
+                    style={{background:isT?"#fffbf0":"#ffffff",minHeight:"64px",padding:"7px 8px",cursor:"pointer",borderTop:isT?"2px solid #a07830":"2px solid transparent",transition:"background 0.1s",userSelect:"none",boxSizing:"border-box"}}
                     onMouseEnter={function(e){ e.currentTarget.style.background=isT?"#fff8e8":"#f4f4f2"; }}
                   >
                     <div style={{fontSize:"14px",color:isT?"#a07830":"#1a1a1a",fontWeight:isT?"bold":"normal",marginBottom:"3px"}}>{day.getDate()}</div>
@@ -1544,14 +1652,14 @@ export default function TheList() {
       })()}
 
       {view!=="Month"&&(
-        <div style={{display:"grid",gridTemplateColumns:("repeat("+getDayCount()+",1fr)"),gap:"1px",background:"#d8d8d6"}}>
+        <div style={{display:"grid",gridTemplateColumns:("repeat("+getDayCount()+",1fr)"),gap:"1px",background:"#d8d8d6",flexShrink:0}}>
           {dates.map(function(date){
             var dateKey=toDateKey(date); var slots=getSlots(dateKey);
             return (
               <div key={dateKey} style={{background:"#ffffff",display:"flex",flexDirection:"column"}}>
-                <div style={{padding:"12px 14px 10px",borderBottom:"1px solid #ebebea"}}>
+                <div style={{padding:"6px 14px 5px",borderBottom:"1px solid #ebebea"}}>
                   {(function(){
-                    var sz=view==="Day"?"22px":"16px"; var mo=date.getMonth();
+                    var sz=view==="Day"?"20px":"16px"; var mo=date.getMonth();
                     var monthStr=[3,4,5,6].includes(mo)?date.toLocaleDateString("en-US",{month:"long",day:"numeric"}):date.toLocaleDateString("en-US",{month:"short",day:"numeric"});
                     var wdStr=isToday(date)?"Today":date.toLocaleDateString("en-US",{weekday:"short"});
                     return (
@@ -1563,7 +1671,7 @@ export default function TheList() {
                     );
                   })()}
                 </div>
-                <div style={{flex:1,padding:"6px 0"}}
+                <div style={{flex:1,padding:"2px 0"}}
                   onTouchMove={function(e){
                     if (!selectDragAnchor.current) return;
                     var t=e.touches[0]; if(!t) return;
@@ -1584,6 +1692,9 @@ export default function TheList() {
                     var isDragging=dragState&&dragState.sourceKey===rowKey;
                     var slotBg=slot.blocked?"#f4f4f2":wasRemoved?"#fff0ee":isOccEdit?"#fff0ee":isSelected?"#f0f4ff":slot.done?"#f4faf4":isEditing?"#f0f0ee":filled?"#fcfcfa":"transparent";
                     var isCustomSlot=slot.isCustom||!DEFAULT_TIMES.includes(slot.time);
+                    var isDropTarget=isLiveDragging&&dragOverKey===rowKey&&!filled&&!slot.blocked;
+                    var showDropHint=isLiveDragging&&!filled&&!slot.blocked&&!isEditing&&!(dragState&&dragState.sourceKey===rowKey);
+                    if (isDropTarget) slotBg="#e3f3e3";
                     return (
                       <div key={rowKey} style={{position:"relative",overflow:"hidden",borderBottom:"1px solid #efefed",opacity:isDragging?0.4:1}}>
                         {!filled&&!slot.blocked&&!isEditing&&!(reassignMode&&reassignMode.currentDateKey===dateKey)&&isCustomSlot&&(
@@ -1597,7 +1708,8 @@ export default function TheList() {
                           </div>
                         )}
                         <div
-                          style={{display:"flex",alignItems:"center",padding:"0 14px",height:"46px",background:slotBg,transition:"background 0.3s",position:"relative",opacity:slot.blocked?0.6:1,userSelect:"none",WebkitUserSelect:"none"}}
+                          data-droprow={rowKey} data-dropfilled={filled?"1":"0"} data-dropblocked={slot.blocked?"1":"0"}
+                          style={{display:"flex",alignItems:"center",padding:"0 14px",height:"42px",background:slotBg,transition:"background 0.2s",position:"relative",opacity:slot.blocked?0.6:1,userSelect:"none",WebkitUserSelect:"none",outline:isDropTarget?"2px solid #5a9a5a":(showDropHint?"1px dashed #cdddcd":"none"),outlineOffset:"-3px",borderRadius:isDropTarget?"6px":"0"}}
                           onTouchStart={function(e){ handleTouchStart(e,dateKey,idx); }}
                           onTouchEnd={function(e){ handleTouchEnd(e,dateKey,idx); }}
                           onMouseUp={function(){ if(dragState&&!dragState.multi&&!dragCalHover) handleSlotDrop(dateKey,idx); }}
@@ -1644,7 +1756,7 @@ export default function TheList() {
                               onMouseDown={function(){ if(filled&&!isEditing&&!selectMode) startDragLongPress(dateKey,idx,0,0); }}
                               onMouseUp={function(){ cancelDragLongPress(); }}
                               onMouseLeave={cancelDragLongPress}
-                              onTouchStart={function(e){ if(filled&&!isEditing&&!selectMode){ startDragLongPress(dateKey,idx,e.touches[0].clientX,e.touches[0].clientY); } }}
+                              onTouchStart={function(e){ if(filled&&!isEditing&&!selectMode){ startDragLongPress(dateKey,idx,e.touches[0].clientX,e.touches[0].clientY,true); } }}
                               onTouchMove={function(e){ if(e.touches[0]) cancelDragLongPressIfMoved(e.touches[0].clientX,e.touches[0].clientY); }}
                               onTouchEnd={function(e){ cancelDragLongPress(); handleTouchEnd(e,dateKey,idx); }}
                             >
@@ -1669,9 +1781,8 @@ export default function TheList() {
                                       {slot.recurWeeks?((slot.recurWeeks===1?"1w":(slot.recurWeeks+"w"))+(slot.isException?"*":"")):""}
                                     </div>
                                   )}
-                                  {filled&&<button onClick={function(e){ e.stopPropagation(); if(slot.groupId){var aS=getSlots(dateKey);var gS=aS.map(function(s,i){ return {...s,i}; }).filter(function(s){ return s.groupId===slot.groupId&&s.name; });if(gS.length>1){setGroupRecurModal({dateKey,idx,slot,groupSlots:gS,weeks:null});return;}} setRecurringModal({dateKey,idx,slot}); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 2px",color:slot.recurWeeks?"#4a8a9a":"#ccc",fontSize:"13px",lineHeight:1}}>{"↺"}</button>}
-                                  {filled&&<button onClick={function(e){ e.stopPropagation(); setNoteDraft(slot.note||""); setNoteModal({dateKey,idx,name:slot.name}); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 2px",color:slot.note?"#c9a96e":"#ccc",fontSize:"13px",lineHeight:1}}>{"✎"}</button>}
-                                  {filled&&<button onClick={function(e){ e.stopPropagation(); requestRemoveSlot(dateKey,idx); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 4px",color:"#ddd",fontSize:"15px",lineHeight:1}} onMouseEnter={function(e){ e.currentTarget.style.color="#c0392b"; }} onMouseLeave={function(e){ e.currentTarget.style.color="#ddd"; }}>{"×"}</button>}
+                                  {filled&&<button onClick={function(e){ e.stopPropagation(); if(slot.groupId){var aS=getSlots(dateKey);var gS=aS.map(function(s,i){ return {...s,i}; }).filter(function(s){ return s.groupId===slot.groupId&&s.name; });if(gS.length>1){setGroupRecurModal({dateKey,idx,slot,groupSlots:gS,weeks:null});return;}} setRecurringModal({dateKey,idx,slot}); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 5px",color:slot.recurWeeks?"#4a8a9a":"#bbb",fontSize:"19px",fontWeight:"bold",lineHeight:1}}>{"↺"}</button>}
+                                  {filled&&<button onClick={function(e){ e.stopPropagation(); setNoteDraft(slot.note||""); setNoteModal({dateKey,idx,name:slot.name}); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 5px",color:slot.note?"#c9a96e":"#bbb",fontSize:"19px",fontWeight:"bold",lineHeight:1}}>{"✎"}</button>}
                                 </div>
                               )}
                               {isEditing&&<input value={editValues.price} onChange={function(e){ setEditValues(function(v){ return {...v,price:e.target.value}; }); }} onKeyDown={function(e){ handleKeyDown(e,dateKey,idx); }} onBlur={handleBlur} data-rowkey={rowKey} placeholder="$" style={{width:"52px",fontSize:"13px",color:"#1a1a1a",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"4px",outline:"none",padding:"2px 5px",fontFamily:"Georgia,serif",WebkitAppearance:"none",appearance:"none"}}/>}
@@ -1681,7 +1792,7 @@ export default function TheList() {
                       </div>
                     );
                   })}
-                  <div style={{display:"flex",gap:"6px",padding:"10px 14px"}}>
+                  <div style={{display:"flex",gap:"6px",padding:"6px 14px 8px"}}>
                     <button onClick={function(){ addSlotToBeginning(dateKey); }} style={{flex:1,padding:"9px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ AM</button>
                     {selectMode ? (
                       <button onClick={function(){
