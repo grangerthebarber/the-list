@@ -238,6 +238,7 @@ export default function TheList() {
   const editValuesRef = useRef(editValues);
   editValuesRef.current = editValues;
   const touchStart = useRef(null);
+  const dragTouchStart = useRef(null);
   const selectDragAnchor = useRef(null);
   const schedulesRef = useRef(schedules);
   schedulesRef.current = schedules;
@@ -869,8 +870,12 @@ export default function TheList() {
     touchStart.current=null;
   };
 
-  const startDragLongPress = function(dateKey, idx) {
+  const startDragLongPress = function(dateKey, idx, touchX, touchY) {
+    if (dragLongPress.current) { clearTimeout(dragLongPress.current); dragLongPress.current = null; }
+    dragTouchStart.current = {x: touchX||0, y: touchY||0};
     dragLongPress.current = setTimeout(function() {
+      dragLongPress.current = null;
+      dragTouchStart.current = null;
       var slot = getSlots(dateKey)[idx];
       if (!slot.name) return;
       var clients;
@@ -885,12 +890,23 @@ export default function TheList() {
         clients = [{name:slot.name,price:slot.price,recurWeeks:slot.recurWeeks,originalDateKey:dateKey,originalIdx:idx}];
         setDragState({clients,sourceKey:dateKey+"-"+idx,multi:false});
       }
-      setDragCalOpen(true); setDragCalMonth(new Date()); setDragCalHover(false);
+      // Tap-to-drop model: open the calendar already expanded so dates are tappable immediately.
+      setDragCalOpen(true); setDragCalMonth(new Date()); setDragCalHover(true);
       playSound("lock");
     }, 1000);
   };
   const cancelDragLongPress = function() {
     if (dragLongPress.current) { clearTimeout(dragLongPress.current); dragLongPress.current = null; }
+    dragTouchStart.current = null;
+  };
+  const cancelDragLongPressIfMoved = function(touchX, touchY) {
+    if (!dragTouchStart.current) return;
+    var dx = Math.abs(touchX - dragTouchStart.current.x);
+    var dy = Math.abs(touchY - dragTouchStart.current.y);
+    if (dx > 12 || dy > 12) { cancelDragLongPress(); }
+  };
+  const cancelDragPickup = function() {
+    setDragState(null); setDragCalOpen(false); setDragCalHover(false);
   };
 
   const selectRangeInDay = function(dateKey, fromIdx, toIdx) {
@@ -1045,49 +1061,47 @@ export default function TheList() {
       )}
 
       {dragCalOpen && dragState && (
-        <div style={{position:"fixed",inset:0,zIndex:1500,pointerEvents:"none"}}>
+        <div style={{position:"fixed",inset:0,zIndex:1500,background:"rgba(0,0,0,0.45)",display:"flex",alignItems:"center",justifyContent:"center",padding:"16px"}}
+          onClick={cancelDragPickup}>
           <div
-            style={{position:"absolute",bottom:"90px",right:"16px",background:"#fff",border:"1px solid #d8d8d6",borderRadius:dragCalHover?"16px":"12px",boxShadow:"0 8px 32px rgba(0,0,0,0.18)",transition:"all 0.2s",padding:dragCalHover?"18px":"10px",width:dragCalHover?"300px":"110px",overflow:"hidden",pointerEvents:"auto"}}
-            onMouseEnter={function(){ setDragCalHover(true); }}
-            onMouseLeave={function(){ setDragCalHover(false); }}
-            onTouchMove={function(e){ setDragCalHover(true); e.stopPropagation(); }}
+            style={{background:"#fff",border:"1px solid #d8d8d6",borderRadius:"16px",boxShadow:"0 8px 32px rgba(0,0,0,0.18)",padding:"20px",width:"min(340px,92vw)",boxSizing:"border-box"}}
+            onClick={function(e){ e.stopPropagation(); }}
           >
-            {!dragCalHover && (
-              <div style={{textAlign:"center"}}>
-                <div style={{fontSize:"10px",color:"#aaa",marginBottom:"4px",letterSpacing:"0.1em",textTransform:"uppercase"}}>Drop on date</div>
-                <div style={{fontSize:"24px"}}>📅</div>
-              </div>
-            )}
-            {dragCalHover && dragCalMonth && (function(){
+            <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#c9a96e",marginBottom:"4px"}}>Move to…</div>
+            <div style={{fontSize:"16px",color:"#1a1a1a",marginBottom:"4px"}}>
+              {dragState.clients.length>1 ? (dragState.clients.length+" appointments") : dragState.clients[0].name}
+            </div>
+            <div style={{fontSize:"12px",color:"#999",marginBottom:"16px"}}>Tap a date to reschedule</div>
+            {dragCalMonth && (function(){
               var year=dragCalMonth.getFullYear(); var month=dragCalMonth.getMonth();
               var firstDay=new Date(year,month,1); var lastDay=new Date(year,month+1,0);
               var sdow=firstDay.getDay()===0?6:firstDay.getDay()-1;
               var cells=[]; for(var i=0;i<sdow;i++) cells.push(null);
               for(var d=1;d<=lastDay.getDate();d++) cells.push(new Date(year,month,d));
-              var ml=dragCalMonth.toLocaleDateString("en-US",{month:"short",year:"numeric"});
+              var ml=dragCalMonth.toLocaleDateString("en-US",{month:"long",year:"numeric"});
               return (
                 <div>
-                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:"8px"}}>
-                    <button onClick={function(){ setDragCalMonth(new Date(year,month-1,1)); }} style={{background:"none",border:"none",color:"#666",cursor:"pointer",fontSize:"16px",padding:"2px 6px",fontFamily:"inherit"}}>{"‹"}</button>
-                    <div style={{fontSize:"12px",color:"#1a1a1a"}}>{ml}</div>
-                    <button onClick={function(){ setDragCalMonth(new Date(year,month+1,1)); }} style={{background:"none",border:"none",color:"#666",cursor:"pointer",fontSize:"16px",padding:"2px 6px",fontFamily:"inherit"}}>{"›"}</button>
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:"12px"}}>
+                    <button onClick={function(){ setDragCalMonth(new Date(year,month-1,1)); }} style={{background:"#f4f4f2",border:"1px solid #e4e4e2",borderRadius:"6px",color:"#666",cursor:"pointer",fontSize:"18px",padding:"4px 12px",fontFamily:"inherit"}}>{"‹"}</button>
+                    <div style={{fontSize:"14px",color:"#1a1a1a"}}>{ml}</div>
+                    <button onClick={function(){ setDragCalMonth(new Date(year,month+1,1)); }} style={{background:"#f4f4f2",border:"1px solid #e4e4e2",borderRadius:"6px",color:"#666",cursor:"pointer",fontSize:"18px",padding:"4px 12px",fontFamily:"inherit"}}>{"›"}</button>
                   </div>
-                  <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:"2px"}}>
-                    {["M","T","W","T","F","S","S"].map(function(l,i){ return <div key={i} style={{textAlign:"center",fontSize:"9px",color:"#aaa"}}>{l}</div>; })}
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:"3px"}}>
+                    {["M","T","W","T","F","S","S"].map(function(l,i){ return <div key={i} style={{textAlign:"center",fontSize:"10px",color:"#aaa",paddingBottom:"4px"}}>{l}</div>; })}
                     {cells.map(function(day,i){
                       if (!day) return <div key={"e"+i}/>;
                       var dk=toDateKey(day); var isT=isToday(day);
                       return (
                         <div key={dk}
-                          onMouseUp={function(){ handleDragDrop(dk); }}
-                          onTouchEnd={function(){ handleDragDrop(dk); }}
-                          style={{textAlign:"center",fontSize:"11px",color:isT?"#a07830":"#1a1a1a",fontWeight:isT?"bold":"normal",padding:"5px 2px",borderRadius:"4px",cursor:"pointer",background:isT?"#fffbf0":"transparent"}}
-                          onMouseEnter={function(e){ e.currentTarget.style.background="#f0f0ee"; }}
-                          onMouseLeave={function(e){ e.currentTarget.style.background=isT?"#fffbf0":"transparent"; }}
+                          onClick={function(){ handleDragDrop(dk); }}
+                          style={{textAlign:"center",fontSize:"14px",color:isT?"#a07830":"#1a1a1a",fontWeight:isT?"bold":"normal",padding:"10px 2px",borderRadius:"6px",cursor:"pointer",background:isT?"#fffbf0":"#f8f8f6",border:"1px solid #efefed"}}
+                          onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }}
+                          onMouseLeave={function(e){ e.currentTarget.style.background=isT?"#fffbf0":"#f8f8f6"; }}
                         >{day.getDate()}</div>
                       );
                     })}
                   </div>
+                  <button onClick={cancelDragPickup} style={{display:"block",width:"100%",marginTop:"16px",padding:"10px",background:"none",border:"1px solid #d8d8d6",borderRadius:"8px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Cancel</button>
                 </div>
               );
             })()}
@@ -1492,13 +1506,13 @@ export default function TheList() {
       {view==="Month"&&(function(){
         var monthDays=getMonthDays();
         return (
-          <div style={{width:"100%",boxSizing:"border-box"}}>
+          <div style={{width:"100vw",position:"relative",left:"50%",right:"50%",marginLeft:"-50vw",marginRight:"-50vw",boxSizing:"border-box",textAlign:"left"}}>
             <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",background:"#e8e8e6",gap:"1px",borderBottom:"1px solid #e8e8e6"}}>
               {["Mon","Tue","Wed","Thu","Fri","Sat","Sun"].map(function(d){ return <div key={d} style={{padding:"8px 0",textAlign:"center",fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",color:"#aaa",background:"#fafaf8"}}>{d}</div>; })}
             </div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:"1px",background:"#e8e8e6"}}>
               {monthDays.map(function(day,i){
-                if (!day) return <div key={"empty-"+i} style={{background:"#f8f8f6",minHeight:"100px"}}/>;
+                if (!day) return <div key={"empty-"+i} style={{background:"#f8f8f6",minHeight:"110px"}}/>;
                 var dk=toDateKey(day); var slots=getSlots(dk); var booked=slots.filter(function(s){ return s.name; });
                 var isT=isToday(day); var holiday=getHolidayForDate(dk); var range=getDayTimeRange(dk);
                 return (
@@ -1508,7 +1522,7 @@ export default function TheList() {
                     onMouseUp={cancelLongPress} onMouseLeave={function(e){ cancelLongPress();e.currentTarget.style.background=isT?"#fffbf0":"#ffffff"; }}
                     onTouchStart={function(){ longPressTimer.current=setTimeout(function(){ setMonthLongPress({dateKey:dk,day}); },600); }}
                     onTouchEnd={cancelLongPress} onTouchMove={cancelLongPress}
-                    style={{background:isT?"#fffbf0":"#ffffff",minHeight:"100px",padding:"7px 8px",cursor:"pointer",borderTop:isT?"2px solid #a07830":"2px solid transparent",transition:"background 0.1s",userSelect:"none",boxSizing:"border-box"}}
+                    style={{background:isT?"#fffbf0":"#ffffff",minHeight:"110px",padding:"7px 8px",cursor:"pointer",borderTop:isT?"2px solid #a07830":"2px solid transparent",transition:"background 0.1s",userSelect:"none",boxSizing:"border-box"}}
                     onMouseEnter={function(e){ e.currentTarget.style.background=isT?"#fff8e8":"#f4f4f2"; }}
                   >
                     <div style={{fontSize:"14px",color:isT?"#a07830":"#1a1a1a",fontWeight:isT?"bold":"normal",marginBottom:"3px"}}>{day.getDate()}</div>
@@ -1627,25 +1641,23 @@ export default function TheList() {
                             <div onClick={function(){ handleReassignSlotTapWithQueue(dateKey,idx); }} style={{flex:1,fontSize:"13px",color:"#2a7a2a",cursor:"pointer",padding:"0 2px"}}>tap to place</div>
                           ):(
                             <div style={{flex:1,display:"flex",alignItems:"center",gap:"4px"}}
-                              onMouseDown={function(){ if(filled&&!isEditing&&!selectMode) startDragLongPress(dateKey,idx); }}
+                              onMouseDown={function(){ if(filled&&!isEditing&&!selectMode) startDragLongPress(dateKey,idx,0,0); }}
                               onMouseUp={function(){ cancelDragLongPress(); }}
                               onMouseLeave={cancelDragLongPress}
-                              onTouchStart={function(){ if(filled&&!isEditing&&!selectMode) startDragLongPress(dateKey,idx); }}
-                              onTouchMove={cancelDragLongPress}
+                              onTouchStart={function(e){ if(filled&&!isEditing&&!selectMode){ startDragLongPress(dateKey,idx,e.touches[0].clientX,e.touches[0].clientY); } }}
+                              onTouchMove={function(e){ if(e.touches[0]) cancelDragLongPressIfMoved(e.touches[0].clientX,e.touches[0].clientY); }}
                               onTouchEnd={function(e){ cancelDragLongPress(); handleTouchEnd(e,dateKey,idx); }}
                             >
                               {isOccEdit&&<div style={{position:"absolute",top:"2px",left:"70px",fontSize:"9px",color:"#c0392b"}}>Editing {slot.name}</div>}
                               <input
                                 value={isEditing?editValues.name:(wasRemoved?"":slot.name)}
                                 readOnly={!isEditing}
-                                onFocus={function(){ if(!isEditing&&!selectMode) startEdit(dateKey,idx); }}
+                                onFocus={function(){ if(!isEditing&&!selectMode&&!dragLongPress.current&&!dragState) startEdit(dateKey,idx); }}
                                 onChange={function(e){ if(isEditing) setEditValues(function(v){ return {...v,name:e.target.value}; }); }}
                                 onKeyDown={function(e){ if(isEditing) handleKeyDown(e,dateKey,idx); }}
                                 onBlur={function(e){ if(isEditing) handleBlur(e); }}
-                                onMouseDown={function(){ if(filled&&!isEditing&&!selectMode) startDragLongPress(dateKey,idx); }}
+                                onMouseDown={function(){ if(filled&&!isEditing&&!selectMode) startDragLongPress(dateKey,idx,0,0); }}
                                 onMouseUp={function(){ cancelDragLongPress(); }}
-                                onTouchStart={function(){ if(filled&&!isEditing&&!selectMode) startDragLongPress(dateKey,idx); }}
-                                onTouchEnd={function(){ cancelDragLongPress(); }} onTouchMove={cancelDragLongPress}
                                 placeholder="" data-rowkey={rowKey}
                                 style={{flex:1,fontSize:"13px",color:wasRemoved?"#c0392b":slot.done?"#2a6a2a":filled?"#1a1a1a":"#999",textDecoration:slot.done?"line-through":"none",background:"transparent",border:"none",outline:"none",padding:"0 2px",fontFamily:"Georgia,serif",cursor:isEditing?"text":"pointer",caretColor:isEditing?"#444":"transparent",WebkitUserSelect:isEditing?"text":"none",userSelect:isEditing?"text":"none",WebkitAppearance:"none",appearance:"none"}}
                               />
@@ -1680,7 +1692,7 @@ export default function TheList() {
                           var sl=getSlots(dk2)[di]; return {name:sl.name,price:sl.price,recurWeeks:sl.recurWeeks,originalDateKey:dk2,originalIdx:di};
                         }).filter(function(c){ return c.name; });
                         if(clients.length===0){ setSelectMode(false); setSelectedSlots({}); return; }
-                        setDragState({clients,sourceKey:null,multi:true}); setDragCalOpen(true); setDragCalMonth(new Date()); setDragCalHover(false);
+                        setDragState({clients,sourceKey:null,multi:true}); setDragCalOpen(true); setDragCalMonth(new Date()); setDragCalHover(true);
                       }} style={{flex:1,padding:"9px",background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"11px"}}>
                         Move {Object.keys(selectedSlots).filter(function(k){ return selectedSlots[k]; }).length}
                       </button>
