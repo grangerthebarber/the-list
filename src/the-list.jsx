@@ -53,6 +53,8 @@ function addDays(date, n) { var d = new Date(date); d.setDate(d.getDate()+n); re
 function addWeeks(date, n) { return addDays(date, n*7); }
 function isToday(date) { return date.toDateString() === new Date().toDateString(); }
 function capitalizeFirst(str) { if (!str) return str; return str.charAt(0).toUpperCase()+str.slice(1); }
+function stripLeadingNumbers(str) { if (!str) return str; return str.replace(/^\s*\d+\s*[.)\-]\s*/, "").replace(/^\s*\d+\s+(?=\D)/, ""); }
+function isLunchName(str) { return !!str && str.trim().toLowerCase()==="lunch"; }
 function parseDateKey(key) { var parts = key.split("-").map(Number); return new Date(parts[0],parts[1]-1,parts[2]); }
 function formatDateKey(date) { return toDateKey(date); }
 function friendlyDate(dateKey) {
@@ -97,7 +99,7 @@ function migrateSchedules(raw) {
 }
 
 function getBannerColor(type) {
-  if (type==="added"||type==="slot_added"||type==="unblocked") return "#2a7a2a";
+  if (type==="added"||type==="slot_added"||type==="unblocked"||type==="checkoff") return "#2a7a2a";
   if (type==="removed"||type==="slot_removed"||type==="blocked") return "#c0392b";
   return "#555";
 }
@@ -105,7 +107,7 @@ function getBannerColor(type) {
 function describeBanner(entry) {
   if (!entry) return "";
   var type = entry.type;
-  var prefix = type==="added"?"Added":type==="removed"?"Removed":type==="edited"?"Edited":type==="recurring_set"?"Set recurring":type==="blocked"?"Blocked":type==="unblocked"?"Unblocked":type==="slot_added"?"Added slot":type==="slot_removed"?"Removed slot":type==="undo"?"Undone":type==="redo"?"Redone":"Changed";
+  var prefix = type==="added"?"Added":type==="checkoff"?"Checked off":type==="removed"?"Removed":type==="edited"?"Edited":type==="recurring_set"?"Set recurring":type==="blocked"?"Blocked":type==="unblocked"?"Unblocked":type==="slot_added"?"Added slot":type==="slot_removed"?"Removed slot":type==="undo"?"Undone":type==="redo"?"Redone":"Changed";
   var name = entry.name ? (" " + entry.name) : "";
   var time = entry.time ? (" at " + entry.time) : "";
   var date = entry.dateKey ? (" · " + friendlyDate(entry.dateKey)) : "";
@@ -217,6 +219,10 @@ export default function TheList() {
   const [monthLongPress, setMonthLongPress] = useState(null);
   const [banner, setBanner] = useState(null);
   const [clientSearch, setClientSearch] = useState("");
+  const [historySearch, setHistorySearch] = useState("");
+  const [noteModal, setNoteModal] = useState(null);
+  const [noteDraft, setNoteDraft] = useState("");
+  const [entryUndoConflict, setEntryUndoConflict] = useState(null);
   const [selectMode, setSelectMode] = useState(false);
   const [selectedSlots, setSelectedSlots] = useState({});
   const [dragState, setDragState] = useState(null);
@@ -232,6 +238,7 @@ export default function TheList() {
   const editValuesRef = useRef(editValues);
   editValuesRef.current = editValues;
   const touchStart = useRef(null);
+  const selectDragAnchor = useRef(null);
   const schedulesRef = useRef(schedules);
   schedulesRef.current = schedules;
 
@@ -308,8 +315,8 @@ export default function TheList() {
   const addHistoryEntry = function(entry) {
     var full = {...entry, timestamp:new Date().toLocaleTimeString(), id:Date.now()+Math.random()};
     setHistory(function(prev){ return [full,...prev].slice(0,200); });
-    showBanner(full);
-    if(entry.type==="added"||entry.type==="slot_added") playSound("lock");
+    showBanner(full, entry.bannerType);
+    if(entry.type==="added"||entry.type==="slot_added"||entry.type==="checkoff") playSound("lock");
     else if(entry.type==="removed"||entry.type==="slot_removed") playSound("delete");
     else playSound("tap");
   };
@@ -318,6 +325,68 @@ export default function TheList() {
     setUndoStack(function(prev){ return [...prev, snapshot].slice(-50); });
     setRedoStack([]);
   };
+
+  var findSlotIdxByTime = function(slots, time) {
+    for (var i=0;i<slots.length;i++) { if (slots[i].time===time) return i; }
+    return -1;
+  };
+
+  var performEntryUndo = function(entry, override) {
+    var dk = entry.dateKey;
+    if (!dk || !entry.time) { showBanner({type:"undo",name:"that change",dateKey:null,time:null}); return; }
+    var slots = [...getSlots(dk)];
+    var idx = findSlotIdxByTime(slots, entry.time);
+    if (idx < 0) { showBanner({type:"undo",name:"that change",dateKey:null,time:null}); return; }
+    var cur = slots[idx];
+    var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
+
+    if (entry.type==="added"||entry.type==="checkoff") {
+      // expected: this slot holds entry.name. If someone else is here now, conflict.
+      if (!override && cur.name && entry.name && cur.name.toLowerCase()!==entry.name.toLowerCase()) {
+        setEntryUndoConflict({entry, current:cur, dateKey:dk}); return;
+      }
+      pushUndo(snapshot);
+      slots[idx] = {...cur,name:"",price:"",done:false,recurWeeks:null,isException:false,blocked:false,blockLabel:"",note:""};
+      setSlots(dk, slots);
+      showBanner({type:"undo",name:entry.name,time:entry.time,dateKey:dk});
+    } else if (entry.type==="removed"||entry.type==="slot_removed") {
+      // expected: slot is empty now. Restore the name. If occupied by someone else, conflict.
+      if (!override && cur.name && entry.name && cur.name.toLowerCase()!==entry.name.toLowerCase()) {
+        setEntryUndoConflict({entry, current:cur, dateKey:dk}); return;
+      }
+      pushUndo(snapshot);
+      slots[idx] = {...cur,name:entry.name||"",price:entry.price||cur.price||"",done:false};
+      setSlots(dk, slots);
+      showBanner({type:"undo",name:entry.name,time:entry.time,dateKey:dk});
+    } else if (entry.type==="edited") {
+      if (!override && cur.name && entry.name && cur.name.toLowerCase()!==entry.name.toLowerCase()) {
+        setEntryUndoConflict({entry, current:cur, dateKey:dk}); return;
+      }
+      pushUndo(snapshot);
+      slots[idx] = {...cur,name:entry.prevName||""};
+      setSlots(dk, slots);
+      showBanner({type:"undo",name:entry.prevName||entry.name,time:entry.time,dateKey:dk});
+    } else if (entry.type==="blocked") {
+      pushUndo(snapshot);
+      slots[idx] = {...cur,blocked:false,blockLabel:""};
+      setSlots(dk, slots);
+      showBanner({type:"undo",name:entry.name,time:entry.time,dateKey:dk});
+    } else if (entry.type==="unblocked") {
+      pushUndo(snapshot);
+      slots[idx] = {...cur,blocked:true,blockLabel:entry.name||"Lunch",name:"",done:false};
+      setSlots(dk, slots);
+      showBanner({type:"undo",name:entry.name,time:entry.time,dateKey:dk});
+    } else if (entry.type==="recurring_set") {
+      pushUndo(snapshot);
+      slots[idx] = {...cur,recurWeeks:null};
+      setSlots(dk, slots);
+      showBanner({type:"undo",name:entry.name,time:entry.time,dateKey:dk});
+    } else {
+      showBanner({type:"undo",name:"that change",dateKey:null,time:null});
+    }
+  };
+
+  var handleEntryUndo = function(entry) { performEntryUndo(entry, false); };
 
   const getDayTimeRange = function(dateKey) {
     var slots = getSlots(dateKey);
@@ -370,8 +439,24 @@ export default function TheList() {
   const doCommit = useCallback(function(dateKey, idx, values) {
     var slots = [...getSlots(dateKey)];
     var prev = slots[idx];
-    var newName = capitalizeFirst((values.name||"").trim());
+    var rawName = stripLeadingNumbers((values.name||"").trim());
     var newPrice = (values.price||"").trim();
+    var asLunch = isLunchName(rawName);
+    var newName = asLunch ? "" : capitalizeFirst(rawName);
+    if (asLunch) {
+      // Typing "lunch" turns the slot into a Lunch block (fully a block, no client memory).
+      if (!prev.blocked) {
+        var snapL = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
+        pushUndo(snapL);
+        slots[idx] = {...prev,name:"",price:"",done:false,recurWeeks:null,isException:false,blocked:true,blockLabel:"Lunch"};
+        setSlots(dateKey,slots);
+        addHistoryEntry({type:"blocked",time:prev.time,name:"Lunch",dateKey});
+      }
+      editingRef.current = null;
+      setEditingCell(null);
+      setEditingOccupied(false);
+      return;
+    }
     if (newName!==prev.name || newPrice!==prev.price) {
       var snapshot = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
       pushUndo(snapshot);
@@ -405,7 +490,7 @@ export default function TheList() {
       var cv = editValuesRef.current;
       var slots = [...getSlots(dateKey)];
       var curSlot = slots[idx];
-      var newName = capitalizeFirst((cv.name||"").trim());
+      var newName = capitalizeFirst(stripLeadingNumbers((cv.name||"").trim()));
       var newPrice = (cv.price||"").trim();
       if (!newName) return;
       var gid = curSlot.groupId || (idx>0&&slots[idx-1].groupId) || newGroupId();
@@ -485,7 +570,7 @@ export default function TheList() {
       var updated = [...slots];
       updated[idx] = {...slot,done:true};
       setSlots(dateKey,updated);
-      showBanner({type:"added",name:slot.name,time:slot.time,dateKey});
+      showBanner({type:"checkoff",name:slot.name,time:slot.time,dateKey});
       return;
     }
     if (slot.recurWeeks) {
@@ -672,6 +757,9 @@ export default function TheList() {
       var rem=slots.filter(function(x){ return x.groupId===groupId&&x.name; });
       if (rem.length===1) { var ri=slots.findIndex(function(x){ return x.groupId===groupId&&x.name; }); if(ri>=0) slots[ri]={...slots[ri],groupId:null}; }
       addHistoryEntry({type:"removed",time:s.time,name:s.name,dateKey});
+      var gk=dateKey+"-"+onlyIdx;
+      setRecentlyRemoved(function(r){ return {...r,[gk]:true}; });
+      setTimeout(function(){ setRecentlyRemoved(function(r){ var n={...r}; delete n[gk]; return n; }); },8000);
     } else {
       slots.forEach(function(s,i){ if(s.groupId===groupId&&s.name){ addHistoryEntry({type:"removed",time:s.time,name:s.name,dateKey}); slots[i]={...s,name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null}; } });
     }
@@ -777,16 +865,7 @@ export default function TheList() {
 
   const handleTouchStart = function(e,dateKey,idx) { touchStart.current={x:e.touches[0].clientX,dateKey,idx}; };
   const handleTouchEnd = function(e,dateKey,idx) {
-    if (!touchStart.current) return;
-    var dx=e.changedTouches[0].clientX-touchStart.current.x;
-    if (dx<-50&&touchStart.current.dateKey===dateKey&&touchStart.current.idx===idx) {
-      var slots=getSlots(dateKey); var slot=slots[idx];
-      var isCustomSlot=slot.isCustom||!DEFAULT_TIMES.includes(slot.time);
-      if (slot.blocked) { toggleBlockSlot(dateKey,idx,null); }
-      else if (!slot.name&&isCustomSlot) { removeCustomSlot(dateKey,idx); }
-      else if (!slot.name&&!isCustomSlot) { toggleBlockSlot(dateKey,idx,"Lunch"); }
-      else { setSwipedSlot(dateKey+"-"+idx); }
-    } else if (dx>30) setSwipedSlot(null);
+    // Swipe gestures removed. Touch end no longer cancels/moves/blocks via swipe.
     touchStart.current=null;
   };
 
@@ -807,12 +886,32 @@ export default function TheList() {
         setDragState({clients,sourceKey:dateKey+"-"+idx,multi:false});
       }
       setDragCalOpen(true); setDragCalMonth(new Date()); setDragCalHover(false);
-      playSound("tap");
-    }, 500);
+      playSound("lock");
+    }, 1000);
   };
   const cancelDragLongPress = function() {
     if (dragLongPress.current) { clearTimeout(dragLongPress.current); dragLongPress.current = null; }
   };
+
+  const selectRangeInDay = function(dateKey, fromIdx, toIdx) {
+    var lo=Math.min(fromIdx,toIdx); var hi=Math.max(fromIdx,toIdx);
+    var slots=getSlots(dateKey);
+    setSelectedSlots(function(prev){
+      var n={...prev};
+      for (var i=lo;i<=hi;i++) { if (slots[i]&&slots[i].name) n[dateKey+"-"+i]=true; }
+      return n;
+    });
+  };
+  const startSelectDrag = function(dateKey, idx) {
+    selectDragAnchor.current={dateKey,idx};
+    setSelectedSlots(function(prev){ var n={...prev}; if(n[dateKey+"-"+idx]) delete n[dateKey+"-"+idx]; else n[dateKey+"-"+idx]=true; return n; });
+  };
+  const extendSelectDrag = function(dateKey, idx) {
+    var a=selectDragAnchor.current;
+    if (!a || a.dateKey!==dateKey) return;
+    selectRangeInDay(dateKey, a.idx, idx);
+  };
+  const endSelectDrag = function() { selectDragAnchor.current=null; };
 
   const handleDragDrop = function(targetDateKey) {
     if (!dragState) return;
@@ -932,9 +1031,9 @@ export default function TheList() {
   var canRedo = redoStack.length>0;
 
   return (
-    <div style={{minHeight:"100vh",background:"#ffffff",fontFamily:"Georgia,serif",color:"#1a1a1a",paddingTop:reassignMode?"calc(env(safe-area-inset-top,0px) + 52px)":"0",userSelect:"none",WebkitUserSelect:"none"}}
-      onClick={function(){ if(swipedSlot) setSwipedSlot(null); }}
-      onMouseUp={function(){ if(dragState&&!dragCalHover) { setDragState(null); setDragCalOpen(false); } }}>
+    <div style={{minHeight:"100vh",background:"#ffffff",fontFamily:"Georgia,serif",color:"#1a1a1a",paddingTop:reassignMode?"calc(env(safe-area-inset-top,0px) + 52px)":"0"}}
+      onMouseUp={function(){ endSelectDrag(); if(dragState&&!dragCalHover) { setDragState(null); setDragCalOpen(false); } }}
+      onTouchEnd={function(){ endSelectDrag(); }}>
 
       {banner && (
         <div style={{position:"fixed",top:"calc(env(safe-area-inset-top,0px) + 60px)",left:"50%",transform:"translateX(-50%)",zIndex:2000,background:getBannerColor(banner.type),color:"#fff",padding:"9px 16px",borderRadius:"20px",fontSize:"12px",letterSpacing:"0.04em",boxShadow:"0 2px 12px rgba(0,0,0,0.2)",display:"flex",alignItems:"center",gap:"12px",maxWidth:"90vw",pointerEvents:"auto"}}>
@@ -1263,6 +1362,51 @@ export default function TheList() {
         </div>
       )}
 
+      {noteModal && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px"}} onClick={function(){ setNoteModal(null); }}>
+          <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"24px",width:"min(360px,92vw)"}} onClick={function(e){ e.stopPropagation(); }}>
+            <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#a07830",marginBottom:"8px"}}>Note</div>
+            <div style={{fontSize:"16px",color:"#1a1a1a",marginBottom:"14px"}}>{noteModal.name}</div>
+            <textarea autoFocus value={noteDraft} onChange={function(e){ setNoteDraft(e.target.value); }} placeholder="Add a note for this appointment..." style={{width:"100%",boxSizing:"border-box",minHeight:"96px",resize:"vertical",background:"#efefed",border:"1px solid #d8d8d6",borderRadius:"6px",padding:"10px",fontSize:"14px",fontFamily:"Georgia,serif",color:"#1a1a1a",outline:"none",marginBottom:"14px"}}/>
+            <div style={{display:"flex",gap:"8px"}}>
+              <button onClick={function(){
+                var nm=noteModal; var slots=[...getSlots(nm.dateKey)]; var s=slots[nm.idx];
+                slots[nm.idx]={...s,note:noteDraft.trim()};
+                setSlots(nm.dateKey,slots);
+                setNoteModal(null); setNoteDraft("");
+              }} style={{flex:1,padding:"10px",background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Save note</button>
+              {noteModal && (function(){ var s=getSlots(noteModal.dateKey)[noteModal.idx]; return s&&s.note; })() && (
+                <button onClick={function(){
+                  var nm=noteModal; var slots=[...getSlots(nm.dateKey)]; var s=slots[nm.idx];
+                  slots[nm.idx]={...s,note:""};
+                  setSlots(nm.dateKey,slots);
+                  setNoteModal(null); setNoteDraft("");
+                }} style={{padding:"10px 14px",background:"none",border:"1px solid #e0b0a8",borderRadius:"6px",color:"#c0392b",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Clear</button>
+              )}
+              <button onClick={function(){ setNoteModal(null); setNoteDraft(""); }} style={{padding:"10px 14px",background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {entryUndoConflict && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",zIndex:1300,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px"}} onClick={function(){ setEntryUndoConflict(null); }}>
+          <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"28px 28px 24px",width:"min(380px,92vw)"}} onClick={function(e){ e.stopPropagation(); }}>
+            <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#c0392b",marginBottom:"8px"}}>Conflict</div>
+            <div style={{fontSize:"15px",color:"#1a1a1a",marginBottom:"8px"}}>That slot has changed since</div>
+            <div style={{fontSize:"12px",color:"#888",marginBottom:"16px"}}>
+              {entryUndoConflict.current.name
+                ? (<span><strong>{entryUndoConflict.current.name}</strong> is now in {entryUndoConflict.entry.time} on {friendlyDate(entryUndoConflict.dateKey)}. Undoing this change will overwrite them.</span>)
+                : (<span>The slot at {entryUndoConflict.entry.time} on {friendlyDate(entryUndoConflict.dateKey)} no longer matches. Undo anyway?</span>)}
+            </div>
+            <div style={{display:"flex",gap:"8px"}}>
+              <button onClick={function(){ var ec=entryUndoConflict; setEntryUndoConflict(null); performEntryUndo(ec.entry, true); }} style={{flex:1,padding:"10px",background:"#c0392b",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Undo anyway</button>
+              <button onClick={function(){ setEntryUndoConflict(null); }} style={{padding:"10px 16px",background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Keep</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showHistory && (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:500,display:"flex",justifyContent:"flex-end"}} onClick={function(){ setShowHistory(false); }}>
           <div style={{width:"min(360px,90vw)",height:"100%",background:"#fafaf8",borderLeft:"1px solid #e4e4e2",overflowY:"auto",padding:"24px 20px",paddingTop:"calc(env(safe-area-inset-top,0px) + 24px)",boxShadow:"-4px 0 20px rgba(0,0,0,0.08)"}} onClick={function(e){ e.stopPropagation(); }}>
@@ -1293,19 +1437,30 @@ export default function TheList() {
               </div>
             )}
             <div style={{fontSize:"10px",letterSpacing:"0.15em",textTransform:"uppercase",color:"#aaa",marginBottom:"10px"}}>Change Log</div>
+            <input value={historySearch} onChange={function(e){ setHistorySearch(e.target.value); }} placeholder="Search change log..." style={{...inputStyle,width:"100%",boxSizing:"border-box",marginBottom:"10px",fontSize:"12px"}}/>
             {history.length===0&&<div style={{color:"#bbb",fontSize:"13px",fontStyle:"italic"}}>No changes yet.</div>}
-            {history.map(function(entry,i){ return (
-              <div key={i} style={{padding:"10px 12px",marginBottom:"6px",borderRadius:"6px",background:(entry.type==="removed"||entry.type==="slot_removed")?"#fff0ee":"#fafaf8",border:(entry.type==="removed"||entry.type==="slot_removed")?"1px solid #e0b0a8":"1px solid #e4e4e2"}}>
+            {history.filter(function(entry){
+              if (!historySearch) return true;
+              var q=historySearch.toLowerCase();
+              var hay=((entry.name||"")+" "+(entry.prevName||"")+" "+(entry.time||"")+" "+(entry.dateKey?friendlyDate(entry.dateKey):"")+" "+(entry.type||"")).toLowerCase();
+              return hay.indexOf(q)>=0;
+            }).map(function(entry,i){
+              var canEntryUndo=(entry.dateKey&&entry.time&&(entry.type==="added"||entry.type==="removed"||entry.type==="edited"||entry.type==="blocked"||entry.type==="unblocked"||entry.type==="recurring_set"||entry.type==="checkoff"||entry.type==="slot_removed"));
+              return (
+              <div key={entry.id||i} style={{padding:"10px 12px",marginBottom:"6px",borderRadius:"6px",background:(entry.type==="removed"||entry.type==="slot_removed")?"#fff0ee":"#fafaf8",border:(entry.type==="removed"||entry.type==="slot_removed")?"1px solid #e0b0a8":"1px solid #e4e4e2"}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"3px"}}>
-                  <span style={{fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",color:entry.type==="added"?"#4a8a5a":(entry.type==="removed"||entry.type==="slot_removed")?"#8a3a2a":entry.type==="recurring_set"?"#c9a96e":entry.type==="slot_added"?"#6a8aaa":"#666"}}>
-                    {entry.type==="added"?"Added":entry.type==="removed"?"Removed":entry.type==="slot_removed"?"Slot Removed":entry.type==="slot_added"?"Slot Added":entry.type==="recurring_set"?("Recurring ("+entry.weeks+"w)"):entry.type==="blocked"?"Blocked":entry.type==="unblocked"?"Unblocked":"Edited"}
+                  <span style={{fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",color:entry.type==="added"?"#4a8a5a":(entry.type==="removed"||entry.type==="slot_removed")?"#8a3a2a":entry.type==="recurring_set"?"#c9a96e":entry.type==="slot_added"?"#6a8aaa":entry.type==="checkoff"?"#4a8a5a":"#666"}}>
+                    {entry.type==="added"?"Added":entry.type==="removed"?"Removed":entry.type==="slot_removed"?"Slot Removed":entry.type==="slot_added"?"Slot Added":entry.type==="recurring_set"?("Recurring ("+entry.weeks+"w)"):entry.type==="blocked"?"Blocked":entry.type==="unblocked"?"Unblocked":entry.type==="checkoff"?"Checked Off":"Edited"}
                   </span>
                   <span style={{fontSize:"10px",color:"#bbb"}}>{entry.timestamp}</span>
                 </div>
-                <div style={{fontSize:"13px",color:"#888"}}>
-                  {entry.time} {entry.name&&<span style={{color:"#1a1a1a"}}>— {entry.name}</span>}
-                  {entry.prevName&&<span style={{color:"#aaa"}}> (was {entry.prevName})</span>}
-                  {entry.dateKey&&<span style={{color:"#ccc",fontSize:"11px"}}> · {friendlyDate(entry.dateKey)}</span>}
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",gap:"8px"}}>
+                  <div style={{fontSize:"13px",color:"#888"}}>
+                    {entry.time} {entry.name&&<span style={{color:"#1a1a1a"}}>— {entry.name}</span>}
+                    {entry.prevName&&<span style={{color:"#aaa"}}> (was {entry.prevName})</span>}
+                    {entry.dateKey&&<span style={{color:"#ccc",fontSize:"11px"}}> · {friendlyDate(entry.dateKey)}</span>}
+                  </div>
+                  {canEntryUndo&&<button onClick={function(){ handleEntryUndo(entry); }} style={{background:"none",border:"1px solid #d8d8d6",borderRadius:"5px",color:"#888",cursor:"pointer",padding:"3px 9px",fontFamily:"inherit",fontSize:"10px",letterSpacing:"0.05em",flexShrink:0}} onMouseEnter={function(e){ e.currentTarget.style.borderColor="#1a1a1a";e.currentTarget.style.color="#1a1a1a"; }} onMouseLeave={function(e){ e.currentTarget.style.borderColor="#d8d8d6";e.currentTarget.style.color="#888"; }}>{"↶ Undo"}</button>}
                 </div>
               </div>
             ); })}
@@ -1328,8 +1483,8 @@ export default function TheList() {
           <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()+1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,1); }); }} style={navBtn}>{"›"}</button>
           {view!=="Month"&&<button onClick={function(){ setBaseDate(function(d){ return addDays(d,7); }); }} style={{...navBtn,fontSize:"11px",letterSpacing:"-1px"}}>{"››"}</button>}
           <div style={{width:"10px"}}/>
-          <button onClick={handleUndo} title="Undo" style={{...navBtn,background:canUndo?"#f0f0ee":"#f8f8f6",border:"1px solid #d8d8d6",color:canUndo?"#555":"#ccc",width:"32px",padding:"0",fontSize:"16px"}} dangerouslySetInnerHTML={{__html:"&#8630;"}}/>
-          <button onClick={handleRedo} title="Redo" style={{...navBtn,background:canRedo?"#f0f0ee":"#f8f8f6",border:"1px solid #d8d8d6",color:canRedo?"#555":"#ccc",width:"32px",padding:"0",fontSize:"16px"}} dangerouslySetInnerHTML={{__html:"&#8631;"}}/>
+          <button onClick={handleUndo} title="Undo" style={{...navBtn,background:canUndo?"#f0f0ee":"#f8f8f6",border:"1px solid #d8d8d6",color:canUndo?"#555":"#ccc",width:"32px",padding:"0",fontSize:"17px"}}>{"↶"}</button>
+          <button onClick={handleRedo} title="Redo" style={{...navBtn,background:canRedo?"#f0f0ee":"#f8f8f6",border:"1px solid #d8d8d6",color:canRedo?"#555":"#ccc",width:"32px",padding:"0",fontSize:"17px"}}>{"↷"}</button>
           <button onClick={function(){ setShowHistory(true); }} style={{...navBtn,background:"#f0f0ee",border:"1px solid #d8d8d6",color:"#666"}}>{"≡"}</button>
         </div>
       </div>
@@ -1394,7 +1549,18 @@ export default function TheList() {
                     );
                   })()}
                 </div>
-                <div style={{flex:1,padding:"6px 0"}}>
+                <div style={{flex:1,padding:"6px 0"}}
+                  onTouchMove={function(e){
+                    if (!selectDragAnchor.current) return;
+                    var t=e.touches[0]; if(!t) return;
+                    var el=document.elementFromPoint(t.clientX,t.clientY);
+                    while (el && !(el.dataset&&el.dataset.selrow)) { el=el.parentElement; }
+                    if (el && el.dataset && el.dataset.selrow) {
+                      var parts=el.dataset.selrow.split("-"); var di=parseInt(parts[parts.length-1]); var dk2=parts.slice(0,parts.length-1).join("-");
+                      extendSelectDrag(dk2,di);
+                    }
+                  }}
+                >
                   {slots.map(function(slot,idx){
                     var isEditing=editingCell&&editingCell.dateKey===dateKey&&editingCell.idx===idx;
                     var filled=!!slot.name; var wasRemoved=recentlyRemoved[dateKey+"-"+idx];
@@ -1406,22 +1572,21 @@ export default function TheList() {
                     var isCustomSlot=slot.isCustom||!DEFAULT_TIMES.includes(slot.time);
                     return (
                       <div key={rowKey} style={{position:"relative",overflow:"hidden",borderBottom:"1px solid #efefed",opacity:isDragging?0.4:1}}>
-                        {filled&&(
-                          <div style={{position:"absolute",right:0,top:0,bottom:0,width:"160px",display:"flex",alignItems:"stretch",opacity:isSwiped?1:0,pointerEvents:isSwiped?"auto":"none",transition:"opacity 0.2s"}}>
-                            <button onClick={function(){ setSwipedSlot(null); if(slot.groupId){var gs=getSlots(dateKey).filter(function(s){ return s.groupId===slot.groupId&&s.name; });if(gs.length>1){setGroupConfirm({action:'reschedule',dateKey,idx,name:slot.name,groupId:slot.groupId});return;}} setReassignMode({client:{name:slot.name,price:slot.price,recurWeeks:slot.recurWeeks},currentDateKey:dateKey,originalDateKey:dateKey,originalIdx:idx,remainingConflicts:[]}); setView("Day"); }} style={{flex:1,background:"#2a6a9a",border:"none",color:"#fff",fontSize:"11px",letterSpacing:"0.08em",textTransform:"uppercase",cursor:"pointer",fontFamily:"inherit"}}>Move</button>
-                            <button onClick={function(){ requestRemoveSlot(dateKey,idx); }} style={{flex:1,background:"#c0392b",border:"none",color:"#fff",fontSize:"11px",letterSpacing:"0.08em",textTransform:"uppercase",cursor:"pointer",fontFamily:"inherit"}}>Cancel</button>
-                          </div>
-                        )}
-                        {!filled&&!slot.blocked&&(
-                          <div style={{position:"absolute",right:0,top:0,bottom:0,width:"100px",display:"flex",alignItems:"stretch",opacity:isSwiped?1:0,pointerEvents:isSwiped?"auto":"none",transition:"opacity 0.2s"}}>
+                        {!filled&&!slot.blocked&&!isEditing&&!(reassignMode&&reassignMode.currentDateKey===dateKey)&&(
+                          <div style={{position:"absolute",right:"10px",top:0,bottom:0,display:"flex",alignItems:"center",gap:"4px",pointerEvents:"auto",zIndex:1}}>
                             {isCustomSlot
-                              ? <button onClick={function(){ removeCustomSlot(dateKey,idx); }} style={{flex:1,background:"#c0392b",border:"none",color:"#fff",fontSize:"10px",letterSpacing:"0.06em",textTransform:"uppercase",cursor:"pointer",fontFamily:"inherit"}}>Remove</button>
-                              : <button onClick={function(){ toggleBlockSlot(dateKey,idx,"Lunch"); }} style={{flex:1,background:"#888",border:"none",color:"#fff",fontSize:"10px",letterSpacing:"0.06em",textTransform:"uppercase",cursor:"pointer",fontFamily:"inherit"}}>Lunch</button>
+                              ? <button onClick={function(e){ e.stopPropagation(); removeCustomSlot(dateKey,idx); }} style={{background:"none",border:"none",color:"#ddd",fontSize:"12px",cursor:"pointer",fontFamily:"inherit",padding:"2px 4px"}} onMouseEnter={function(e){ e.currentTarget.style.color="#c0392b"; }} onMouseLeave={function(e){ e.currentTarget.style.color="#ddd"; }}>{"× slot"}</button>
+                              : <button onClick={function(e){ e.stopPropagation(); toggleBlockSlot(dateKey,idx,"Lunch"); }} style={{background:"none",border:"none",color:"#ddd",fontSize:"11px",cursor:"pointer",fontFamily:"inherit",padding:"2px 4px",letterSpacing:"0.06em"}} onMouseEnter={function(e){ e.currentTarget.style.color="#888"; }} onMouseLeave={function(e){ e.currentTarget.style.color="#ddd"; }}>lunch</button>
                             }
                           </div>
                         )}
+                        {slot.blocked&&!isEditing&&(
+                          <div style={{position:"absolute",right:"10px",top:0,bottom:0,display:"flex",alignItems:"center",pointerEvents:"auto",zIndex:1}}>
+                            <button onClick={function(e){ e.stopPropagation(); toggleBlockSlot(dateKey,idx,null); }} style={{background:"none",border:"none",color:"#ccc",fontSize:"14px",cursor:"pointer",fontFamily:"inherit",padding:"2px 4px"}} onMouseEnter={function(e){ e.currentTarget.style.color="#c0392b"; }} onMouseLeave={function(e){ e.currentTarget.style.color="#ccc"; }}>{"×"}</button>
+                          </div>
+                        )}
                         <div
-                          style={{display:"flex",alignItems:"center",padding:"0 14px",height:"46px",background:slotBg,transition:"transform 0.2s, background 0.3s",transform:isSwiped?"translateX(-100px)":"translateX(0)",position:"relative",opacity:slot.blocked?0.6:1}}
+                          style={{display:"flex",alignItems:"center",padding:"0 14px",height:"46px",background:slotBg,transition:"background 0.3s",position:"relative",opacity:slot.blocked?0.6:1}}
                           onTouchStart={function(e){ handleTouchStart(e,dateKey,idx); }}
                           onTouchEnd={function(e){ handleTouchEnd(e,dateKey,idx); }}
                           onMouseUp={function(){ if(dragState&&!dragState.multi&&!dragCalHover) handleSlotDrop(dateKey,idx); }}
@@ -1435,7 +1600,13 @@ export default function TheList() {
                             return <div style={{position:"absolute",left:0,top:first?"50%":"0",bottom:last?"50%":"0",width:"3px",background:"#a07830",borderRadius:first?"3px 3px 0 0":last?"0 0 3px 3px":"0"}}/>;
                           })()}
                           {selectMode&&filled ? (
-                            <div onClick={function(){ setSelectedSlots(function(prev){ var n={...prev}; if(n[rowKey]) delete n[rowKey]; else n[rowKey]=true; return n; }); }}
+                            <div
+                              onMouseDown={function(e){ e.preventDefault(); startSelectDrag(dateKey,idx); }}
+                              onMouseEnter={function(){ if(selectDragAnchor.current) extendSelectDrag(dateKey,idx); }}
+                              onMouseUp={endSelectDrag}
+                              onTouchStart={function(){ startSelectDrag(dateKey,idx); }}
+                              onTouchEnd={endSelectDrag}
+                              data-selrow={rowKey}
                               style={{width:"18px",height:"18px",borderRadius:"4px",border:isSelected?"1.5px solid #4a7aaa":"1.5px solid #ccc",background:isSelected?"#4a7aaa":"transparent",flexShrink:0,marginRight:"8px",display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer"}}>
                               {isSelected&&<span style={{color:"#fff",fontSize:"11px",lineHeight:1}}>{"✓"}</span>}
                             </div>
@@ -1451,11 +1622,6 @@ export default function TheList() {
                           </button>
                           )}
                           <div style={{fontSize:"12px",color:filled?"#c9a96e":"#2e2e2e",width:"40px",flexShrink:0,fontVariantNumeric:"tabular-nums",letterSpacing:"0.02em",userSelect:"none",WebkitUserSelect:"none"}}>{slot.time}</div>
-                          {slot.recurWeeks&&!isEditing&&(
-                            <div onClick={function(){ if(filled) openClientProfile(slot.name); }} style={{fontSize:"9px",color:slot.isException?"#a07830":"#6a8aaa",marginRight:"6px",flexShrink:0,cursor:filled?"pointer":"default"}}>
-                              {"↺"+(slot.recurWeeks===1?"w":(slot.recurWeeks+"w"))+(slot.isException?"*":"")}
-                            </div>
-                          )}
                           {slot.blocked?(
                             <div style={{flex:1,display:"flex",alignItems:"center"}}>
                               <span style={{fontSize:"12px",color:"#aaa",fontStyle:"italic"}}>{slot.blockLabel||"Blocked"}</span>
@@ -1489,7 +1655,14 @@ export default function TheList() {
                               {!isEditing&&(
                                 <div style={{display:"flex",alignItems:"center",gap:"6px",flexShrink:0}}>
                                   {filled&&slot.price&&<span style={{fontSize:"12px",color:slot.done?"#3a5a3a":"#a07830"}}>{slot.price}</span>}
-                                  {filled&&<button onClick={function(e){ e.stopPropagation(); if(slot.groupId){var aS=getSlots(dateKey);var gS=aS.map(function(s,i){ return {...s,i}; }).filter(function(s){ return s.groupId===slot.groupId&&s.name; });if(gS.length>1){setGroupRecurModal({dateKey,idx,slot,groupSlots:gS,weeks:null});return;}} setRecurringModal({dateKey,idx,slot}); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 4px",color:slot.recurWeeks?"#4a8a9a":"#ccc",fontSize:"13px",lineHeight:1}}>{"↺"}</button>}
+                                  {filled&&(
+                                    <div onClick={function(e){ e.stopPropagation(); if(slot.recurWeeks) openClientProfile(slot.name); }} style={{width:"26px",textAlign:"right",fontSize:"9px",color:slot.isException?"#a07830":"#6a8aaa",flexShrink:0,cursor:slot.recurWeeks?"pointer":"default",lineHeight:1}}>
+                                      {slot.recurWeeks?((slot.recurWeeks===1?"1w":(slot.recurWeeks+"w"))+(slot.isException?"*":"")):""}
+                                    </div>
+                                  )}
+                                  {filled&&<button onClick={function(e){ e.stopPropagation(); if(slot.groupId){var aS=getSlots(dateKey);var gS=aS.map(function(s,i){ return {...s,i}; }).filter(function(s){ return s.groupId===slot.groupId&&s.name; });if(gS.length>1){setGroupRecurModal({dateKey,idx,slot,groupSlots:gS,weeks:null});return;}} setRecurringModal({dateKey,idx,slot}); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 2px",color:slot.recurWeeks?"#4a8a9a":"#ccc",fontSize:"13px",lineHeight:1}}>{"↺"}</button>}
+                                  {filled&&<button onClick={function(e){ e.stopPropagation(); setNoteDraft(slot.note||""); setNoteModal({dateKey,idx,name:slot.name}); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 2px",color:slot.note?"#c9a96e":"#ccc",fontSize:"13px",lineHeight:1}}>{"✎"}</button>}
+                                  {filled&&<button onClick={function(e){ e.stopPropagation(); requestRemoveSlot(dateKey,idx); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 4px",color:"#ddd",fontSize:"15px",lineHeight:1}} onMouseEnter={function(e){ e.currentTarget.style.color="#c0392b"; }} onMouseLeave={function(e){ e.currentTarget.style.color="#ddd"; }}>{"×"}</button>}
                                 </div>
                               )}
                               {isEditing&&<input value={editValues.price} onChange={function(e){ setEditValues(function(v){ return {...v,price:e.target.value}; }); }} onKeyDown={function(e){ handleKeyDown(e,dateKey,idx); }} onBlur={handleBlur} data-rowkey={rowKey} placeholder="$" style={{width:"52px",fontSize:"13px",color:"#1a1a1a",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"4px",outline:"none",padding:"2px 5px",fontFamily:"Georgia,serif",WebkitAppearance:"none",appearance:"none"}}/>}
