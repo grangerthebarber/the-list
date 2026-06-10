@@ -1572,12 +1572,9 @@ export default function TheList() {
                     var isCustomSlot=slot.isCustom||!DEFAULT_TIMES.includes(slot.time);
                     return (
                       <div key={rowKey} style={{position:"relative",overflow:"hidden",borderBottom:"1px solid #efefed",opacity:isDragging?0.4:1}}>
-                        {!filled&&!slot.blocked&&!isEditing&&!(reassignMode&&reassignMode.currentDateKey===dateKey)&&(
+                        {!filled&&!slot.blocked&&!isEditing&&!(reassignMode&&reassignMode.currentDateKey===dateKey)&&isCustomSlot&&(
                           <div style={{position:"absolute",right:"10px",top:0,bottom:0,display:"flex",alignItems:"center",gap:"4px",pointerEvents:"auto",zIndex:1}}>
-                            {isCustomSlot
-                              ? <button onClick={function(e){ e.stopPropagation(); removeCustomSlot(dateKey,idx); }} style={{background:"none",border:"none",color:"#ddd",fontSize:"12px",cursor:"pointer",fontFamily:"inherit",padding:"2px 4px"}} onMouseEnter={function(e){ e.currentTarget.style.color="#c0392b"; }} onMouseLeave={function(e){ e.currentTarget.style.color="#ddd"; }}>{"× slot"}</button>
-                              : <button onClick={function(e){ e.stopPropagation(); toggleBlockSlot(dateKey,idx,"Lunch"); }} style={{background:"none",border:"none",color:"#ddd",fontSize:"11px",cursor:"pointer",fontFamily:"inherit",padding:"2px 4px",letterSpacing:"0.06em"}} onMouseEnter={function(e){ e.currentTarget.style.color="#888"; }} onMouseLeave={function(e){ e.currentTarget.style.color="#ddd"; }}>lunch</button>
-                            }
+                            <button onClick={function(e){ e.stopPropagation(); removeCustomSlot(dateKey,idx); }} style={{background:"none",border:"none",color:"#ddd",fontSize:"12px",cursor:"pointer",fontFamily:"inherit",padding:"2px 4px"}} onMouseEnter={function(e){ e.currentTarget.style.color="#c0392b"; }} onMouseLeave={function(e){ e.currentTarget.style.color="#ddd"; }}>{"× slot"}</button>
                           </div>
                         )}
                         {slot.blocked&&!isEditing&&(
@@ -1586,7 +1583,7 @@ export default function TheList() {
                           </div>
                         )}
                         <div
-                          style={{display:"flex",alignItems:"center",padding:"0 14px",height:"46px",background:slotBg,transition:"background 0.3s",position:"relative",opacity:slot.blocked?0.6:1}}
+                          style={{display:"flex",alignItems:"center",padding:"0 14px",height:"46px",background:slotBg,transition:"background 0.3s",position:"relative",opacity:slot.blocked?0.6:1,userSelect:"none",WebkitUserSelect:"none"}}
                           onTouchStart={function(e){ handleTouchStart(e,dateKey,idx); }}
                           onTouchEnd={function(e){ handleTouchEnd(e,dateKey,idx); }}
                           onMouseUp={function(){ if(dragState&&!dragState.multi&&!dragCalHover) handleSlotDrop(dateKey,idx); }}
@@ -1631,7 +1628,7 @@ export default function TheList() {
                           ):(
                             <div style={{flex:1,display:"flex",alignItems:"center",gap:"4px"}}
                               onMouseDown={function(){ if(filled&&!isEditing&&!selectMode) startDragLongPress(dateKey,idx); }}
-                              onMouseUp={function(){ cancelDragLongPress(); cancelLongPress(); }}
+                              onMouseUp={function(){ cancelDragLongPress(); }}
                               onMouseLeave={cancelDragLongPress}
                               onTouchStart={function(){ if(filled&&!isEditing&&!selectMode) startDragLongPress(dateKey,idx); }}
                               onTouchMove={cancelDragLongPress}
@@ -1645,10 +1642,10 @@ export default function TheList() {
                                 onChange={function(e){ if(isEditing) setEditValues(function(v){ return {...v,name:e.target.value}; }); }}
                                 onKeyDown={function(e){ if(isEditing) handleKeyDown(e,dateKey,idx); }}
                                 onBlur={function(e){ if(isEditing) handleBlur(e); }}
-                                onMouseDown={function(){ if(filled&&!isEditing&&!selectMode) startLongPress(slot.name); }}
-                                onMouseUp={cancelLongPress}
-                                onTouchStart={function(){ if(filled&&!isEditing&&!selectMode) startLongPress(slot.name); }}
-                                onTouchEnd={cancelLongPress} onTouchMove={cancelLongPress}
+                                onMouseDown={function(){ if(filled&&!isEditing&&!selectMode) startDragLongPress(dateKey,idx); }}
+                                onMouseUp={function(){ cancelDragLongPress(); }}
+                                onTouchStart={function(){ if(filled&&!isEditing&&!selectMode) startDragLongPress(dateKey,idx); }}
+                                onTouchEnd={function(){ cancelDragLongPress(); }} onTouchMove={cancelDragLongPress}
                                 placeholder="" data-rowkey={rowKey}
                                 style={{flex:1,fontSize:"13px",color:wasRemoved?"#c0392b":slot.done?"#2a6a2a":filled?"#1a1a1a":"#999",textDecoration:slot.done?"line-through":"none",background:"transparent",border:"none",outline:"none",padding:"0 2px",fontFamily:"Georgia,serif",cursor:isEditing?"text":"pointer",caretColor:isEditing?"#444":"transparent",WebkitUserSelect:isEditing?"text":"none",userSelect:isEditing?"text":"none",WebkitAppearance:"none",appearance:"none"}}
                               />
