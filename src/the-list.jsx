@@ -262,6 +262,16 @@ function LockIcon(props) {
   );
 }
 
+function UnlockIcon(props) {
+  var size = props.size || 15; var color = props.color || "#0f0f0f";
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{display:"block"}}>
+      <rect x="5" y="11" width="14" height="9" rx="2"/>
+      <path d="M8 11V8a4 4 0 0 1 7.6-1.5"/>
+    </svg>
+  );
+}
+
 // Salon day runs morning (hours 5–12) into afternoon (hours 1–4 = PM). Map a
 // displayed "H:MM" to an absolute minute-of-day so nudging/ordering behave.
 function timeToAbsMinutes(t) {
@@ -352,6 +362,18 @@ export default function TheList() {
   const viewRef = useRef(view);
   viewRef.current = view;
   const slotTapRef = useRef({key:null,count:0,timer:null});
+  // Pencil "arm" mode: clicking the pencil with an empty field arms it so the
+  // next Enter pencils the person in; clicking it again disarms.
+  const [pencilArmed, setPencilArmed] = useState(false);
+  const pencilArmedRef = useRef(false);
+  pencilArmedRef.current = pencilArmed;
+  // editChromeReady defers the visual "editing" chrome (pink row, price box,
+  // pencil) for a beat after a single tap on a plain empty slot, so a quick
+  // double/triple tap (available/overtime) never flashes the edit layout.
+  const [editChromeReady, setEditChromeReady] = useState(true);
+  const settleTimer = useRef(null);
+  const isLiveDraggingRef = useRef(false);
+  isLiveDraggingRef.current = isLiveDragging;
 
   useEffect(function() { try { localStorage.setItem("tl_schedules", JSON.stringify(schedules)); } catch(e) {} }, [schedules]);
   useEffect(function() { try { localStorage.setItem("tl_clients", JSON.stringify(clientMemory)); } catch(e) {} }, [clientMemory]);
@@ -360,8 +382,11 @@ export default function TheList() {
   useEffect(function() { try { localStorage.setItem("tl_daynotes", JSON.stringify(dayNotes)); } catch(e) {} }, [dayNotes]);
 
   // Stop the whole page from bouncing/scrolling when there is nothing under the
-  // list. Scrolling still works inside the per-day columns, which set their own
-  // overscrollBehavior:"contain".
+  // list. iOS standalone PWAs ignore CSS overscroll-behavior, so the only thing
+  // that actually works is intercepting touchmove and preventing the default
+  // unless the finger is genuinely scrolling *inside* a scrollable area that has
+  // room left to move. (The live-drag effect manages its own touchmove, so we
+  // bow out while a drag is in progress.)
   useEffect(function() {
     var de = document.documentElement;
     var bd = document.body;
@@ -375,11 +400,51 @@ export default function TheList() {
     bd.style.overscrollBehaviorY = "none";
     de.style.overflow = "hidden";
     bd.style.overflow = "hidden";
+
+    var startY = 0;
+    var onTouchStart = function(e) {
+      if (e.touches && e.touches[0]) startY = e.touches[0].clientY;
+    };
+    var onTouchMove = function(e) {
+      if (isLiveDraggingRef.current) return;          // the drag effect owns this gesture
+      if (!e.touches || e.touches.length > 1) return; // leave pinch/zoom alone
+      var t = e.touches[0];
+      if (!t) return;
+      var dy = t.clientY - startY;                    // >0 dragging finger DOWN (content moves down)
+      var tag = e.target && e.target.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      // Walk up from where the touch began to the nearest vertical scroller.
+      var el = e.target;
+      var scroller = null;
+      while (el && el !== bd && el.nodeType === 1) {
+        if (el.scrollHeight - el.clientHeight > 1) {
+          var oy = window.getComputedStyle(el).overflowY;
+          if (oy === "auto" || oy === "scroll") { scroller = el; break; }
+        }
+        el = el.parentElement;
+      }
+      if (!scroller) {
+        // Nothing here scrolls — block the bounce entirely.
+        if (e.cancelable) e.preventDefault();
+        return;
+      }
+      var atTop = scroller.scrollTop <= 0;
+      var atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 1;
+      // Pulling down at the very top, or up at the very bottom, is overscroll: block it.
+      if ((atTop && dy > 0) || (atBottom && dy < 0)) {
+        if (e.cancelable) e.preventDefault();
+      }
+    };
+    document.addEventListener("touchstart", onTouchStart, {passive:true});
+    document.addEventListener("touchmove", onTouchMove, {passive:false});
+
     return function() {
       de.style.overscrollBehaviorY = prev.htmlOver;
       bd.style.overscrollBehaviorY = prev.bodyOver;
       bd.style.overflow = prev.bodyOverflow;
       de.style.overflow = prev.htmlOverflow;
+      document.removeEventListener("touchstart", onTouchStart, {passive:true});
+      document.removeEventListener("touchmove", onTouchMove, {passive:false});
     };
   }, []);
 
@@ -606,7 +671,7 @@ export default function TheList() {
     if (historyEntry) addHistoryEntry(historyEntry);
   };
 
-  const startEdit = function(dateKey, idx) {
+  const startEdit = function(dateKey, idx, defer) {
     var slot = getSlots(dateKey)[idx];
     var occupied = !!slot.name;
     editingRef.current = {dateKey,idx};
@@ -614,6 +679,15 @@ export default function TheList() {
     setEditValues({name:slot.name||"",price:slot.price||""});
     setEditingOccupied(occupied);
     setSwipedSlot(null);
+    setPencilArmed(false);
+    if (settleTimer.current) { clearTimeout(settleTimer.current); settleTimer.current=null; }
+    if (defer) {
+      // Hold the edit chrome back briefly so a fast double/triple tap doesn't flash it.
+      setEditChromeReady(false);
+      settleTimer.current = setTimeout(function(){ settleTimer.current=null; setEditChromeReady(true); }, 230);
+    } else {
+      setEditChromeReady(true);
+    }
     setTimeout(function(){
       var inputs = document.querySelectorAll("[data-rowkey='" + dateKey + "-" + idx + "']");
       if (inputs && inputs[0]) { inputs[0].focus(); }
@@ -627,6 +701,9 @@ export default function TheList() {
     var newPrice = (values.price||"").trim();
     var asLunch = isLunchName(rawName);
     var newName = asLunch ? "" : capitalizeFirst(rawName);
+    // Removing the name removes the price along with it (a price never outlives
+    // its person). Clearing only the price, though, leaves the name in place.
+    if (!newName) newPrice = "";
     if (asLunch) {
       // Typing "lunch" turns the slot into a Lunch block (fully a block, no client memory).
       if (!prev.blocked) {
@@ -639,6 +716,7 @@ export default function TheList() {
       editingRef.current = null;
       setEditingCell(null);
       setEditingOccupied(false);
+      setPencilArmed(false); setEditChromeReady(true);
       return;
     }
     if (newName!==prev.name || newPrice!==prev.price || prev.availStatus) {
@@ -659,6 +737,7 @@ export default function TheList() {
     editingRef.current = null;
     setEditingCell(null);
     setEditingOccupied(false);
+    setPencilArmed(false); setEditChromeReady(true);
   },[getSlots]);
 
   // Save a name as "penciled in" (tentative) — offered but not yet confirmed.
@@ -686,6 +765,7 @@ export default function TheList() {
     editingRef.current = null;
     setEditingCell(null);
     setEditingOccupied(false);
+    setPencilArmed(false); setEditChromeReady(true);
   };
 
   // One-tap confirm: turn a penciled-in slot into a locked-in appointment.
@@ -718,7 +798,11 @@ export default function TheList() {
     var snapshot = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
     pushUndo(snapshot);
     var isStillDefault = DEFAULT_TIMES.indexOf(newTime) >= 0;
-    slots[idx] = {...prev,time:newTime,customTime:!isStillDefault};
+    // Editing the minutes of a slot does NOT change whether it's a default slot
+    // or a custom one. Only genuinely custom-added slots (isCustom===true, or
+    // legacy off-grid slots with no flag) keep the custom time styling.
+    var wasCustom = prev.isCustom===true || (prev.isCustom===undefined && DEFAULT_TIMES.indexOf(prev.time) === -1);
+    slots[idx] = {...prev,time:newTime,customTime: wasCustom && !isStillDefault};
     slots.sort(function(a,b){ return timeToAbsMinutes(a.time)-timeToAbsMinutes(b.time); });
     setSlots(dateKey,slots);
     setTimeEditModal(null);
@@ -775,7 +859,13 @@ export default function TheList() {
       }
     } else if (e.key==="Enter") {
       e.preventDefault();
-      doCommit(dateKey,idx,editValuesRef.current);
+      // If the pencil was armed before a name was typed, Enter pencils them in.
+      var cvE = editValuesRef.current;
+      if (pencilArmedRef.current && stripLeadingNumbers((cvE.name||"").trim())) {
+        commitPenciled(dateKey,idx);
+      } else {
+        doCommit(dateKey,idx,editValuesRef.current);
+      }
     } else if (e.key==="ArrowDown") {
       e.preventDefault();
       var curVals = editValuesRef.current;
@@ -795,6 +885,7 @@ export default function TheList() {
       }
     } else if (e.key==="Escape") {
       editingRef.current=null; setEditingCell(null); setEditingOccupied(false);
+      setPencilArmed(false); setEditChromeReady(true);
     }
   };
 
@@ -863,6 +954,8 @@ export default function TheList() {
         return;
       }
       editingRef.current=null; setEditingCell(null); setEditingOccupied(false);
+      if (settleTimer.current) { clearTimeout(settleTimer.current); settleTimer.current=null; }
+      setEditChromeReady(true); setPencilArmed(false);
       if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
     }
     if (st.timer) clearTimeout(st.timer);
@@ -1509,8 +1602,14 @@ export default function TheList() {
           var parts = key.split("-"); var di = parseInt(parts[parts.length-1]); var dk2 = parts.slice(0,parts.length-1).join("-");
           landed = dropPickedUpOnSlot(dk2, di);
         }
+        // Released somewhere that wasn't an open slot (e.g. after switching views
+        // mid-drag): don't drop the move on the floor. Hand the still-intact
+        // appointment to tap-to-place so the next tap on any open slot — in any
+        // view — completes it. The original slot is untouched until then.
+        if (!landed && ds && ds.clients && ds.clients[0]) {
+          setPlacingClient(ds.clients[0]);
+        }
       }
-      // A deliberate release that didn't land on an open slot just forfeits — no popup.
       setIsLiveDragging(false);
       dragOverRef.current = null; setDragOverKey(null);
       setDragState(null);
@@ -2244,7 +2343,7 @@ export default function TheList() {
                   >
                     <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:"6px",marginBottom:"3px"}}>
                       <div style={{fontSize:"14px",color:isT?"#a07830":(outside?"#bdbdbb":"#1a1a1a"),fontWeight:isT?"bold":"normal",flexShrink:0}}>{day.getDate()}</div>
-                      {holiday&&<div style={{fontSize:"11px",color:outside?"#cbb98e":"#a07830",textAlign:"right",lineHeight:1.2,letterSpacing:"0.08em",textTransform:"uppercase",marginTop:"2px",minWidth:0,overflow:"hidden"}}>{holiday}</div>}
+                      {holiday&&<div style={{fontSize:"11px",color:outside?"#cbb98e":"#a07830",textAlign:"right",lineHeight:1.2,letterSpacing:"0.08em",textTransform:"uppercase",marginTop:"4px",minWidth:0,overflow:"hidden"}}>{holiday}</div>}
                     </div>
                     {booked.length>0&&(
                       <div style={{opacity:outside?0.55:1}}>
@@ -2306,8 +2405,8 @@ export default function TheList() {
                     var isOccEdit=isEditing&&editingOccupied;
                     var isSelected=selectMode&&!!selectedSlots[rowKey];
                     var isDragging=dragState&&dragState.sourceKey===rowKey;
-                    var slotBg=slot.blocked?"#f4f4f2":wasRemoved?"#fff0ee":isOccEdit?"#fff0ee":isSelected?"#f0f4ff":slot.done?"#f4faf4":isEditing?"#f0f0ee":filled?"#fcfcfa":"transparent";
-                    var isCustomSlot=slot.isCustom||!DEFAULT_TIMES.includes(slot.time);
+                    var slotBg=slot.blocked?"#f4f4f2":wasRemoved?"#fff0ee":isOccEdit?"#fff0ee":isSelected?"#f0f4ff":slot.done?"#f4faf4":(isEditing&&editChromeReady)?"#f0f0ee":filled?"#fcfcfa":"transparent";
+                    var isCustomSlot=slot.isCustom===true||(slot.isCustom===undefined&&!DEFAULT_TIMES.includes(slot.time));
                     var isDropTarget=isLiveDragging&&dragOverKey===rowKey&&!filled&&!slot.blocked;
                     var showDropHint=(isLiveDragging||placingClient)&&!filled&&!slot.blocked&&!isEditing&&!(dragState&&dragState.sourceKey===rowKey);
                     if (isDropTarget) slotBg="#e3f3e3";
@@ -2318,6 +2417,11 @@ export default function TheList() {
                         {!filled&&!slot.blocked&&!isEditing&&!(reassignMode&&reassignMode.currentDateKey===dateKey)&&!placingClient&&isCustomSlot&&(
                           <div style={{position:"absolute",right:"10px",top:0,bottom:0,display:"flex",alignItems:"center",gap:"4px",pointerEvents:"auto",zIndex:1}}>
                             <button onClick={function(e){ e.stopPropagation(); removeCustomSlot(dateKey,idx); }} style={{background:"none",border:"none",color:"#ddd",fontSize:"12px",cursor:"pointer",fontFamily:"inherit",padding:"2px 4px"}} onMouseEnter={function(e){ e.currentTarget.style.color="#c0392b"; }} onMouseLeave={function(e){ e.currentTarget.style.color="#ddd"; }}>{"× slot"}</button>
+                          </div>
+                        )}
+                        {!filled&&!slot.blocked&&!isEditing&&!(reassignMode&&reassignMode.currentDateKey===dateKey)&&!placingClient&&slot.availStatus&&(
+                          <div style={{position:"absolute",right:"10px",top:0,bottom:0,display:"flex",alignItems:"center",pointerEvents:"auto",zIndex:2}}>
+                            <button onClick={function(e){ e.stopPropagation(); cycleSlotMark(dateKey,idx,null); }} title="Restore to an open slot" style={{background:"#fff",border:"1px solid #cfe6cf",borderRadius:"50%",width:"20px",height:"20px",display:"flex",alignItems:"center",justifyContent:"center",color:"#3a7a3a",fontSize:"13px",lineHeight:1,cursor:"pointer",fontFamily:"inherit",padding:0}}>{"×"}</button>
                           </div>
                         )}
                         <div
@@ -2368,7 +2472,7 @@ export default function TheList() {
                             <div onClick={function(){ placeClientInSlot(dateKey,idx); }} style={{flex:1,fontSize:"13px",color:"#2a7a2a",cursor:"pointer",padding:"0 2px"}}>tap to place</div>
                           ):(
                             <div style={{flex:1,minWidth:0,display:"flex",alignItems:"center",gap:"4px"}}
-                              onClick={function(){ if(filled&&slot.done) handleDoneRowTap(dateKey,idx); else if(!filled&&!slot.blocked) handleOpenSlotTap(dateKey,idx); }}
+                              onClick={function(){ if(filled&&slot.done) handleDoneRowTap(dateKey,idx); else if(!filled&&!slot.blocked){ if(slot.availStatus) startEdit(dateKey,idx,false); else handleOpenSlotTap(dateKey,idx); } }}
                               onMouseDown={function(){ if(filled&&!slot.done&&!isEditing&&(!selectMode||selectedSlots[rowKey])) startDragLongPress(dateKey,idx,0,0); }}
                               onMouseUp={function(){ cancelDragLongPress(); }}
                               onMouseLeave={cancelDragLongPress}
@@ -2380,8 +2484,9 @@ export default function TheList() {
                               <input
                                 value={isEditing?editValues.name:(wasRemoved?"":(slot.name||((!filled&&slot.availStatus)?(slot.availStatus==="overtime"?"OVERTIME (COSTS TIME AND A HALF)":"AVAILABLE"):"")))}
                                 readOnly={!isEditing}
-                                onFocus={function(){ if(!isEditing&&!selectMode&&!isLiveDragging&&!dragState&&!slot.done) startEdit(dateKey,idx); }}
-                                onChange={function(e){ if(isEditing) setEditValues(function(v){ return {...v,name:e.target.value}; }); }}
+                                autoComplete="off" autoCorrect="off" autoCapitalize="words" spellCheck={false}
+                                onFocus={function(){ if(!isEditing&&!selectMode&&!isLiveDragging&&!dragState&&!slot.done) startEdit(dateKey,idx,(!filled&&!slot.availStatus)); }}
+                                onChange={function(e){ if(isEditing){ setEditValues(function(v){ return {...v,name:e.target.value}; }); if(!editChromeReady) setEditChromeReady(true); } }}
                                 onKeyDown={function(e){ if(isEditing) handleKeyDown(e,dateKey,idx); }}
                                 onBlur={function(e){ if(isEditing) handleBlur(e); }}
                                 onMouseDown={function(){ if(filled&&!slot.done&&!isEditing&&!selectMode) startDragLongPress(dateKey,idx,0,0); }}
@@ -2395,7 +2500,7 @@ export default function TheList() {
                                   onTouchStart={function(e){ e.stopPropagation(); }}
                                   onTouchEnd={function(e){ e.stopPropagation(); }}
                                 >
-                                  {filled&&slot.pending&&!slot.done&&<button onClick={function(e){ e.stopPropagation(); lockInSlot(dateKey,idx); }} title="Lock in" style={{display:"flex",alignItems:"center",gap:"3px",background:"#c9a96e",border:"none",borderRadius:"6px",cursor:"pointer",padding:view==="Week"?"3px 5px":"3px 7px",lineHeight:1,flexShrink:0}}><LockIcon size={12} color="#0f0f0f"/>{view!=="Week"&&<span style={{fontSize:"10px",color:"#0f0f0f",letterSpacing:"0.04em"}}>Lock</span>}</button>}
+                                  {filled&&slot.pending&&!slot.done&&<button onClick={function(e){ e.stopPropagation(); lockInSlot(dateKey,idx); }} title="Lock in" style={{display:"flex",alignItems:"center",justifyContent:"center",background:"#fff",border:"1px solid #d8c08a",borderRadius:"6px",cursor:"pointer",padding:view==="Week"?"3px 5px":"3px 7px",lineHeight:1,flexShrink:0}}><UnlockIcon size={12} color="#9a7a30"/></button>}
                                   {view!=="Week"&&filled&&slot.price&&<span style={{fontSize:"12px",color:slot.done?"#3a5a3a":"#a07830"}}>{slot.price}</span>}
                                   {view!=="Week"&&filled&&(
                                     <div onClick={function(e){ e.stopPropagation(); if(slot.recurWeeks) openClientProfile(slot.name); }} style={{width:"26px",textAlign:"right",fontSize:"9px",color:slot.isException?"#a07830":"#6a8aaa",flexShrink:0,cursor:slot.recurWeeks?"pointer":"default",lineHeight:1}}>
@@ -2406,8 +2511,8 @@ export default function TheList() {
                                   {view!=="Week"&&filled&&<button onClick={function(e){ e.stopPropagation(); setNoteDraft(slot.note||""); setNoteModal({dateKey,idx,name:slot.name}); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 5px",color:slot.note?"#c9a96e":"#bbb",fontSize:"22px",fontWeight:"bold",lineHeight:1,WebkitTextStroke:"0.6px currentColor"}}>{"✎"}</button>}
                                 </div>
                               )}
-                              {isEditing&&<input value={editValues.price} onChange={function(e){ setEditValues(function(v){ return {...v,price:e.target.value}; }); }} onKeyDown={function(e){ handleKeyDown(e,dateKey,idx); }} onBlur={handleBlur} data-rowkey={rowKey} placeholder="$" style={{width:"52px",fontSize:"13px",color:"#1a1a1a",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"4px",outline:"none",padding:"2px 5px",fontFamily:"Georgia,serif",WebkitAppearance:"none",appearance:"none"}}/>}
-                              {isEditing&&<button data-rowkey={rowKey} onMouseDown={function(e){ e.preventDefault(); }} onClick={function(e){ e.preventDefault(); commitPenciled(dateKey,idx); }} title="Penciled in — offered, waiting to hear back" style={{flexShrink:0,marginLeft:"4px",display:"flex",alignItems:"center",gap:"3px",background:"#fff",border:"1px solid #d8c08a",borderRadius:"6px",cursor:"pointer",padding:"3px 7px",fontFamily:"Georgia,serif",fontSize:"11px",color:"#9a7a30",lineHeight:1,whiteSpace:"nowrap"}}>{"✎ Pencil"}</button>}
+                              {isEditing&&editChromeReady&&<input value={editValues.price} onChange={function(e){ setEditValues(function(v){ return {...v,price:e.target.value}; }); }} onKeyDown={function(e){ handleKeyDown(e,dateKey,idx); }} onBlur={handleBlur} data-rowkey={rowKey} placeholder="$" style={{width:"52px",fontSize:"13px",color:"#1a1a1a",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"4px",outline:"none",padding:"2px 5px",fontFamily:"Georgia,serif",WebkitAppearance:"none",appearance:"none"}}/>}
+                              {isEditing&&editChromeReady&&<button data-rowkey={rowKey} onMouseDown={function(e){ e.preventDefault(); }} onClick={function(e){ e.preventDefault(); var nm=stripLeadingNumbers(((editValuesRef.current&&editValuesRef.current.name)||"").trim()); if(nm){ commitPenciled(dateKey,idx); } else { setPencilArmed(function(p){ return !p; }); } }} title={pencilArmed?"Pencil mode on — type a name, then Enter to pencil them in":"Penciled in — offered, waiting to hear back"} style={{flexShrink:0,marginLeft:"4px",display:"flex",alignItems:"center",gap:"3px",background:pencilArmed?"#c9a96e":"#fff",border:pencilArmed?"1px solid #c9a96e":"1px solid #d8c08a",borderRadius:"6px",cursor:"pointer",padding:"3px 7px",fontFamily:"Georgia,serif",fontSize:"11px",color:pencilArmed?"#2a2009":"#9a7a30",lineHeight:1,whiteSpace:"nowrap"}}>{"✎ Pencil"}</button>}
                             </div>
                           )}
                         </div>
