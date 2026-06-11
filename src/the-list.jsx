@@ -98,6 +98,36 @@ function isOldDefault(slots) {
   return checkOld(OLD_DEFAULT_TIMES_A) || checkOld(OLD_DEFAULT_TIMES_B) || checkOld(OLD_DEFAULT_TIMES_C);
 }
 
+// A day the user already edited keeps the OLD short default tail (it stops at
+// 1:13 or 1:36) because it has names, so isOldDefault skips it. If the day is
+// still made only of standard default times (no custom rows), top it back up to
+// the full default tail. Idempotent: a full day (ends 2:21) is left untouched.
+function extendDefaultTail(slots) {
+  if (!slots || !slots.length) return slots;
+  var present = {};
+  var maxAbs = 0;
+  for (var i = 0; i < slots.length; i++) {
+    var s = slots[i];
+    if (s.isCustom) return slots;
+    if (DEFAULT_TIMES.indexOf(s.time) === -1) return slots;
+    present[s.time] = true;
+    var a = timeToAbsMinutes(s.time);
+    if (a > maxAbs) maxAbs = a;
+  }
+  var abs113 = timeToAbsMinutes("1:13");
+  var abs136 = timeToAbsMinutes("1:36");
+  if (maxAbs !== abs113 && maxAbs !== abs136) return slots;
+  var out = slots.slice();
+  for (var k = 0; k < DEFAULT_TIMES.length; k++) {
+    var dt = DEFAULT_TIMES[k];
+    if (present[dt]) continue;
+    if (timeToAbsMinutes(dt) > maxAbs) {
+      out.push({time:dt,name:"",price:"",done:false,recurWeeks:null,isCustom:false});
+    }
+  }
+  return out;
+}
+
 function migrateSchedules(raw) {
   var result = {};
   var keys = Object.keys(raw);
@@ -106,7 +136,7 @@ function migrateSchedules(raw) {
     if (isOldDefault(raw[dk])) {
       result[dk] = DEFAULT_TIMES.map(function(t){ return {time:t,name:"",price:"",done:false,recurWeeks:null,isCustom:false}; });
     } else {
-      result[dk] = raw[dk];
+      result[dk] = extendDefaultTail(raw[dk]);
     }
   }
   return result;
@@ -247,7 +277,8 @@ function absMinutesToTime(min) {
 }
 
 export default function TheList() {
-  const [view, setView] = useState("Week");
+  const [view, setView] = useState("3-Day");
+  const [isSplitView, setIsSplitView] = useState(false);
   const [baseDate, setBaseDate] = useState(new Date());
   const [schedules, setSchedules] = useState(function() {
     var raw = loadFromStorage("tl_schedules", {});
@@ -318,12 +349,57 @@ export default function TheList() {
   const schedulesRef = useRef(schedules);
   schedulesRef.current = schedules;
   dragStateRef.current = dragState;
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const slotTapRef = useRef({key:null,count:0,timer:null});
 
   useEffect(function() { try { localStorage.setItem("tl_schedules", JSON.stringify(schedules)); } catch(e) {} }, [schedules]);
   useEffect(function() { try { localStorage.setItem("tl_clients", JSON.stringify(clientMemory)); } catch(e) {} }, [clientMemory]);
   useEffect(function() { try { localStorage.setItem("tl_holidays", JSON.stringify(customHolidays)); } catch(e) {} }, [customHolidays]);
   useEffect(function() { try { localStorage.setItem("tl_history", JSON.stringify(history)); } catch(e) {} }, [history]);
   useEffect(function() { try { localStorage.setItem("tl_daynotes", JSON.stringify(dayNotes)); } catch(e) {} }, [dayNotes]);
+
+  // Stop the whole page from bouncing/scrolling when there is nothing under the
+  // list. Scrolling still works inside the per-day columns, which set their own
+  // overscrollBehavior:"contain".
+  useEffect(function() {
+    var de = document.documentElement;
+    var bd = document.body;
+    var prev = {
+      htmlOver: de.style.overscrollBehaviorY,
+      bodyOver: bd.style.overscrollBehaviorY,
+      bodyOverflow: bd.style.overflow,
+      htmlOverflow: de.style.overflow
+    };
+    de.style.overscrollBehaviorY = "none";
+    bd.style.overscrollBehaviorY = "none";
+    de.style.overflow = "hidden";
+    bd.style.overflow = "hidden";
+    return function() {
+      de.style.overscrollBehaviorY = prev.htmlOver;
+      bd.style.overscrollBehaviorY = prev.bodyOver;
+      bd.style.overflow = prev.bodyOverflow;
+      de.style.overflow = prev.htmlOverflow;
+    };
+  }, []);
+
+  // When an iPad app shares the screen (Split View / Stage Manager) the system
+  // window controls sit over our top-left. Detect "not full width on a touch
+  // device" so we can scoot the view tabs clear of them.
+  useEffect(function() {
+    var check = function() {
+      var touch = (navigator.maxTouchPoints||0) > 0 || ("ontouchstart" in window);
+      var sw = (window.screen && window.screen.width) ? window.screen.width : window.innerWidth;
+      setIsSplitView(touch && window.innerWidth < (sw - 20));
+    };
+    check();
+    window.addEventListener("resize", check);
+    window.addEventListener("orientationchange", check);
+    return function() {
+      window.removeEventListener("resize", check);
+      window.removeEventListener("orientationchange", check);
+    };
+  }, []);
 
   useEffect(function() {
     if (checkoffModal && !checkoffCalMonth) {
@@ -565,10 +641,10 @@ export default function TheList() {
       setEditingOccupied(false);
       return;
     }
-    if (newName!==prev.name || newPrice!==prev.price) {
+    if (newName!==prev.name || newPrice!==prev.price || prev.availStatus) {
       var snapshot = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
       pushUndo(snapshot);
-      slots[idx] = {...prev,name:newName,price:newPrice};
+      slots[idx] = {...prev,name:newName,price:newPrice,availStatus:null};
       setSlots(dateKey,slots);
       if (prev.name&&!newName) addHistoryEntry({type:"removed",time:prev.time,name:prev.name,dateKey});
       else if (!prev.name&&newName) {
@@ -665,11 +741,13 @@ export default function TheList() {
       var newPrice = (cv.price||"").trim();
       if (!newName) return;
       var nextIdx = idx+1;
-      var canLink = nextIdx<slots.length && !slots[nextIdx].name && !slots[nextIdx].blocked;
+      var hasNext = nextIdx<slots.length && !slots[nextIdx].blocked;
+      var nextEmpty = hasNext && !slots[nextIdx].name;
+      var nextFilled = hasNext && !!slots[nextIdx].name;
       var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
       pushUndo(snapshot);
-      if (canLink) {
-        // Two adjacent slots are linked into a group. Filled slots are never skipped/linked.
+      if (nextEmpty) {
+        // Empty slot below: carry this name down and link the two into a group.
         var gid = curSlot.groupId || (idx>0&&slots[idx-1].groupId) || newGroupId();
         slots[idx] = {...curSlot,name:newName,price:newPrice,groupId:gid};
         slots[nextIdx] = {...slots[nextIdx],name:newName,price:newPrice,groupId:gid};
@@ -677,8 +755,19 @@ export default function TheList() {
         addHistoryEntry({type:"added",time:slots[idx].time,name:newName,price:newPrice,dateKey});
         editingRef.current=null; setEditingCell(null); setEditingOccupied(false);
         setTimeout(function(){ startEdit(dateKey,nextIdx); },80);
+      } else if (nextFilled) {
+        // Slot below already has someone written in it (re-editing an existing
+        // list): link the two appointments into one group without overwriting
+        // the name already below, then keep chaining down.
+        var gid2 = curSlot.groupId || slots[nextIdx].groupId || newGroupId();
+        slots[idx] = {...curSlot,name:newName,price:newPrice,groupId:gid2};
+        slots[nextIdx] = {...slots[nextIdx],groupId:gid2};
+        setSlots(dateKey,slots);
+        addHistoryEntry({type:"added",time:slots[idx].time,name:newName,price:newPrice,dateKey});
+        editingRef.current=null; setEditingCell(null); setEditingOccupied(false);
+        setTimeout(function(){ startEdit(dateKey,nextIdx); },80);
       } else {
-        // No empty slot directly below — just save this one, no link formed.
+        // No usable slot directly below — just save this one, no link formed.
         slots[idx] = {...curSlot,name:newName,price:newPrice};
         setSlots(dateKey,slots);
         addHistoryEntry({type:"added",time:slots[idx].time,name:newName,price:newPrice,dateKey});
@@ -728,14 +817,62 @@ export default function TheList() {
     if (!slot.name && !slot.blocked) return;
     var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
     pushUndo(snapshot);
-    var updated = [...slots];
-    updated[idx] = {...slot,done:!slot.done};
+    var newDone = !slot.done;
+    var updated = slots.map(function(s, i){
+      if (i===idx) return {...s,done:newDone};
+      // Checking off one member of a group checks off the whole group.
+      if (slot.groupId && s.groupId===slot.groupId && s.name) return {...s,done:newDone};
+      return s;
+    });
     setSlots(dateKey,updated);
-    if (!slot.done) {
+    if (newDone) {
       showBanner({type:"checkoff",name:slot.name||slot.blockLabel||"Lunch",time:slot.time,dateKey});
     } else {
       playSound("tap");
     }
+  };
+
+  // Mark an empty slot as AVAILABLE / OVERTIME (or clear it). Never touches a
+  // slot that already has someone or is blocked.
+  const cycleSlotMark = function(dateKey, idx, mark) {
+    var slots = getSlots(dateKey);
+    var slot = slots[idx];
+    if (!slot || slot.name || slot.blocked) return;
+    var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
+    pushUndo(snapshot);
+    var updated = [...slots];
+    updated[idx] = {...slot,availStatus:mark,done:false};
+    setSlots(dateKey,updated);
+  };
+
+  // Taps on an open slot: 1 = edit (handled live by the input focus), 2 =
+  // AVAILABLE, 3 = OVERTIME. On the 2nd tap we back out of the edit the first
+  // tap started so the keyboard goes away, then settle the label after a beat.
+  const handleOpenSlotTap = function(dateKey, idx) {
+    var key = dateKey+"-"+idx;
+    var st = slotTapRef.current;
+    if (st.key !== key) { if (st.timer) clearTimeout(st.timer); st.key=key; st.count=0; st.timer=null; }
+    st.count += 1;
+    if (st.count >= 2) {
+      // If the first tap opened an edit and they've started writing a name, this
+      // is real typing/cursor work — leave it alone instead of marking the slot.
+      var cv = editValuesRef.current;
+      if (editingRef.current && cv && (cv.name||"").trim().length>0) {
+        if (st.timer) clearTimeout(st.timer);
+        slotTapRef.current = {key:null,count:0,timer:null};
+        return;
+      }
+      editingRef.current=null; setEditingCell(null); setEditingOccupied(false);
+      if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    }
+    if (st.timer) clearTimeout(st.timer);
+    var dk = dateKey; var ix = idx;
+    st.timer = setTimeout(function(){
+      var c = slotTapRef.current.count;
+      slotTapRef.current = {key:null,count:0,timer:null};
+      if (c >= 3) cycleSlotMark(dk, ix, "overtime");
+      else if (c === 2) cycleSlotMark(dk, ix, "available");
+    }, 260);
   };
 
   // Build the list of times that share a slot's group on a given day (sorted by time).
@@ -1244,6 +1381,57 @@ export default function TheList() {
     return true;
   };
 
+  // Drop a same-day group onto a specific slot: pack the members into the open
+  // slots starting at the one they were dropped on (instead of snapping them
+  // back to their original times). Overflow goes to the tap-to-place picker.
+  const dropGroupAtSlot = function(targetDateKey, targetIdx) {
+    var ds = dragStateRef.current;
+    if (!ds || !ds.multi) return false;
+    var clients = ds.clients.filter(function(c){ return c.name; });
+    if (clients.length === 0) return false;
+    clients = clients.slice().sort(function(a,b){
+      return timeToAbsMinutes(a.originalTime||a.time) - timeToAbsMinutes(b.originalTime||b.time);
+    });
+    var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
+    pushUndo(snapshot);
+    var newSch = {...schedulesRef.current};
+    var getDay = function(dk){ return newSch[dk] ? [...newSch[dk]] : DEFAULT_TIMES.map(function(t){ return {time:t,name:"",price:"",done:false,recurWeeks:null}; }); };
+    // Lift everyone off first so their old slots become available to repack into.
+    clients.forEach(function(c){
+      var od = getDay(c.originalDateKey);
+      if (od[c.originalIdx] && od[c.originalIdx].name===c.name) {
+        od[c.originalIdx] = {...od[c.originalIdx],name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null};
+        newSch[c.originalDateKey] = od;
+      }
+    });
+    var gid = clients.length > 1 ? newGroupId() : null;
+    var day = getDay(targetDateKey);
+    var cursor = targetIdx;
+    var placed = 0; var conflicts = [];
+    clients.forEach(function(c){
+      while (cursor < day.length && (day[cursor].name || day[cursor].blocked)) cursor++;
+      if (cursor < day.length) {
+        day[cursor] = {...day[cursor],name:c.name,price:c.price,recurWeeks:c.recurWeeks,isException:true,done:false,groupId:gid};
+        cursor++;
+        placed++;
+      } else {
+        conflicts.push(c);
+      }
+    });
+    newSch[targetDateKey] = day;
+    setSchedules(newSch);
+    setSelectMode(false); setSelectedSlots({});
+    if (conflicts.length > 0) {
+      var first = conflicts[0]; var rest = conflicts.slice(1);
+      setBaseDate(parseDateKey(targetDateKey)); setView("Day");
+      setReassignQueue(rest);
+      setReassignMode({client:{name:first.name,price:first.price,recurWeeks:first.recurWeeks},currentDateKey:targetDateKey,remainingConflicts:[],originalDateKey:first.originalDateKey,originalIdx:first.originalIdx});
+    } else {
+      showBanner({type:"added",name:placed+" appointment"+(placed!==1?"s":"")+" moved",time:null,dateKey:null});
+    }
+    return true;
+  };
+
   useEffect(function() {
     if (!isLiveDragging) return;
     if (dragChipRef.current) {
@@ -1286,7 +1474,10 @@ export default function TheList() {
       if (dragChipRef.current) dragChipRef.current.style.transform = "translate(" + (t.clientX + 14) + "px," + (t.clientY - 22) + "px)";
       // Hovering a view tab while dragging jumps into that view so off-screen days become reachable.
       var vt = findViewTab(t.clientX, t.clientY);
-      if (vt) { setView(vt); }
+      if (vt && vt !== viewRef.current) {
+        if (vt === "Wknd") setBaseDate(getUpcomingWeekend());
+        setView(vt);
+      }
       var ds = dragStateRef.current;
       var key = (ds && ds.multi) ? findAnyRowKey(t.clientX, t.clientY) : findDropKeyNear(t.clientX, t.clientY);
       if (key !== dragOverRef.current) { dragOverRef.current = key; setDragOverKey(key); }
@@ -1302,7 +1493,15 @@ export default function TheList() {
       if (ds && ds.multi) {
         var anyKey = dragOverRef.current || (px!=null ? findAnyRowKey(px, py) : null);
         var dayKey = dayKeyFromRow(anyKey);
-        if (dayKey) { landed = dropMultiOnDay(dayKey); }
+        if (dayKey) {
+          var allSameDay = ds.clients.every(function(c){ return c.originalDateKey === dayKey; });
+          if (allSameDay && anyKey) {
+            var gp = anyKey.split("-"); var gi = parseInt(gp[gp.length-1]);
+            landed = dropGroupAtSlot(dayKey, gi);
+          } else {
+            landed = dropMultiOnDay(dayKey);
+          }
+        }
       } else {
         var key = dragOverRef.current;
         if (!key && px!=null) key = findDropKeyNear(px, py);
@@ -1318,16 +1517,23 @@ export default function TheList() {
     };
     var onCancel = function() {
       // The OS aborted the touch — almost always because switching views mid-drag
-      // unmounted the source row. Don't lose the appointment: hand a single move off
-      // to tap-to-place (works across any view), and a group/multi move to the picker.
+      // unmounted the source row. Don't lose the appointment: complete the drop if
+      // the finger was over an open slot, otherwise hand a single move off to
+      // tap-to-place (works across any view) and a group/multi move to the picker.
       setIsLiveDragging(false);
+      var overKey = dragOverRef.current;
       dragOverRef.current = null; setDragOverKey(null);
       var ds = dragStateRef.current;
       if (!ds) return;
       if (ds.multi) {
         setDragCalOpen(true); setDragCalMonth(new Date()); setDragCalHover(true);
       } else {
-        setPlacingClient(ds.clients[0]);
+        var landedCancel = false;
+        if (overKey) {
+          var cp = overKey.split("-"); var ci = parseInt(cp[cp.length-1]); var cdk = cp.slice(0,cp.length-1).join("-");
+          landedCancel = dropPickedUpOnSlot(cdk, ci);
+        }
+        if (!landedCancel) setPlacingClient(ds.clients[0]);
         setDragState(null);
       }
     };
@@ -1484,7 +1690,7 @@ export default function TheList() {
       onTouchEnd={function(){ endSelectDrag(); }}>
 
       {banner && (
-        <div style={{position:"fixed",top:"calc(env(safe-area-inset-top,0px) + 60px)",left:"50%",transform:"translateX(-50%)",zIndex:2000,background:getBannerColor(banner.type),color:"#fff",padding:"9px 16px",borderRadius:"20px",fontSize:"12px",letterSpacing:"0.04em",boxShadow:"0 2px 12px rgba(0,0,0,0.2)",display:"flex",alignItems:"center",gap:"12px",maxWidth:"90vw",pointerEvents:"auto"}}>
+        <div style={{position:"fixed",top:"calc(env(safe-area-inset-top,0px) + 4px)",left:"50%",transform:"translateX(-50%)",zIndex:2000,background:getBannerColor(banner.type),color:"#fff",padding:"6px 14px",borderRadius:"20px",fontSize:"12px",letterSpacing:"0.04em",boxShadow:"0 2px 12px rgba(0,0,0,0.2)",display:"flex",alignItems:"center",gap:"12px",maxWidth:"90vw",pointerEvents:"auto"}}>
           <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{describeBanner(banner)}</span>
           {(banner.type!=="undo"&&banner.type!=="redo"&&canUndo)&&(
             <button onClick={handleUndo} title="Undo" style={{background:"rgba(255,255,255,0.22)",border:"none",borderRadius:"10px",color:"#fff",padding:"4px 9px",cursor:"pointer",fontFamily:"inherit",flexShrink:0,display:"flex",alignItems:"center"}}><UndoIcon size={15} color="#fff"/></button>
@@ -1906,7 +2112,6 @@ export default function TheList() {
             </div>
             <div style={{display:"flex",gap:"8px"}}>
               <button onClick={commitTimeEdit} style={{flex:1,padding:"11px",background:"#1a1a1a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Confirm</button>
-              <button onClick={function(){ setTimeEditMinutes(timeToAbsMinutes(timeEditModal.original)); }} style={{padding:"11px 14px",background:"#fff",border:"1px solid #d8d8d6",borderRadius:"8px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Reset</button>
               <button onClick={function(){ setTimeEditModal(null); }} style={{padding:"11px 14px",background:"none",border:"1px solid #d8d8d6",borderRadius:"8px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Cancel</button>
             </div>
           </div>
@@ -1995,7 +2200,7 @@ export default function TheList() {
 
       {/* HEADER */}
       <div style={{borderBottom:"1px solid #e8e8e6",padding:"3px 20px 3px",paddingTop:"calc(env(safe-area-inset-top,0px) + 3px)",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,background:"#ffffff",zIndex:100,flexShrink:0}}>
-        <div style={{display:"flex",gap:"2px",background:"#e8e8e6",padding:"3px",borderRadius:"6px"}}>
+        <div style={{display:"flex",gap:"2px",background:"#e8e8e6",padding:"3px",borderRadius:"6px",marginLeft:isSplitView?"48px":"0"}}>
           {VIEWS.map(function(v){ return (
             <button key={v} data-viewtab={v} onClick={function(){ if(v==="Wknd") setBaseDate(getUpcomingWeekend()); else if(v==="Day"||v==="3-Day"||v==="Week") setBaseDate(getAnchorStart()); setView(v); }} style={{padding:"5px 12px",fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",border:"none",borderRadius:"4px",cursor:"pointer",background:view===v?"#1a1a1a":"transparent",color:view===v?"#ffffff":"#999",fontFamily:"inherit",transition:"all 0.15s"}}>{v}</button>
           ); })}
@@ -2039,7 +2244,7 @@ export default function TheList() {
                   >
                     <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:"6px",marginBottom:"3px"}}>
                       <div style={{fontSize:"14px",color:isT?"#a07830":(outside?"#bdbdbb":"#1a1a1a"),fontWeight:isT?"bold":"normal",flexShrink:0}}>{day.getDate()}</div>
-                      {holiday&&<div style={{fontSize:"14px",color:outside?"#cbb98e":"#a07830",textAlign:"right",lineHeight:1.15,minWidth:0,overflow:"hidden"}}>{holiday}</div>}
+                      {holiday&&<div style={{fontSize:"11px",color:outside?"#cbb98e":"#a07830",textAlign:"right",lineHeight:1.2,letterSpacing:"0.08em",textTransform:"uppercase",marginTop:"2px",minWidth:0,overflow:"hidden"}}>{holiday}</div>}
                     </div>
                     {booked.length>0&&(
                       <div style={{opacity:outside?0.55:1}}>
@@ -2074,7 +2279,7 @@ export default function TheList() {
                       <div style={{minWidth:0,overflow:"hidden",flex:1}}>
                         <div style={{display:"flex",alignItems:"baseline",gap:"6px",minWidth:0}}>
                           <span style={{fontSize:sz,color:isToday(date)?"#c9893a":"#b89a5a",lineHeight:1.2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",flexShrink:1}}>{wdStr}</span>
-                          {hol&&<span style={{fontSize:"9px",color:"#a07830",letterSpacing:"0.06em",textTransform:"uppercase",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:1}}>{hol}</span>}
+                          {hol&&<span style={{fontSize:"9px",color:"#a07830",letterSpacing:"0.08em",textTransform:"uppercase",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:1}}>{hol}</span>}
                         </div>
                         <div style={{fontSize:sz,color:"#1a1a1a",lineHeight:1.2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{monthStr}</div>
                       </div>
@@ -2082,7 +2287,7 @@ export default function TheList() {
                   })()}
                   <button onClick={function(e){ e.stopPropagation(); setNoteDraft(dayNotes[dateKey]||""); setNoteModal({dayKey:dateKey,isDay:true,name:friendlyDateLong(dateKey)}); }} title="Note for the day" style={{background:"none",border:"none",cursor:"pointer",padding:"0 2px",color:dayNotes[dateKey]?"#c9a96e":"#bbb",fontSize:"26px",lineHeight:1,flexShrink:0,WebkitTextStroke:"0.5px currentColor"}}>{"✎"}</button>
                 </div>
-                <div style={{flex:1,minHeight:0,padding:"0",overflowY:"auto",overflowX:"hidden",WebkitOverflowScrolling:"touch",overscrollBehavior:"contain"}}
+                <div style={{flex:1,minHeight:0,paddingBottom:"calc(env(safe-area-inset-bottom,0px) + 10px)",overflowY:"auto",overflowX:"hidden",WebkitOverflowScrolling:"touch",overscrollBehavior:"contain"}}
                   onTouchMove={function(e){
                     if (!selectDragAnchor.current) return;
                     var t=e.touches[0]; if(!t) return;
@@ -2107,6 +2312,7 @@ export default function TheList() {
                     var showDropHint=(isLiveDragging||placingClient)&&!filled&&!slot.blocked&&!isEditing&&!(dragState&&dragState.sourceKey===rowKey);
                     if (isDropTarget) slotBg="#e3f3e3";
                     else if (placingClient&&!filled&&!slot.blocked&&!isEditing) slotBg="#f4faf4";
+                    else if (!filled&&!slot.blocked&&slot.availStatus&&!isEditing) slotBg="#e7f6e7";
                     return (
                       <div key={rowKey} style={{position:"relative",overflow:"hidden",borderBottom:"1px solid #efefed",opacity:isDragging?0.4:1}}>
                         {!filled&&!slot.blocked&&!isEditing&&!(reassignMode&&reassignMode.currentDateKey===dateKey)&&!placingClient&&isCustomSlot&&(
@@ -2162,7 +2368,7 @@ export default function TheList() {
                             <div onClick={function(){ placeClientInSlot(dateKey,idx); }} style={{flex:1,fontSize:"13px",color:"#2a7a2a",cursor:"pointer",padding:"0 2px"}}>tap to place</div>
                           ):(
                             <div style={{flex:1,minWidth:0,display:"flex",alignItems:"center",gap:"4px"}}
-                              onClick={function(){ if(filled&&slot.done) handleDoneRowTap(dateKey,idx); }}
+                              onClick={function(){ if(filled&&slot.done) handleDoneRowTap(dateKey,idx); else if(!filled&&!slot.blocked) handleOpenSlotTap(dateKey,idx); }}
                               onMouseDown={function(){ if(filled&&!slot.done&&!isEditing&&(!selectMode||selectedSlots[rowKey])) startDragLongPress(dateKey,idx,0,0); }}
                               onMouseUp={function(){ cancelDragLongPress(); }}
                               onMouseLeave={cancelDragLongPress}
@@ -2172,7 +2378,7 @@ export default function TheList() {
                             >
                               {isOccEdit&&<div style={{position:"absolute",top:"2px",left:"70px",fontSize:"9px",color:"#c0392b"}}>Editing {slot.name}</div>}
                               <input
-                                value={isEditing?editValues.name:(wasRemoved?"":slot.name)}
+                                value={isEditing?editValues.name:(wasRemoved?"":(slot.name||((!filled&&slot.availStatus)?(slot.availStatus==="overtime"?"OVERTIME (COSTS TIME AND A HALF)":"AVAILABLE"):"")))}
                                 readOnly={!isEditing}
                                 onFocus={function(){ if(!isEditing&&!selectMode&&!isLiveDragging&&!dragState&&!slot.done) startEdit(dateKey,idx); }}
                                 onChange={function(e){ if(isEditing) setEditValues(function(v){ return {...v,name:e.target.value}; }); }}
@@ -2181,7 +2387,7 @@ export default function TheList() {
                                 onMouseDown={function(){ if(filled&&!slot.done&&!isEditing&&!selectMode) startDragLongPress(dateKey,idx,0,0); }}
                                 onMouseUp={function(){ cancelDragLongPress(); }}
                                 placeholder="" data-rowkey={rowKey}
-                                style={{flex:1,minWidth:0,pointerEvents:slot.done?"none":"auto",fontSize:"13px",color:wasRemoved?"#c0392b":slot.done?"#2a6a2a":slot.pending?"#9a8458":filled?"#1a1a1a":"#999",fontStyle:slot.pending?"italic":"normal",textDecoration:"none",background:"transparent",border:"none",outline:"none",padding:"0 2px",fontFamily:"Georgia,serif",cursor:isEditing?"text":"pointer",caretColor:isEditing?"#444":"transparent",WebkitUserSelect:isEditing?"text":"none",userSelect:isEditing?"text":"none",WebkitAppearance:"none",appearance:"none"}}
+                                style={{flex:1,minWidth:0,pointerEvents:slot.done?"none":"auto",fontSize:"13px",color:wasRemoved?"#c0392b":slot.done?"#2a6a2a":slot.pending?"#9a8458":(!filled&&slot.availStatus&&!isEditing)?"#1f7a33":filled?"#1a1a1a":"#999",fontWeight:(!filled&&slot.availStatus&&!isEditing)?"600":"normal",fontStyle:slot.pending?"italic":"normal",textDecoration:"none",background:"transparent",border:"none",outline:"none",padding:"0 2px",fontFamily:"Georgia,serif",cursor:isEditing?"text":"pointer",caretColor:isEditing?"#444":"transparent",WebkitUserSelect:isEditing?"text":"none",userSelect:isEditing?"text":"none",WebkitAppearance:"none",appearance:"none"}}
                               />
                               {!isEditing&&(
                                 <div style={{display:"flex",alignItems:"center",gap:"6px",flexShrink:0}}
