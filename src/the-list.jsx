@@ -58,6 +58,14 @@ function toDateKey(date) {
 function addDays(date, n) { var d = new Date(date); d.setDate(d.getDate()+n); return d; }
 function addWeeks(date, n) { return addDays(date, n*7); }
 function isToday(date) { return date.toDateString() === new Date().toDateString(); }
+// A day counts as "done" once the LAST person actually typed onto the list is
+// checked off (ignores empty default slots and blocked/lunch slots).
+function isDayComplete(slots) {
+  if (!slots || !slots.length) return false;
+  var named = slots.filter(function(s){ return s.name && !s.blocked; });
+  if (named.length === 0) return false;
+  return !!named[named.length-1].done;
+}
 function capitalizeFirst(str) { if (!str) return str; return str.charAt(0).toUpperCase()+str.slice(1); }
 function stripLeadingNumbers(str) { if (!str) return str; return str.replace(/^\s*\d+\s*[.)\-]\s*/, "").replace(/^\s*\d+\s+(?=\D)/, ""); }
 function isLunchName(str) { return !!str && str.trim().toLowerCase()==="lunch"; }
@@ -284,6 +292,7 @@ export default function TheList() {
   const [selectMode, setSelectMode] = useState(false);
   const [selectedSlots, setSelectedSlots] = useState({});
   const [dragState, setDragState] = useState(null);
+  const [placingClient, setPlacingClient] = useState(null);
   const [dragCalOpen, setDragCalOpen] = useState(false);
   const [dragCalMonth, setDragCalMonth] = useState(null);
   const [dragCalHover, setDragCalHover] = useState(false);
@@ -364,12 +373,18 @@ export default function TheList() {
     return Array.from({length:getDayCount()},function(_,i){ return addDays(baseDate,i); });
   };
   const getMonthDays = function() {
-    var d = new Date(baseDate.getFullYear(), baseDate.getMonth(), 1);
+    var year = baseDate.getFullYear(), month = baseDate.getMonth();
+    var first = new Date(year, month, 1);
+    var firstDay = first.getDay()===0?6:first.getDay()-1; // Monday-based leading count
+    var dim = new Date(year, month+1, 0).getDate();
     var days = [];
-    var firstDay = d.getDay()===0?6:d.getDay()-1;
-    for (var i=0;i<firstDay;i++) days.push(null);
-    var dim = new Date(baseDate.getFullYear(), baseDate.getMonth()+1, 0).getDate();
-    for (var j=1;j<=dim;j++) days.push(new Date(baseDate.getFullYear(),baseDate.getMonth(),j));
+    // Trailing days of the previous month fill the leading blanks.
+    for (var i=firstDay; i>0; i--) days.push(new Date(year, month, 1-i));
+    // This month.
+    for (var j=1; j<=dim; j++) days.push(new Date(year, month, j));
+    // Leading days of the next month fill out the final week.
+    var rem = days.length % 7;
+    if (rem !== 0) { for (var k=1; k<=7-rem; k++) days.push(new Date(year, month, dim+k)); }
     return days;
   };
 
@@ -380,6 +395,30 @@ export default function TheList() {
   }, []);
 
   const setSlots = function(dateKey, slots) { setSchedules(function(prev){ return {...prev,[dateKey]:slots}; }); };
+
+  // The day/3-day/week views are anchored on today — but once today's last
+  // person is checked off, the anchor rolls forward to tomorrow.
+  const getAnchorStart = function() {
+    var today = new Date();
+    if (isDayComplete(getSlots(toDateKey(today)))) return addDays(today, 1);
+    return today;
+  };
+
+  // Live roll-forward: the moment today's last person gets checked off (while you're
+  // sitting on today in a day/3-day/week view), advance the first column to tomorrow.
+  // Only fires on the incomplete→complete transition, so you can still arrow back to
+  // review a finished day without being bounced forward again.
+  const todayCompleteRef = useRef(false);
+  useEffect(function() {
+    var today = new Date();
+    var complete = isDayComplete(getSlots(toDateKey(today)));
+    var was = todayCompleteRef.current;
+    todayCompleteRef.current = complete;
+    if (view==="Month" || view==="Wknd") return;
+    if (complete && !was && toDateKey(baseDate)===toDateKey(today)) {
+      setBaseDate(addDays(today, 1));
+    }
+  }, [schedules, view, baseDate]);
 
   const addHistoryEntry = function(entry) {
     var full = {...entry, timestamp:new Date().toLocaleTimeString(), id:Date.now()+Math.random()};
@@ -1054,7 +1093,26 @@ export default function TheList() {
         playSound("lock");
         return;
       }
-      var clients = [{name:slot.name,price:slot.price,recurWeeks:slot.recurWeeks,originalDateKey:dateKey,originalIdx:idx}];
+      // If this slot belongs to a group, the whole group travels together.
+      if (slot.groupId) {
+        var daySlots = getSlots(dateKey);
+        var groupClients = daySlots.map(function(s,i){ return {s:s,i:i}; })
+          .filter(function(o){ return o.s.groupId===slot.groupId && o.s.name; })
+          .map(function(o){ return {name:o.s.name,price:o.s.price,recurWeeks:o.s.recurWeeks,originalTime:o.s.time,originalDateKey:dateKey,originalIdx:o.i}; });
+        if (groupClients.length > 1) {
+          setDragState({clients:groupClients,sourceKey:dateKey+"-"+idx,multi:true,group:true,label:slot.name});
+          if (isTouch) {
+            dragPosRef.current = {x:startX, y:startY};
+            dragOverRef.current = null; setDragOverKey(null);
+            setIsLiveDragging(true);
+          } else {
+            setDragCalOpen(true); setDragCalMonth(new Date()); setDragCalHover(true);
+          }
+          playSound("lock");
+          return;
+        }
+      }
+      var clients = [{name:slot.name,price:slot.price,recurWeeks:slot.recurWeeks,originalTime:slot.time,originalDateKey:dateKey,originalIdx:idx}];
       setDragState({clients,sourceKey:dateKey+"-"+idx,multi:false});
       if (isTouch) {
         // True drag-and-drop: lift the appointment and let it follow the finger.
@@ -1081,6 +1139,34 @@ export default function TheList() {
   };
   const cancelDragPickup = function() {
     setDragState(null); setDragCalOpen(false); setDragCalHover(false);
+  };
+
+  // Tap-to-place: finish a single appointment move by tapping any open slot.
+  // Used when a live drag crosses into another view (which can interrupt touch
+  // tracking) so the move still lands reliably on whatever slot is tapped.
+  const placeClientInSlot = function(targetDateKey, targetIdx) {
+    var client = placingClient;
+    if (!client) return;
+    if (client.originalDateKey === targetDateKey && client.originalIdx === targetIdx) { setPlacingClient(null); return; }
+    var targetSlot = getSlots(targetDateKey)[targetIdx];
+    if (!targetSlot || targetSlot.name || targetSlot.blocked) return;
+    var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
+    pushUndo(snapshot);
+    if (client.originalDateKey === targetDateKey) {
+      var arr = [...getSlots(targetDateKey)];
+      arr[targetIdx] = {...arr[targetIdx],name:client.name,price:client.price,recurWeeks:client.recurWeeks,isException:true,done:false};
+      arr[client.originalIdx] = {...arr[client.originalIdx],name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null};
+      setSlots(targetDateKey, arr);
+    } else {
+      var ts = [...getSlots(targetDateKey)];
+      ts[targetIdx] = {...ts[targetIdx],name:client.name,price:client.price,recurWeeks:client.recurWeeks,isException:true,done:false};
+      setSlots(targetDateKey, ts);
+      var os = [...getSlots(client.originalDateKey)];
+      os[client.originalIdx] = {...os[client.originalIdx],name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null};
+      setSlots(client.originalDateKey, os);
+    }
+    addHistoryEntry({type:"added",time:targetSlot.time,name:client.name,price:client.price,dateKey:targetDateKey});
+    setPlacingClient(null);
   };
 
   // Drop a picked-up appointment onto a visible empty slot (handles same-day and cross-day).
@@ -1169,6 +1255,15 @@ export default function TheList() {
       if (el && el.dataset && el.dataset.droprow && el.dataset.dropfilled === "0" && el.dataset.dropblocked === "0") return el.dataset.droprow;
       return null;
     };
+    // Forgiving version: if the exact point lands on a border/gap, sample just
+    // above and below so a near-miss still finds the open slot.
+    var findDropKeyNear = function(x, y) {
+      var k = findDropKey(x, y);
+      if (k) return k;
+      var offs = [-9, 9, -18, 18];
+      for (var i=0;i<offs.length;i++){ k = findDropKey(x, y+offs[i]); if (k) return k; }
+      return null;
+    };
     var findAnyRowKey = function(x, y) {
       var el = document.elementFromPoint(x, y);
       while (el && !(el.dataset && el.dataset.droprow)) el = el.parentElement;
@@ -1193,7 +1288,7 @@ export default function TheList() {
       var vt = findViewTab(t.clientX, t.clientY);
       if (vt) { setView(vt); }
       var ds = dragStateRef.current;
-      var key = (ds && ds.multi) ? findAnyRowKey(t.clientX, t.clientY) : findDropKey(t.clientX, t.clientY);
+      var key = (ds && ds.multi) ? findAnyRowKey(t.clientX, t.clientY) : findDropKeyNear(t.clientX, t.clientY);
       if (key !== dragOverRef.current) { dragOverRef.current = key; setDragOverKey(key); }
     };
     var onEnd = function(e) {
@@ -1210,7 +1305,7 @@ export default function TheList() {
         if (dayKey) { landed = dropMultiOnDay(dayKey); }
       } else {
         var key = dragOverRef.current;
-        if (!key && px!=null) key = findDropKey(px, py);
+        if (!key && px!=null) key = findDropKeyNear(px, py);
         if (key) {
           var parts = key.split("-"); var di = parseInt(parts[parts.length-1]); var dk2 = parts.slice(0,parts.length-1).join("-");
           landed = dropPickedUpOnSlot(dk2, di);
@@ -1222,11 +1317,19 @@ export default function TheList() {
       setDragState(null);
     };
     var onCancel = function() {
-      // The OS aborted the touch (often when a view switch unmounts the source row).
-      // Don't lose the appointment — drop into the date picker so the move can finish.
+      // The OS aborted the touch — almost always because switching views mid-drag
+      // unmounted the source row. Don't lose the appointment: hand a single move off
+      // to tap-to-place (works across any view), and a group/multi move to the picker.
       setIsLiveDragging(false);
       dragOverRef.current = null; setDragOverKey(null);
-      if (dragStateRef.current) { setDragCalOpen(true); setDragCalMonth(new Date()); setDragCalHover(true); }
+      var ds = dragStateRef.current;
+      if (!ds) return;
+      if (ds.multi) {
+        setDragCalOpen(true); setDragCalMonth(new Date()); setDragCalHover(true);
+      } else {
+        setPlacingClient(ds.clients[0]);
+        setDragState(null);
+      }
     };
     window.addEventListener("touchmove", onMove, {passive:false});
     window.addEventListener("touchend", onEnd);
@@ -1376,7 +1479,7 @@ export default function TheList() {
   var canRedo = redoStack.length>0;
 
   return (
-    <div style={{height:"100dvh",overflow:"hidden",boxSizing:"border-box",display:"flex",flexDirection:"column",background:"#ffffff",fontFamily:"Georgia,serif",color:"#1a1a1a",paddingTop:reassignMode?"calc(env(safe-area-inset-top,0px) + 52px)":"0"}}
+    <div style={{height:"100dvh",overflow:"hidden",boxSizing:"border-box",display:"flex",flexDirection:"column",background:"#ffffff",fontFamily:"Georgia,serif",color:"#1a1a1a",paddingTop:(reassignMode||placingClient)?"calc(env(safe-area-inset-top,0px) + 52px)":"0"}}
       onMouseUp={function(){ endSelectDrag(); if(dragState&&!dragCalHover) { setDragState(null); setDragCalOpen(false); } }}
       onTouchEnd={function(){ endSelectDrag(); }}>
 
@@ -1568,6 +1671,16 @@ export default function TheList() {
             <div style={{fontSize:"14px"}}>Tap any open slot for <strong>{reassignMode.client.name}</strong>{reassignQueue.length>0?(" (+"+(reassignQueue.length)+" more)"):""} on {friendlyDate(reassignMode.currentDateKey)}</div>
           </div>
           <button onClick={function(){ setReassignMode(null); setReassignQueue([]); }} style={{background:"none",border:"1px solid #444",borderRadius:"6px",color:"#888",padding:"6px 12px",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>Cancel</button>
+        </div>
+      )}
+
+      {placingClient && !reassignMode && (
+        <div style={{position:"fixed",top:0,left:0,right:0,zIndex:900,background:"#1a1a1a",color:"#fff",padding:"12px 20px",paddingTop:"calc(env(safe-area-inset-top,0px) + 12px)",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+          <div>
+            <div style={{fontSize:"11px",letterSpacing:"0.15em",textTransform:"uppercase",color:"#c9a96e",marginBottom:"2px"}}>Moving</div>
+            <div style={{fontSize:"14px"}}>Tap any open slot to place <strong>{placingClient.name}</strong></div>
+          </div>
+          <button onClick={function(){ setPlacingClient(null); }} style={{background:"none",border:"1px solid #444",borderRadius:"6px",color:"#888",padding:"6px 12px",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>Cancel</button>
         </div>
       )}
 
@@ -1769,7 +1882,9 @@ export default function TheList() {
         var workingTime = absMinutesToTime(timeEditMinutes);
         var slot = getSlots(timeEditModal.dateKey)[timeEditModal.idx] || {};
         var isDefaultTime = DEFAULT_TIMES.indexOf(workingTime) >= 0;
-        var nudge = function(delta){ return function(){ setTimeEditMinutes(function(m){ return m + delta; }); }; };
+        // Inverted on purpose: the +5/+1 buttons subtract and the −5/−1 buttons add,
+        // keeping the same labels and positions but flipping the effect.
+        var nudge = function(delta){ return function(){ setTimeEditMinutes(function(m){ return m - delta; }); }; };
         var nudgeBtn = {flex:1,padding:"12px 0",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"8px",color:"#1a1a1a",cursor:"pointer",fontFamily:"inherit",fontSize:"15px"};
         return (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px"}} onClick={function(){ setTimeEditModal(null); }}>
@@ -1882,14 +1997,14 @@ export default function TheList() {
       <div style={{borderBottom:"1px solid #e8e8e6",padding:"3px 20px 3px",paddingTop:"calc(env(safe-area-inset-top,0px) + 3px)",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,background:"#ffffff",zIndex:100,flexShrink:0}}>
         <div style={{display:"flex",gap:"2px",background:"#e8e8e6",padding:"3px",borderRadius:"6px"}}>
           {VIEWS.map(function(v){ return (
-            <button key={v} data-viewtab={v} onClick={function(){ if(v==="Wknd") setBaseDate(getUpcomingWeekend()); else if(v==="3-Day"||v==="Week") setBaseDate(new Date()); setView(v); }} style={{padding:"5px 12px",fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",border:"none",borderRadius:"4px",cursor:"pointer",background:view===v?"#1a1a1a":"transparent",color:view===v?"#ffffff":"#999",fontFamily:"inherit",transition:"all 0.15s"}}>{v}</button>
+            <button key={v} data-viewtab={v} onClick={function(){ if(v==="Wknd") setBaseDate(getUpcomingWeekend()); else if(v==="Day"||v==="3-Day"||v==="Week") setBaseDate(getAnchorStart()); setView(v); }} style={{padding:"5px 12px",fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",border:"none",borderRadius:"4px",cursor:"pointer",background:view===v?"#1a1a1a":"transparent",color:view===v?"#ffffff":"#999",fontFamily:"inherit",transition:"all 0.15s"}}>{v}</button>
           ); })}
         </div>
         {view==="Month"&&<div style={{fontSize:"14px",color:"#1a1a1a"}}>{baseDate.toLocaleDateString("en-US",{month:"long",year:"numeric"})}</div>}
         <div style={{display:"flex",gap:"4px",alignItems:"center"}}>
           {view!=="Month"&&<button onClick={function(){ setBaseDate(function(d){ return addDays(d,-7); }); }} style={{...navBtn,fontSize:"11px",letterSpacing:"-1px"}}>{"‹‹"}</button>}
           <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()-1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,-1); }); }} style={navBtn}>{"‹"}</button>
-          <button onClick={function(){ if(view==="Wknd") setBaseDate(getUpcomingWeekend()); else setBaseDate(new Date()); }} style={{...navBtn,fontSize:"9px",letterSpacing:"0.1em",padding:"0 12px"}}>TODAY</button>
+          <button onClick={function(){ if(view==="Wknd") setBaseDate(getUpcomingWeekend()); else if(view==="Day"||view==="3-Day"||view==="Week") setBaseDate(getAnchorStart()); else setBaseDate(new Date()); }} style={{...navBtn,fontSize:"9px",letterSpacing:"0.1em",padding:"0 12px"}}>TODAY</button>
           <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()+1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,1); }); }} style={navBtn}>{"›"}</button>
           {view!=="Month"&&<button onClick={function(){ setBaseDate(function(d){ return addDays(d,7); }); }} style={{...navBtn,fontSize:"11px",letterSpacing:"-1px"}}>{"››"}</button>}
           <div style={{width:"10px"}}/>
@@ -1908,23 +2023,26 @@ export default function TheList() {
             </div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:"1px",background:"#e8e8e6",flex:"1 1 auto",gridAutoRows:"1fr",minHeight:0}}>
               {monthDays.map(function(day,i){
-                if (!day) return <div key={"empty-"+i} style={{background:"#f8f8f6",minHeight:"64px"}}/>;
+                var outside = day.getMonth() !== baseDate.getMonth();
                 var dk=toDateKey(day); var slots=getSlots(dk); var booked=slots.filter(function(s){ return s.name; });
                 var isT=isToday(day); var holiday=getHolidayForDate(dk); var range=getDayTimeRange(dk);
+                var cellBg = outside ? "#f6f6f4" : (isT?"#fffbf0":"#ffffff");
                 return (
                   <div key={dk}
                     onClick={function(){ setBaseDate(day);setView("Day"); }}
                     onMouseDown={function(){ longPressTimer.current=setTimeout(function(){ setMonthLongPress({dateKey:dk,day}); },600); }}
-                    onMouseUp={cancelLongPress} onMouseLeave={function(e){ cancelLongPress();e.currentTarget.style.background=isT?"#fffbf0":"#ffffff"; }}
+                    onMouseUp={cancelLongPress} onMouseLeave={function(e){ cancelLongPress();e.currentTarget.style.background=cellBg; }}
                     onTouchStart={function(){ longPressTimer.current=setTimeout(function(){ setMonthLongPress({dateKey:dk,day}); },600); }}
                     onTouchEnd={cancelLongPress} onTouchMove={cancelLongPress}
-                    style={{position:"relative",background:isT?"#fffbf0":"#ffffff",minHeight:"64px",padding:"7px 8px",cursor:"pointer",borderTop:isT?"2px solid #a07830":"2px solid transparent",transition:"background 0.1s",userSelect:"none",boxSizing:"border-box"}}
-                    onMouseEnter={function(e){ e.currentTarget.style.background=isT?"#fff8e8":"#f4f4f2"; }}
+                    style={{position:"relative",background:cellBg,minHeight:"64px",padding:"7px 8px",cursor:"pointer",borderTop:isT?"2px solid #a07830":"2px solid transparent",transition:"background 0.1s",userSelect:"none",boxSizing:"border-box",opacity:outside?0.85:1}}
+                    onMouseEnter={function(e){ e.currentTarget.style.background=outside?"#efefec":(isT?"#fff8e8":"#f4f4f2"); }}
                   >
-                    {holiday&&<div style={{position:"absolute",top:"6px",right:"7px",maxWidth:"60%",fontSize:"8px",color:"#a07830",letterSpacing:"0.04em",textTransform:"uppercase",textAlign:"right",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",lineHeight:1.1}}>{holiday}</div>}
-                    <div style={{fontSize:"14px",color:isT?"#a07830":"#1a1a1a",fontWeight:isT?"bold":"normal",marginBottom:"3px"}}>{day.getDate()}</div>
+                    <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:"6px",marginBottom:"3px"}}>
+                      <div style={{fontSize:"14px",color:isT?"#a07830":(outside?"#bdbdbb":"#1a1a1a"),fontWeight:isT?"bold":"normal",flexShrink:0}}>{day.getDate()}</div>
+                      {holiday&&<div style={{fontSize:"14px",color:outside?"#cbb98e":"#a07830",textAlign:"right",lineHeight:1.15,minWidth:0,overflow:"hidden"}}>{holiday}</div>}
+                    </div>
                     {booked.length>0&&(
-                      <div>
+                      <div style={{opacity:outside?0.55:1}}>
                         <div style={{display:"flex",flexWrap:"wrap",gap:"3px",marginBottom:"3px"}}>
                           {booked.map(function(s,j){ return <div key={j} style={{width:"8px",height:"8px",borderRadius:"50%",background:s.recurWeeks?"#6a8aaa":"#c9a96e"}}/>; })}
                         </div>
@@ -1940,13 +2058,13 @@ export default function TheList() {
       })()}
 
       {view!=="Month"&&(
-        <div style={{flex:"1 1 auto",minHeight:0,overflowY:"auto",overflowX:"hidden",WebkitOverflowScrolling:"touch",overscrollBehavior:"contain"}}>
-        <div style={{display:"grid",gridTemplateColumns:("repeat("+getDayCount()+",minmax(0,1fr))"),gap:"1px",background:"#d8d8d6",flexShrink:0}}>
+        <div style={{flex:"1 1 auto",minHeight:0,overflow:"hidden",display:"flex",flexDirection:"column"}}>
+        <div style={{display:"grid",gridTemplateColumns:("repeat("+getDayCount()+",minmax(0,1fr))"),gap:"1px",background:"#d8d8d6",flex:"1 1 auto",minHeight:0,gridAutoRows:"1fr"}}>
           {dates.map(function(date){
             var dateKey=toDateKey(date); var slots=getSlots(dateKey);
             return (
-              <div key={dateKey} style={{background:"#ffffff",display:"flex",flexDirection:"column"}}>
-                <div style={{padding:"2px 10px 3px",borderBottom:"1px solid #ebebea",display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:"4px"}}>
+              <div key={dateKey} style={{background:"#ffffff",display:"flex",flexDirection:"column",minHeight:0,overflow:"hidden"}}>
+                <div style={{padding:"2px 10px 3px",borderBottom:"1px solid #ebebea",display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:"4px",flexShrink:0}}>
                   {(function(){
                     var sz=view==="Day"?"20px":"16px"; var mo=date.getMonth();
                     var monthStr=[3,4,5,6].includes(mo)?date.toLocaleDateString("en-US",{month:"long",day:"numeric"}):date.toLocaleDateString("en-US",{month:"short",day:"numeric"});
@@ -1964,7 +2082,7 @@ export default function TheList() {
                   })()}
                   <button onClick={function(e){ e.stopPropagation(); setNoteDraft(dayNotes[dateKey]||""); setNoteModal({dayKey:dateKey,isDay:true,name:friendlyDateLong(dateKey)}); }} title="Note for the day" style={{background:"none",border:"none",cursor:"pointer",padding:"0 2px",color:dayNotes[dateKey]?"#c9a96e":"#bbb",fontSize:"26px",lineHeight:1,flexShrink:0,WebkitTextStroke:"0.5px currentColor"}}>{"✎"}</button>
                 </div>
-                <div style={{flex:1,padding:"0"}}
+                <div style={{flex:1,minHeight:0,padding:"0",overflowY:"auto",overflowX:"hidden",WebkitOverflowScrolling:"touch",overscrollBehavior:"contain"}}
                   onTouchMove={function(e){
                     if (!selectDragAnchor.current) return;
                     var t=e.touches[0]; if(!t) return;
@@ -1986,11 +2104,12 @@ export default function TheList() {
                     var slotBg=slot.blocked?"#f4f4f2":wasRemoved?"#fff0ee":isOccEdit?"#fff0ee":isSelected?"#f0f4ff":slot.done?"#f4faf4":isEditing?"#f0f0ee":filled?"#fcfcfa":"transparent";
                     var isCustomSlot=slot.isCustom||!DEFAULT_TIMES.includes(slot.time);
                     var isDropTarget=isLiveDragging&&dragOverKey===rowKey&&!filled&&!slot.blocked;
-                    var showDropHint=isLiveDragging&&!filled&&!slot.blocked&&!isEditing&&!(dragState&&dragState.sourceKey===rowKey);
+                    var showDropHint=(isLiveDragging||placingClient)&&!filled&&!slot.blocked&&!isEditing&&!(dragState&&dragState.sourceKey===rowKey);
                     if (isDropTarget) slotBg="#e3f3e3";
+                    else if (placingClient&&!filled&&!slot.blocked&&!isEditing) slotBg="#f4faf4";
                     return (
                       <div key={rowKey} style={{position:"relative",overflow:"hidden",borderBottom:"1px solid #efefed",opacity:isDragging?0.4:1}}>
-                        {!filled&&!slot.blocked&&!isEditing&&!(reassignMode&&reassignMode.currentDateKey===dateKey)&&isCustomSlot&&(
+                        {!filled&&!slot.blocked&&!isEditing&&!(reassignMode&&reassignMode.currentDateKey===dateKey)&&!placingClient&&isCustomSlot&&(
                           <div style={{position:"absolute",right:"10px",top:0,bottom:0,display:"flex",alignItems:"center",gap:"4px",pointerEvents:"auto",zIndex:1}}>
                             <button onClick={function(e){ e.stopPropagation(); removeCustomSlot(dateKey,idx); }} style={{background:"none",border:"none",color:"#ddd",fontSize:"12px",cursor:"pointer",fontFamily:"inherit",padding:"2px 4px"}} onMouseEnter={function(e){ e.currentTarget.style.color="#c0392b"; }} onMouseLeave={function(e){ e.currentTarget.style.color="#ddd"; }}>{"× slot"}</button>
                           </div>
@@ -2029,7 +2148,7 @@ export default function TheList() {
                           </button>
                           )}
                           <div
-                            onClick={function(e){ e.stopPropagation(); if(!isEditing&&!selectMode&&!isLiveDragging&&!(reassignMode&&reassignMode.currentDateKey===dateKey)) openTimeEdit(dateKey,idx); }}
+                            onClick={function(e){ e.stopPropagation(); if(placingClient){ if(!filled) placeClientInSlot(dateKey,idx); return; } if(!isEditing&&!selectMode&&!isLiveDragging&&!(reassignMode&&reassignMode.currentDateKey===dateKey)) openTimeEdit(dateKey,idx); }}
                             onMouseDown={function(e){ e.stopPropagation(); }}
                             onTouchStart={function(e){ e.stopPropagation(); }}
                             style={{fontSize:"12px",color:slot.customTime?"#2f7d8a":(filled?"#c9a96e":"#2e2e2e"),fontWeight:slot.customTime?"bold":"normal",width:"40px",flexShrink:0,fontVariantNumeric:"tabular-nums",letterSpacing:"0.02em",userSelect:"none",WebkitUserSelect:"none",cursor:"pointer"}}>{slot.time}</div>
@@ -2039,6 +2158,8 @@ export default function TheList() {
                             </div>
                           ):reassignMode&&!filled&&reassignMode.currentDateKey===dateKey?(
                             <div onClick={function(){ handleReassignSlotTapWithQueue(dateKey,idx); }} style={{flex:1,fontSize:"13px",color:"#2a7a2a",cursor:"pointer",padding:"0 2px"}}>tap to place</div>
+                          ):placingClient&&!filled?(
+                            <div onClick={function(){ placeClientInSlot(dateKey,idx); }} style={{flex:1,fontSize:"13px",color:"#2a7a2a",cursor:"pointer",padding:"0 2px"}}>tap to place</div>
                           ):(
                             <div style={{flex:1,minWidth:0,display:"flex",alignItems:"center",gap:"4px"}}
                               onClick={function(){ if(filled&&slot.done) handleDoneRowTap(dateKey,idx); }}
@@ -2089,33 +2210,8 @@ export default function TheList() {
                   })}
                   <div style={{display:"flex",gap:"6px",padding:"6px 14px 8px"}}>
                     <button onClick={function(){ addSlotToBeginning(dateKey); }} style={{flex:1,padding:"9px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ AM</button>
-                    {selectMode ? (
-                      <button onClick={function(){
-                        var entries=Object.keys(selectedSlots).filter(function(k){ return selectedSlots[k]; });
-                        if(entries.length===0){ setSelectMode(false); return; }
-                        var clients=entries.map(function(k){
-                          var parts=k.split("-"); var di=parseInt(parts[parts.length-1]); var dk2=parts.slice(0,parts.length-1).join("-");
-                          var sl=getSlots(dk2)[di]; return {name:sl.name,price:sl.price,recurWeeks:sl.recurWeeks,originalTime:sl.time,originalDateKey:dk2,originalIdx:di};
-                        }).filter(function(c){ return c.name; });
-                        if(clients.length===0){ setSelectMode(false); setSelectedSlots({}); return; }
-                        setDragState({clients,sourceKey:null,multi:true}); setDragCalOpen(true); setDragCalMonth(new Date()); setDragCalHover(true);
-                      }} style={{flex:1,padding:"9px",background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"11px"}}>
-                        Move {Object.keys(selectedSlots).filter(function(k){ return selectedSlots[k]; }).length}
-                      </button>
-                    ) : (
-                      <button onClick={function(){ setSelectMode(true); setSelectedSlots({}); }} title="Select appointments" style={{flex:1,padding:"9px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}><span style={{width:"15px",height:"15px",borderRadius:"50%",border:"1.5px solid #999",display:"inline-block"}}/></button>
-                    )}
                     <button onClick={function(){ addSlotToEnd(dateKey); }} style={{flex:1,padding:"9px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ PM</button>
                   </div>
-                  {selectMode && (
-                    <div style={{display:"flex",gap:"6px",padding:"0 14px 8px"}}>
-                      <button onClick={function(){
-                        var all={}; slots.forEach(function(s,i){ if(s.name) all[dateKey+"-"+i]=true; });
-                        setSelectedSlots(function(prev){ return {...prev,...all}; });
-                      }} style={{fontSize:"10px",padding:"4px 10px",background:"#1a1a1a",border:"none",borderRadius:"4px",color:"#fff",cursor:"pointer",fontFamily:"inherit"}}>Select All</button>
-                      <button onClick={function(){ setSelectMode(false); setSelectedSlots({}); }} style={{fontSize:"10px",padding:"4px 10px",background:"none",border:"1px solid #d8d8d6",borderRadius:"4px",color:"#aaa",cursor:"pointer",fontFamily:"inherit"}}>Cancel</button>
-                    </div>
-                  )}
                 </div>
               </div>
             );
