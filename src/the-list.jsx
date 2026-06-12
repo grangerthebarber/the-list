@@ -374,6 +374,31 @@ export default function TheList() {
   const settleTimer = useRef(null);
   const isLiveDraggingRef = useRef(false);
   isLiveDraggingRef.current = isLiveDragging;
+  // Measured Y of the top of the first list row, used to vertically center the change-log banner.
+  const [listTopY, setListTopY] = useState(0);
+  // When set (2-8), the next booking made from the checkoff/quick-book modal recurs every N weeks.
+  const [checkoffRecur, setCheckoffRecur] = useState(null);
+  const [recurPickerOpen, setRecurPickerOpen] = useState(false);
+
+  // Single source of truth for two layout concerns that CSS can't handle on iOS:
+  //  1. Phantom scrolling — toggle each list column's overflowY to "auto" ONLY when
+  //     its content actually overflows, else "hidden", so a full-but-not-overflowing
+  //     column can't rubber-band.
+  //  2. Measure the top of the first list column so the change-log banner can sit
+  //     exactly halfway between the top of the screen and the first row.
+  const syncLayout = useCallback(function() {
+    if (isLiveDraggingRef.current) return;
+    var scrollers = document.querySelectorAll("[data-slotscroll]");
+    for (var i=0;i<scrollers.length;i++) {
+      var el = scrollers[i];
+      var want = (el.scrollHeight - el.clientHeight) > 2 ? "auto" : "hidden";
+      if (el.style.overflowY !== want) el.style.overflowY = want;
+    }
+    if (scrollers[0]) {
+      var y = scrollers[0].getBoundingClientRect().top;
+      setListTopY(function(prev){ return Math.abs(prev-y) > 1 ? y : prev; });
+    }
+  }, []);
 
   useEffect(function() { try { localStorage.setItem("tl_schedules", JSON.stringify(schedules)); } catch(e) {} }, [schedules]);
   useEffect(function() { try { localStorage.setItem("tl_clients", JSON.stringify(clientMemory)); } catch(e) {} }, [clientMemory]);
@@ -466,12 +491,29 @@ export default function TheList() {
     };
   }, []);
 
+  // Re-run the scroll/banner sync after every render (content can change without a
+  // dependency we'd otherwise list), plus on resize/orientation and a couple of
+  // post-layout timeouts to catch async font/layout settling.
+  useEffect(function() { syncLayout(); });
+  useEffect(function() {
+    var t1 = setTimeout(syncLayout, 80);
+    var t2 = setTimeout(syncLayout, 260);
+    window.addEventListener("resize", syncLayout);
+    window.addEventListener("orientationchange", syncLayout);
+    return function() {
+      clearTimeout(t1); clearTimeout(t2);
+      window.removeEventListener("resize", syncLayout);
+      window.removeEventListener("orientationchange", syncLayout);
+    };
+  }, [syncLayout]);
+
   useEffect(function() {
     if (checkoffModal && !checkoffCalMonth) {
       var startKey = checkoffModal.nextDateKey || toDateKey(addWeeks(parseDateKey(checkoffModal.dateKey), 2));
       var d = parseDateKey(startKey);
       setCheckoffCalMonth(new Date(d.getFullYear(), d.getMonth(), 1));
     }
+    if (!checkoffModal) { setCheckoffRecur(null); setRecurPickerOpen(false); }
   }, [checkoffModal]);
 
   useEffect(function() {
@@ -722,7 +764,7 @@ export default function TheList() {
     if (newName!==prev.name || newPrice!==prev.price || prev.availStatus) {
       var snapshot = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
       pushUndo(snapshot);
-      slots[idx] = {...prev,name:newName,price:newPrice,availStatus:null};
+      slots[idx] = {...prev,name:newName,price:newPrice,availStatus:null,pending:false};
       setSlots(dateKey,slots);
       if (prev.name&&!newName) addHistoryEntry({type:"removed",time:prev.time,name:prev.name,dateKey});
       else if (!prev.name&&newName) {
@@ -802,7 +844,10 @@ export default function TheList() {
     // or a custom one. Only genuinely custom-added slots (isCustom===true, or
     // legacy off-grid slots with no flag) keep the custom time styling.
     var wasCustom = prev.isCustom===true || (prev.isCustom===undefined && DEFAULT_TIMES.indexOf(prev.time) === -1);
-    slots[idx] = {...prev,time:newTime,customTime: wasCustom && !isStillDefault};
+    // For default (non-custom) slots, remember the original default time the first
+    // time it's nudged, so the render layer can color it cobalt (earlier) or purple (later).
+    var baseTime = prev.defaultBaseTime || (!wasCustom ? prev.time : null);
+    slots[idx] = {...prev,time:newTime,customTime: wasCustom && !isStillDefault,defaultBaseTime:(!wasCustom?baseTime:prev.defaultBaseTime)};
     slots.sort(function(a,b){ return timeToAbsMinutes(a.time)-timeToAbsMinutes(b.time); });
     setSlots(dateKey,slots);
     setTimeEditModal(null);
@@ -1042,6 +1087,60 @@ export default function TheList() {
     setCheckoffModal(null); setNudgedDate(null); setCheckoffCalMonth(null);
   };
 
+  // Book the client at the chosen date AND every N weeks for six months, mark the
+  // original slot recurring, and close the modal. Used when the quick-book modal's
+  // recurring toggle (checkoffRecur) is armed.
+  const bookRecurringFromModal = function(targetDateKey, weeks) {
+    if (!checkoffModal || !weeks) return;
+    var slot = checkoffModal.slot;
+    var srcDateKey = checkoffModal.dateKey;
+    var srcIdx = checkoffModal.idx;
+    var times = (checkoffModal.groupTimes && checkoffModal.groupTimes.length>0)
+      ? checkoffModal.groupTimes.map(function(t){ return {time:t.time,price:t.price,recurWeeks:weeks}; })
+      : [{time:slot.time,price:slot.price,recurWeeks:weeks}];
+    var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
+    pushUndo(snapshot);
+    var newSchedules = {...schedulesRef.current};
+    var placeOnDate = function(dk, allowOverwriteSame) {
+      var daySlots = newSchedules[dk]
+        ? [...newSchedules[dk]]
+        : DEFAULT_TIMES.map(function(t){ return {time:t,name:"",price:"",done:false,recurWeeks:null}; });
+      var dgid = times.length>1 ? newGroupId() : null;
+      times.forEach(function(t){
+        var si = daySlots.findIndex(function(s){ return s.time===t.time; });
+        if (si>=0) {
+          var taken = daySlots[si].name && daySlots[si].name.toLowerCase()!==slot.name.toLowerCase();
+          if (!taken && (allowOverwriteSame || !daySlots[si].name)) {
+            daySlots[si] = {...daySlots[si],name:slot.name,price:t.price,recurWeeks:t.recurWeeks,done:false,groupId:dgid};
+          }
+        } else {
+          daySlots.push({time:t.time,name:slot.name,price:t.price,recurWeeks:t.recurWeeks,done:false,groupId:dgid});
+        }
+      });
+      daySlots.sort(function(a,b){ return parseTime(a.time)-parseTime(b.time); });
+      newSchedules[dk] = daySlots;
+    };
+    placeOnDate(targetDateKey, true);
+    var sixMo = new Date(); sixMo.setMonth(sixMo.getMonth()+6);
+    var cur = parseDateKey(targetDateKey);
+    while (true) {
+      cur = addWeeks(cur,weeks);
+      if (cur>sixMo) break;
+      placeOnDate(formatDateKey(cur), false);
+    }
+    // Mark the originating slot recurring as well, so its row shows the recurring badge.
+    if (newSchedules[srcDateKey]) {
+      var ss = [...newSchedules[srcDateKey]];
+      if (ss[srcIdx] && ss[srcIdx].name && ss[srcIdx].name.toLowerCase()===slot.name.toLowerCase()) {
+        ss[srcIdx] = {...ss[srcIdx],recurWeeks:weeks};
+        newSchedules[srcDateKey] = ss;
+      }
+    }
+    setSchedules(newSchedules);
+    addHistoryEntry({type:"added",time:slot.time,name:slot.name,price:slot.price,dateKey:targetDateKey});
+    setCheckoffModal(null); setNudgedDate(null); setCheckoffCalMonth(null); setCheckoffRecur(null); setRecurPickerOpen(false);
+  };
+
   const jumpToDate = function(dateKey) {
     setBaseDate(parseDateKey(dateKey)); setView("Day");
     setCheckoffModal(null); setNudgedDate(null); setCheckoffCalMonth(null);
@@ -1179,7 +1278,7 @@ export default function TheList() {
     pushUndo(snapshot);
     if (onlyIdx!==undefined) {
       var s=slots[onlyIdx];
-      slots[onlyIdx]={...s,name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null};
+      slots[onlyIdx]={...s,name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null,pending:false,availStatus:null};
       var rem=slots.filter(function(x){ return x.groupId===groupId&&x.name; });
       if (rem.length===1) { var ri=slots.findIndex(function(x){ return x.groupId===groupId&&x.name; }); if(ri>=0) slots[ri]={...slots[ri],groupId:null}; }
       addHistoryEntry({type:"removed",time:s.time,name:s.name,dateKey});
@@ -1187,7 +1286,7 @@ export default function TheList() {
       setRecentlyRemoved(function(r){ return {...r,[gk]:true}; });
       setTimeout(function(){ setRecentlyRemoved(function(r){ var n={...r}; delete n[gk]; return n; }); },8000);
     } else {
-      slots.forEach(function(s,i){ if(s.groupId===groupId&&s.name){ addHistoryEntry({type:"removed",time:s.time,name:s.name,dateKey}); slots[i]={...s,name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null}; } });
+      slots.forEach(function(s,i){ if(s.groupId===groupId&&s.name){ addHistoryEntry({type:"removed",time:s.time,name:s.name,dateKey}); slots[i]={...s,name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null,pending:false,availStatus:null}; } });
     }
     setSlots(dateKey,slots); setGroupConfirm(null); setConfirmDelete(null);
   };
@@ -1204,7 +1303,7 @@ export default function TheList() {
     var snapshot={schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
     pushUndo(snapshot);
     var slots=[...getSlots(dateKey)];
-    slots[idx]={...slots[idx],name:"",price:"",done:false,recurWeeks:null,isException:false};
+    slots[idx]={...slots[idx],name:"",price:"",done:false,recurWeeks:null,isException:false,pending:false,availStatus:null};
     setSlots(dateKey,slots);
     addHistoryEntry({type:"removed",time:slot.time,name:slot.name,price:slot.price,dateKey});
     var key=dateKey+"-"+idx;
@@ -1755,7 +1854,7 @@ export default function TheList() {
             var isT=isToday(day); var disabled=isPast||isFuture;
             var range=getDayTimeRange(dk);
             return (
-              <div key={dk} onClick={function(){ if(!disabled){ if(checkoffModal.groupTimes&&checkoffModal.groupTimes.length>1) confirmNextBooking(dk); else jumpToDateForBooking(dk,slot); } }}
+              <div key={dk} onClick={function(){ if(!disabled){ if(checkoffRecur) bookRecurringFromModal(dk,checkoffRecur); else if(checkoffModal.groupTimes&&checkoffModal.groupTimes.length>1) confirmNextBooking(dk); else jumpToDateForBooking(dk,slot); } }}
                 style={{height:"44px",background:disabled?"#f8f8f8":holiday?"#fffbf0":isT?"#fffbf0":"#ffffff",borderTop:isT?"2px solid #a07830":"2px solid transparent",padding:"4px 5px",cursor:disabled?"default":"pointer",borderRadius:"3px",opacity:disabled?0.35:1,boxSizing:"border-box"}}>
                 <div style={{fontSize:"12px",color:isT?"#a07830":disabled?"#ccc":"#1a1a1a",fontWeight:isT?"bold":"normal",lineHeight:1}}>{day.getDate()}</div>
                 {!disabled&&(
@@ -1789,7 +1888,7 @@ export default function TheList() {
       onTouchEnd={function(){ endSelectDrag(); }}>
 
       {banner && (
-        <div style={{position:"fixed",top:"calc(env(safe-area-inset-top,0px) + 4px)",left:"50%",transform:"translateX(-50%)",zIndex:2000,background:getBannerColor(banner.type),color:"#fff",padding:"6px 14px",borderRadius:"20px",fontSize:"12px",letterSpacing:"0.04em",boxShadow:"0 2px 12px rgba(0,0,0,0.2)",display:"flex",alignItems:"center",gap:"12px",maxWidth:"90vw",pointerEvents:"auto"}}>
+        <div style={{position:"fixed",top:listTopY>0?(Math.max(4,listTopY/2-14)+"px"):"calc(env(safe-area-inset-top,0px) + 4px)",left:"50%",transform:"translateX(-50%)",zIndex:2000,background:getBannerColor(banner.type),color:"#fff",padding:"6px 14px",borderRadius:"20px",fontSize:"12px",letterSpacing:"0.04em",boxShadow:"0 2px 12px rgba(0,0,0,0.2)",display:"flex",alignItems:"center",gap:"12px",maxWidth:"90vw",pointerEvents:"auto"}}>
           <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{describeBanner(banner)}</span>
           {(banner.type!=="undo"&&banner.type!=="redo"&&canUndo)&&(
             <button onClick={handleUndo} title="Undo" style={{background:"rgba(255,255,255,0.22)",border:"none",borderRadius:"10px",color:"#fff",padding:"4px 9px",cursor:"pointer",fontFamily:"inherit",flexShrink:0,display:"flex",alignItems:"center"}}><UndoIcon size={15} color="#fff"/></button>
@@ -2078,21 +2177,39 @@ export default function TheList() {
       )}
 
       {checkoffModal && (
-        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px",boxSizing:"border-box"}} onClick={function(){ setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null); }}>
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px",boxSizing:"border-box"}} onClick={function(){ setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null);setCheckoffRecur(null);setRecurPickerOpen(false); }}>
           <div style={{background:"#f8f8f6",border:"1px solid #d8d8d6",borderRadius:"16px",padding:"24px 28px 28px",width:"100%",maxWidth:"700px",maxHeight:"92vh",overflowY:"auto",boxSizing:"border-box",position:"relative"}} onClick={function(e){ e.stopPropagation(); }}>
-            <button onClick={function(){ setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null); }} style={{position:"absolute",top:"16px",right:"16px",background:"none",border:"none",color:"#aaa",fontSize:"22px",cursor:"pointer",lineHeight:1,padding:"0 4px"}}>×</button>
+            <button onClick={function(){ setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null);setCheckoffRecur(null);setRecurPickerOpen(false); }} style={{position:"absolute",top:"16px",right:"16px",background:"none",border:"none",color:"#aaa",fontSize:"22px",cursor:"pointer",lineHeight:1,padding:"0 4px"}}>×</button>
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#4a8a5a",marginBottom:"4px"}}>Done</div>
             <div style={{fontSize:"22px",marginBottom:"2px",paddingRight:"32px"}}>{checkoffModal.slot.name}</div>
             <div style={{fontSize:"12px",color:"#999",marginBottom:"18px"}}>{checkoffModal.slot.time} · {friendlyDate(checkoffModal.dateKey)}</div>
             {checkoffModal.notRecurring ? (
               <div>
                 <div style={{fontSize:"13px",color:"#888",marginBottom:"14px"}}>Not recurring. When's the next one?</div>
-                <div style={{fontSize:"11px",letterSpacing:"0.1em",textTransform:"uppercase",color:"#aaa",marginBottom:"8px"}}>Quick book</div>
+                <div style={{display:"flex",alignItems:"center",gap:"10px",flexWrap:"wrap",marginBottom:"16px",paddingBottom:"14px",borderBottom:"1px solid #ececea"}}>
+                  {checkoffRecur ? (
+                    <div style={{display:"flex",alignItems:"center",gap:"8px"}}>
+                      <div style={{display:"flex",alignItems:"center",gap:"6px",background:"#eaf4f6",border:"1px solid #b8dce2",borderRadius:"20px",padding:"6px 12px",fontSize:"12px",color:"#2a6a7a"}}><span style={{fontSize:"14px"}}>{"↺"}</span> Recurring every {checkoffRecur===1?"week":(checkoffRecur+" weeks")} — pick the first date</div>
+                      <button onClick={function(){ setCheckoffRecur(null); setRecurPickerOpen(false); }} style={{background:"none",border:"none",color:"#aaa",fontSize:"16px",cursor:"pointer",padding:"2px 4px",lineHeight:1}}>{"×"}</button>
+                    </div>
+                  ) : recurPickerOpen ? (
+                    <div style={{display:"flex",alignItems:"center",gap:"6px",flexWrap:"wrap"}}>
+                      <span style={{fontSize:"12px",color:"#888"}}>Every</span>
+                      {[1,2,3,4,5,6,7,8].map(function(n){
+                        return <button key={n} onClick={function(){ setCheckoffRecur(n); setRecurPickerOpen(false); }} style={{minWidth:"34px",padding:"7px 0",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"8px",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",color:"#1a1a1a"}}>{n}w</button>;
+                      })}
+                      <button onClick={function(){ setRecurPickerOpen(false); }} style={{background:"none",border:"none",color:"#aaa",fontSize:"16px",cursor:"pointer",padding:"2px 4px",lineHeight:1}}>{"×"}</button>
+                    </div>
+                  ) : (
+                    <button onClick={function(){ setRecurPickerOpen(true); }} style={{display:"flex",alignItems:"center",gap:"6px",background:"#fff",border:"1px solid #d8c8a8",borderRadius:"20px",padding:"6px 14px",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",color:"#9a7a30"}}><span style={{fontSize:"15px"}}>{"↺"}</span> Make this recurring</button>
+                  )}
+                </div>
+                <div style={{fontSize:"11px",letterSpacing:"0.1em",textTransform:"uppercase",color:"#aaa",marginBottom:"8px"}}>{checkoffRecur?"Start date":"Quick book"}</div>
                 <div style={{display:"flex",gap:"8px",flexWrap:"wrap",marginBottom:"20px"}}>
                   {[2,3,4,5,6,7,8].map(function(w){
                     var d=addWeeks(parseDateKey(checkoffModal.dateKey),w); var dk=toDateKey(d); var mo=d.getMonth();
                     var ds=[3,4,5,6].includes(mo)?d.toLocaleDateString("en-US",{month:"long",day:"numeric"}):d.toLocaleDateString("en-US",{month:"short",day:"numeric"});
-                    return <button key={w} onClick={function(){ if(checkoffModal.groupTimes&&checkoffModal.groupTimes.length>1) confirmNextBooking(dk); else jumpToDateForBooking(dk,checkoffModal.slot); }} style={{padding:"9px 16px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"8px",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",color:"#1a1a1a"}}>{w}w · {ds}</button>;
+                    return <button key={w} onClick={function(){ if(checkoffRecur) bookRecurringFromModal(dk,checkoffRecur); else if(checkoffModal.groupTimes&&checkoffModal.groupTimes.length>1) confirmNextBooking(dk); else jumpToDateForBooking(dk,checkoffModal.slot); }} style={{padding:"9px 16px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"8px",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",color:"#1a1a1a"}}>{w}w · {ds}</button>;
                   })}
                 </div>
                 <div style={{fontSize:"11px",letterSpacing:"0.1em",textTransform:"uppercase",color:"#aaa",marginBottom:"12px"}}>Or pick a date</div>
@@ -2332,7 +2449,7 @@ export default function TheList() {
                 var isT=isToday(day); var holiday=getHolidayForDate(dk); var range=getDayTimeRange(dk);
                 var cellBg = outside ? "#f6f6f4" : (isT?"#fffbf0":"#ffffff");
                 return (
-                  <div key={dk}
+                  <div key={dk} data-monthday={dk}
                     onClick={function(){ setBaseDate(day);setView("Day"); }}
                     onMouseDown={function(){ longPressTimer.current=setTimeout(function(){ setMonthLongPress({dateKey:dk,day}); },600); }}
                     onMouseUp={cancelLongPress} onMouseLeave={function(e){ cancelLongPress();e.currentTarget.style.background=cellBg; }}
@@ -2370,7 +2487,7 @@ export default function TheList() {
               <div key={dateKey} style={{background:"#ffffff",display:"flex",flexDirection:"column",minHeight:0,overflow:"hidden"}}>
                 <div style={{padding:"2px 10px 3px",borderBottom:"1px solid #ebebea",display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:"4px",flexShrink:0}}>
                   {(function(){
-                    var sz=view==="Day"?"20px":"16px"; var mo=date.getMonth();
+                    var sz=view==="Day"?"17px":"16px"; var mo=date.getMonth();
                     var monthStr=[3,4,5,6].includes(mo)?date.toLocaleDateString("en-US",{month:"long",day:"numeric"}):date.toLocaleDateString("en-US",{month:"short",day:"numeric"});
                     var wdStr=isToday(date)?"Today":date.toLocaleDateString("en-US",{weekday:"long"});
                     var hol=getHolidayForDate(dateKey);
@@ -2386,7 +2503,7 @@ export default function TheList() {
                   })()}
                   <button onClick={function(e){ e.stopPropagation(); setNoteDraft(dayNotes[dateKey]||""); setNoteModal({dayKey:dateKey,isDay:true,name:friendlyDateLong(dateKey)}); }} title="Note for the day" style={{background:"none",border:"none",cursor:"pointer",padding:"0 2px",color:dayNotes[dateKey]?"#c9a96e":"#bbb",fontSize:"26px",lineHeight:1,flexShrink:0,WebkitTextStroke:"0.5px currentColor"}}>{"✎"}</button>
                 </div>
-                <div style={{flex:1,minHeight:0,paddingBottom:"calc(env(safe-area-inset-bottom,0px) + 10px)",overflowY:"auto",overflowX:"hidden",WebkitOverflowScrolling:"touch",overscrollBehavior:"contain"}}
+                <div data-slotscroll="1" style={{flex:1,minHeight:0,paddingBottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",overflowX:"hidden",overscrollBehavior:"contain"}}
                   onTouchMove={function(e){
                     if (!selectDragAnchor.current) return;
                     var t=e.touches[0]; if(!t) return;
@@ -2407,6 +2524,7 @@ export default function TheList() {
                     var isDragging=dragState&&dragState.sourceKey===rowKey;
                     var slotBg=slot.blocked?"#f4f4f2":wasRemoved?"#fff0ee":isOccEdit?"#fff0ee":isSelected?"#f0f4ff":slot.done?"#f4faf4":(isEditing&&editChromeReady)?"#f0f0ee":filled?"#fcfcfa":"transparent";
                     var isCustomSlot=slot.isCustom===true||(slot.isCustom===undefined&&!DEFAULT_TIMES.includes(slot.time));
+                    var defShift=(!isCustomSlot&&slot.defaultBaseTime&&slot.time!==slot.defaultBaseTime)?(timeToAbsMinutes(slot.time)<timeToAbsMinutes(slot.defaultBaseTime)?"earlier":"later"):null;
                     var isDropTarget=isLiveDragging&&dragOverKey===rowKey&&!filled&&!slot.blocked;
                     var showDropHint=(isLiveDragging||placingClient)&&!filled&&!slot.blocked&&!isEditing&&!(dragState&&dragState.sourceKey===rowKey);
                     if (isDropTarget) slotBg="#e3f3e3";
@@ -2461,7 +2579,7 @@ export default function TheList() {
                             onClick={function(e){ e.stopPropagation(); if(placingClient){ if(!filled) placeClientInSlot(dateKey,idx); return; } if(!isEditing&&!selectMode&&!isLiveDragging&&!(reassignMode&&reassignMode.currentDateKey===dateKey)) openTimeEdit(dateKey,idx); }}
                             onMouseDown={function(e){ e.stopPropagation(); }}
                             onTouchStart={function(e){ e.stopPropagation(); }}
-                            style={{fontSize:"12px",color:slot.customTime?"#2f7d8a":(filled?"#c9a96e":"#2e2e2e"),fontWeight:slot.customTime?"bold":"normal",width:"40px",flexShrink:0,fontVariantNumeric:"tabular-nums",letterSpacing:"0.02em",userSelect:"none",WebkitUserSelect:"none",cursor:"pointer"}}>{slot.time}</div>
+                            style={{fontSize:"12px",color:defShift==="earlier"?"#2a4fd6":defShift==="later"?"#8a4fd6":slot.customTime?"#2f7d8a":(filled?"#c9a96e":"#2e2e2e"),fontWeight:(slot.customTime||defShift)?"bold":"normal",width:"40px",flexShrink:0,fontVariantNumeric:"tabular-nums",letterSpacing:"0.02em",userSelect:"none",WebkitUserSelect:"none",cursor:"pointer"}}>{slot.time}</div>
                           {slot.blocked?(
                             <div onClick={function(){ toggleBlockSlot(dateKey,idx,null); }} style={{flex:1,display:"flex",alignItems:"center",cursor:"pointer"}}>
                               <span style={{fontSize:"12px",color:slot.done?"#3a5a3a":"#aaa",fontStyle:"italic"}}>{slot.blockLabel||"Blocked"}</span>
@@ -2484,6 +2602,7 @@ export default function TheList() {
                               <input
                                 value={isEditing?editValues.name:(wasRemoved?"":(slot.name||((!filled&&slot.availStatus)?(slot.availStatus==="overtime"?"OVERTIME (COSTS TIME AND A HALF)":"AVAILABLE"):"")))}
                                 readOnly={!isEditing}
+                                name="tl-slot-name" inputMode="text" data-lpignore="true" data-1p-ignore="true" data-form-type="other" data-bwignore="true"
                                 autoComplete="off" autoCorrect="off" autoCapitalize="words" spellCheck={false}
                                 onFocus={function(){ if(!isEditing&&!selectMode&&!isLiveDragging&&!dragState&&!slot.done) startEdit(dateKey,idx,(!filled&&!slot.availStatus)); }}
                                 onChange={function(e){ if(isEditing){ setEditValues(function(v){ return {...v,name:e.target.value}; }); if(!editChromeReady) setEditChromeReady(true); } }}
@@ -2492,7 +2611,7 @@ export default function TheList() {
                                 onMouseDown={function(){ if(filled&&!slot.done&&!isEditing&&!selectMode) startDragLongPress(dateKey,idx,0,0); }}
                                 onMouseUp={function(){ cancelDragLongPress(); }}
                                 placeholder="" data-rowkey={rowKey}
-                                style={{flex:1,minWidth:0,pointerEvents:slot.done?"none":"auto",fontSize:"13px",color:wasRemoved?"#c0392b":slot.done?"#2a6a2a":slot.pending?"#9a8458":(!filled&&slot.availStatus&&!isEditing)?"#1f7a33":filled?"#1a1a1a":"#999",fontWeight:(!filled&&slot.availStatus&&!isEditing)?"600":"normal",fontStyle:slot.pending?"italic":"normal",textDecoration:"none",background:"transparent",border:"none",outline:"none",padding:"0 2px",fontFamily:"Georgia,serif",cursor:isEditing?"text":"pointer",caretColor:isEditing?"#444":"transparent",WebkitUserSelect:isEditing?"text":"none",userSelect:isEditing?"text":"none",WebkitAppearance:"none",appearance:"none"}}
+                                style={{flex:1,minWidth:0,pointerEvents:slot.done?"none":"auto",fontSize:"13px",color:wasRemoved?"#c0392b":slot.done?"#2a6a2a":slot.pending?"#9a8458":(!filled&&slot.availStatus&&!isEditing)?"#1f7a33":filled?"#1a1a1a":"#999",fontWeight:(!filled&&slot.availStatus&&!isEditing)?"600":"normal",fontStyle:slot.pending?"italic":"normal",textDecoration:"none",background:"transparent",border:"none",outline:"none",padding:"0 2px",fontFamily:"Georgia,serif",cursor:isEditing?"text":"pointer",caretColor:(isEditing&&editChromeReady)?"#444":"transparent",WebkitUserSelect:isEditing?"text":"none",userSelect:isEditing?"text":"none",WebkitAppearance:"none",appearance:"none"}}
                               />
                               {!isEditing&&(
                                 <div style={{display:"flex",alignItems:"center",gap:"6px",flexShrink:0}}
@@ -2507,7 +2626,7 @@ export default function TheList() {
                                       {slot.recurWeeks?((slot.recurWeeks===1?"1w":(slot.recurWeeks+"w"))+(slot.isException?"*":"")):""}
                                     </div>
                                   )}
-                                  {view!=="Week"&&filled&&<button onClick={function(e){ e.stopPropagation(); if(slot.groupId){var aS=getSlots(dateKey);var gS=aS.map(function(s,i){ return {...s,i}; }).filter(function(s){ return s.groupId===slot.groupId&&s.name; });if(gS.length>1){setGroupRecurModal({dateKey,idx,slot,groupSlots:gS,weeks:null});return;}} setRecurringModal({dateKey,idx,slot}); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 5px",color:slot.recurWeeks?"#4a8a9a":"#bbb",fontSize:"16px",fontWeight:"normal",lineHeight:1}}>{"↺"}</button>}
+                                  {view!=="Week"&&filled&&(slot.recurWeeks?<button onClick={function(e){ e.stopPropagation(); if(slot.groupId){var aS=getSlots(dateKey);var gS=aS.map(function(s,i){ return {...s,i}; }).filter(function(s){ return s.groupId===slot.groupId&&s.name; });if(gS.length>1){setGroupRecurModal({dateKey,idx,slot,groupSlots:gS,weeks:null});return;}} setRecurringModal({dateKey,idx,slot}); }} title="Recurring — tap to manage" style={{background:"none",border:"none",cursor:"pointer",padding:"2px 5px",color:"#4a8a9a",fontSize:"16px",fontWeight:"normal",lineHeight:1}}>{"↺"}</button>:<div style={{width:"26px",flexShrink:0}}/>)}
                                   {view!=="Week"&&filled&&<button onClick={function(e){ e.stopPropagation(); setNoteDraft(slot.note||""); setNoteModal({dateKey,idx,name:slot.name}); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 5px",color:slot.note?"#c9a96e":"#bbb",fontSize:"22px",fontWeight:"bold",lineHeight:1,WebkitTextStroke:"0.6px currentColor"}}>{"✎"}</button>}
                                 </div>
                               )}
