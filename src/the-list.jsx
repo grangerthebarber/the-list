@@ -38,6 +38,11 @@ const OLD_DEFAULT_TIMES_C = [
 
 const WEEK_OPTIONS = [1,2,3,4,5,6,7,8];
 
+// One blue for every "off the default" cue: an earlier-or-later nudged time AND
+// the vertical bar that marks linked/grouped slots. Muted, deep, Farrow & Ball
+// "Hague Blue"-ish — not the old electric/royal blue.
+const ADJ_BLUE = "#34434c";
+
 function parseTime(t) { var parts = t.split(":").map(Number); return parts[0]*60+parts[1]; }
 var _gid = 1;
 function newGroupId() { return "g"+(_gid++); }
@@ -324,6 +329,7 @@ export default function TheList() {
   const [monthLongPress, setMonthLongPress] = useState(null);
   const [banner, setBanner] = useState(null);
   const [clientSearch, setClientSearch] = useState("");
+  const [showAllClients, setShowAllClients] = useState(false);
   const [historySearch, setHistorySearch] = useState("");
   const [noteModal, setNoteModal] = useState(null);
   const [noteDraft, setNoteDraft] = useState("");
@@ -381,6 +387,10 @@ export default function TheList() {
   isLiveDraggingRef.current = isLiveDragging;
   // Measured Y of the top of the first list row, used to vertically center the change-log banner.
   const [listTopY, setListTopY] = useState(0);
+  // Measured Y of the top of the day columns (the date header), so the banner can sit
+  // halfway between the very top of the screen and where the day's column begins —
+  // higher than listTopY (which starts below the column header).
+  const [gridTopY, setGridTopY] = useState(0);
   // When set (2-8), the next booking made from the checkoff/quick-book modal recurs every N weeks.
   const [checkoffRecur, setCheckoffRecur] = useState(null);
   const [recurPickerOpen, setRecurPickerOpen] = useState(false);
@@ -403,10 +413,39 @@ export default function TheList() {
       var y = scrollers[0].getBoundingClientRect().top;
       setListTopY(function(prev){ return Math.abs(prev-y) > 1 ? y : prev; });
     }
+    var gridEl = document.querySelector("[data-gridtop]");
+    if (gridEl) {
+      var gy = gridEl.getBoundingClientRect().top;
+      setGridTopY(function(prev){ return Math.abs(prev-gy) > 1 ? gy : prev; });
+    }
   }, []);
 
   useEffect(function() { try { localStorage.setItem("tl_schedules", JSON.stringify(schedules)); } catch(e) {} }, [schedules]);
   useEffect(function() { try { localStorage.setItem("tl_clients", JSON.stringify(clientMemory)); } catch(e) {} }, [clientMemory]);
+  // Keep the saved-clients roster complete: any name written to the schedule by ANY
+  // path (Shift+Enter groups, book-next, drag, recurring fill-out) gets folded in.
+  // Previously only the plain type-a-name path saved to the roster, so father/son
+  // links and booked-forward names never showed up under Saved Clients.
+  useEffect(function() {
+    setClientMemory(function(mem){
+      var have = {};
+      for (var i=0;i<mem.length;i++) { if(mem[i]&&mem[i].name) have[mem[i].name.toLowerCase()]=true; }
+      var additions = []; var seen = {};
+      var keys = Object.keys(schedules);
+      for (var k=0;k<keys.length;k++) {
+        var day = schedules[keys[k]];
+        for (var j=0;j<day.length;j++) {
+          var s = day[j];
+          if (s.name && !s.blocked) {
+            var lc = s.name.toLowerCase();
+            if (!have[lc] && !seen[lc]) { seen[lc]=true; additions.push({name:s.name,price:s.price||""}); }
+          }
+        }
+      }
+      if (additions.length===0) return mem;
+      return mem.concat(additions);
+    });
+  }, [schedules]);
   useEffect(function() { try { localStorage.setItem("tl_holidays", JSON.stringify(customHolidays)); } catch(e) {} }, [customHolidays]);
   useEffect(function() { try { localStorage.setItem("tl_history", JSON.stringify(history)); } catch(e) {} }, [history]);
   useEffect(function() { try { localStorage.setItem("tl_daynotes", JSON.stringify(dayNotes)); } catch(e) {} }, [dayNotes]);
@@ -534,7 +573,7 @@ export default function TheList() {
     if (bannerTimer.current) clearTimeout(bannerTimer.current);
     var displayEntry = overrideType ? {...entry, type:overrideType} : entry;
     setBanner(displayEntry);
-    bannerTimer.current = setTimeout(function(){ setBanner(null); }, 8000);
+    bannerTimer.current = setTimeout(function(){ setBanner(null); }, 10000);
   };
 
   const getHolidayForDate = function(dateKey) {
@@ -737,7 +776,7 @@ export default function TheList() {
     if (defer) {
       // Hold the edit chrome back briefly so a fast double/triple tap doesn't flash it.
       setEditChromeReady(false);
-      settleTimer.current = setTimeout(function(){ settleTimer.current=null; setEditChromeReady(true); }, 230);
+      settleTimer.current = setTimeout(function(){ settleTimer.current=null; setEditChromeReady(true); }, 140);
     } else {
       setEditChromeReady(true);
     }
@@ -879,8 +918,35 @@ export default function TheList() {
       var curSlot = slots[idx];
       var newName = capitalizeFirst(stripLeadingNumbers((cv.name||"").trim()));
       var newPrice = (cv.price||"").trim();
-      if (!newName) return;
       var nextIdx = idx+1;
+      var nextSlot = nextIdx<slots.length ? slots[nextIdx] : null;
+      // If this slot is already linked to the one directly below, Shift+Enter UNLINKS
+      // that pair instead of linking. Splits the contiguous group at this boundary:
+      // everything from here up keeps the old group, everything below gets its own
+      // (and any side left with a single member is ungrouped entirely).
+      var linkedBelow = !!(curSlot.groupId && nextSlot && nextSlot.groupId===curSlot.groupId);
+      if (linkedBelow) {
+        var gidU = curSlot.groupId;
+        var runStart = idx; while (runStart>0 && slots[runStart-1].groupId===gidU) runStart--;
+        var runEnd = idx; while (runEnd<slots.length-1 && slots[runEnd+1].groupId===gidU) runEnd++;
+        var snapU = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
+        pushUndo(snapU);
+        // commit any in-progress name edit on this slot before unlinking
+        if (newName) slots[idx] = {...slots[idx],name:newName,price:newPrice};
+        var upperCount = idx - runStart + 1;
+        var lowerCount = runEnd - (idx+1) + 1;
+        var lowerGid = lowerCount>=2 ? newGroupId() : null;
+        var ui;
+        for (ui=runStart; ui<=runEnd; ui++) {
+          if (ui<=idx) { if (upperCount<2) slots[ui]={...slots[ui],groupId:null}; }
+          else { slots[ui]={...slots[ui],groupId:lowerGid}; }
+        }
+        setSlots(dateKey,slots);
+        editingRef.current=null; setEditingCell(null); setEditingOccupied(false);
+        setPencilArmed(false); setEditChromeReady(true);
+        return;
+      }
+      if (!newName) return;
       var hasNext = nextIdx<slots.length && !slots[nextIdx].blocked;
       var nextEmpty = hasNext && !slots[nextIdx].name;
       var nextFilled = hasNext && !!slots[nextIdx].name;
@@ -888,7 +954,9 @@ export default function TheList() {
       pushUndo(snapshot);
       if (nextEmpty) {
         // Empty slot below: carry this name down and link the two into a group.
-        var gid = curSlot.groupId || (idx>0&&slots[idx-1].groupId) || newGroupId();
+        // NOTE: only ever reuse THIS slot's own group — never the slot above's, or a
+        // fresh entry sitting under an existing pair would get swallowed into it.
+        var gid = curSlot.groupId || newGroupId();
         slots[idx] = {...curSlot,name:newName,price:newPrice,groupId:gid};
         slots[nextIdx] = {...slots[nextIdx],name:newName,price:newPrice,groupId:gid};
         setSlots(dateKey,slots);
@@ -898,7 +966,7 @@ export default function TheList() {
       } else if (nextFilled) {
         // Slot below already has someone written in it (re-editing an existing
         // list): link the two appointments into one group without overwriting
-        // the name already below, then keep chaining down.
+        // the name already below, then keep chaining down. (Links downward only.)
         var gid2 = curSlot.groupId || slots[nextIdx].groupId || newGroupId();
         slots[idx] = {...curSlot,name:newName,price:newPrice,groupId:gid2};
         slots[nextIdx] = {...slots[nextIdx],groupId:gid2};
@@ -973,7 +1041,7 @@ export default function TheList() {
     });
     setSlots(dateKey,updated);
     if (newDone) {
-      showBanner({type:"checkoff",name:slot.name||slot.blockLabel||"Lunch",time:slot.time,dateKey});
+      playSound("lock");
     } else {
       playSound("tap");
     }
@@ -982,14 +1050,21 @@ export default function TheList() {
   // Mark an empty slot as AVAILABLE / OVERTIME (or clear it). Never touches a
   // slot that already has someone or is blocked.
   const cycleSlotMark = function(dateKey, idx, mark) {
-    var slots = getSlots(dateKey);
-    var slot = slots[idx];
-    if (!slot || slot.name || slot.blocked) return;
+    var probe = schedulesRef.current[dateKey] ? schedulesRef.current[dateKey][idx] : getSlots(dateKey)[idx];
+    if (!probe || probe.name || probe.blocked) return;
     var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
     pushUndo(snapshot);
-    var updated = [...slots];
-    updated[idx] = {...slot,availStatus:mark,done:false};
-    setSlots(dateKey,updated);
+    // Build the new day off the LATEST committed state (prev), not a value captured
+    // before this click. Tapping several ×'s faster than React can re-render used to
+    // let a later click overwrite the whole day from stale data and silently drop an
+    // earlier restore ("skips one"). Functional updaters chain, so each one lands.
+    setSchedules(function(prev){
+      var day = prev[dateKey] ? prev[dateKey].slice() : DEFAULT_TIMES.map(function(t){ return {time:t,name:"",price:"",done:false,recurWeeks:null,isCustom:false}; });
+      var s = day[idx];
+      if (!s || s.name || s.blocked) return prev;
+      day[idx] = {...s,availStatus:mark,done:false};
+      return {...prev,[dateKey]:day};
+    });
   };
 
   // Taps on an open slot: 1 = edit (handled live by the input focus), 2 =
@@ -1021,7 +1096,7 @@ export default function TheList() {
       slotTapRef.current = {key:null,count:0,timer:null};
       if (c >= 3) cycleSlotMark(dk, ix, "overtime");
       else if (c === 2) cycleSlotMark(dk, ix, "available");
-    }, 260);
+    }, 200);
   };
 
   // Build the list of times that share a slot's group on a given day (sorted by time).
@@ -1032,15 +1107,35 @@ export default function TheList() {
       .map(function(s){ return {time:s.time,price:s.price,recurWeeks:s.recurWeeks}; });
   };
 
+  // Earliest date AFTER fromDateKey on which this client already has something booked
+  // (used to warn "already booked for ..." when scheduling their next one).
+  var findExistingFutureBooking = function(name, fromDateKey) {
+    var keys = Object.keys(schedulesRef.current);
+    var best = null;
+    for (var i=0;i<keys.length;i++) {
+      var dk = keys[i];
+      if (dk <= fromDateKey) continue;
+      var day = schedulesRef.current[dk];
+      for (var j=0;j<day.length;j++) {
+        if (day[j].name===name && !day[j].blocked) {
+          if (!best || dk < best) best = dk;
+          break;
+        }
+      }
+    }
+    return best;
+  };
+
   const openCheckoffSchedule = function(dateKey, idx, slot, groupTimes) {
+    var alreadyBookedKey = findExistingFutureBooking(slot.name, dateKey);
     if (slot.recurWeeks) {
       var nextKey = getNextDateKey(dateKey,slot.recurWeeks);
       var conflict = isSlotTaken(nextKey,slot.time,slot.name);
       setNudgedDate(nextKey); setCheckoffCalMonth(null);
-      setCheckoffModal({dateKey,idx,slot,nextDateKey:nextKey,conflict,notRecurring:false,groupTimes:groupTimes||null});
+      setCheckoffModal({dateKey,idx,slot,nextDateKey:nextKey,conflict,notRecurring:false,groupTimes:groupTimes||null,alreadyBookedKey:alreadyBookedKey});
     } else {
       setNudgedDate(null); setCheckoffCalMonth(null);
-      setCheckoffModal({dateKey,idx,slot,nextDateKey:null,conflict:false,notRecurring:true,groupTimes:groupTimes||null});
+      setCheckoffModal({dateKey,idx,slot,nextDateKey:null,conflict:false,notRecurring:true,groupTimes:groupTimes||null,alreadyBookedKey:alreadyBookedKey});
     }
   };
 
@@ -1247,14 +1342,16 @@ export default function TheList() {
     var bookings = [];
     Object.entries(schedulesRef.current).forEach(function(entry) {
       var dateKey=entry[0]; var slots=entry[1];
+      if (dateKey < today) return; // only what's still on the books going forward
       slots.forEach(function(slot) {
-        if (slot.name===name) bookings.push({dateKey,time:slot.time,price:slot.price,recurWeeks:slot.recurWeeks,isException:slot.isException||false,done:slot.done||false,isPast:dateKey<today});
+        if (slot.name===name && !slot.blocked) bookings.push({dateKey,time:slot.time,price:slot.price,recurWeeks:slot.recurWeeks,isException:slot.isException||false,done:slot.done||false,isPast:false});
       });
     });
     bookings.sort(function(a,b){ return a.dateKey.localeCompare(b.dateKey); });
-    var nonEx = bookings.filter(function(b){ return !b.isException&&!b.isPast; });
+    var nonEx = bookings.filter(function(b){ return !b.isException; });
     var usualTime = nonEx.length>0?nonEx[0].time:(bookings[0]&&bookings[0].time)||"";
-    var recurWeeks = bookings.find(function(b){ return b.recurWeeks; })&&bookings.find(function(b){ return b.recurWeeks; }).recurWeeks;
+    var recurFound = bookings.find(function(b){ return b.recurWeeks; });
+    var recurWeeks = recurFound ? recurFound.recurWeeks : null;
     setClientProfile({name,recurWeeks,usualTime,bookings});
   };
 
@@ -2047,10 +2144,10 @@ export default function TheList() {
       onTouchEnd={function(){ endSelectDrag(); }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2500,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",pointerEvents:"none",fontFamily:"Georgia,serif"}}>v5</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2500,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",pointerEvents:"none",fontFamily:"Georgia,serif"}}>v6</div>
 
       {banner && (
-        <div style={{position:"fixed",top:listTopY>0?(listTopY/2+"px"):"calc(env(safe-area-inset-top,0px) + 8px)",left:"50%",transform:listTopY>0?"translate(-50%,-50%)":"translateX(-50%)",zIndex:2000,background:getBannerColor(banner.type),color:"#fff",padding:"6px 14px",borderRadius:"20px",fontSize:"12px",letterSpacing:"0.04em",boxShadow:"0 2px 12px rgba(0,0,0,0.2)",display:"flex",alignItems:"center",gap:"12px",maxWidth:"90vw",pointerEvents:"auto"}}>
+        <div style={{position:"fixed",top:gridTopY>0?(gridTopY/2+"px"):listTopY>0?(listTopY/2+"px"):"calc(env(safe-area-inset-top,0px) + 8px)",left:"50%",transform:(gridTopY>0||listTopY>0)?"translate(-50%,-50%)":"translateX(-50%)",zIndex:2000,background:getBannerColor(banner.type),color:"#fff",padding:"6px 14px",borderRadius:"20px",fontSize:"12px",letterSpacing:"0.04em",boxShadow:"0 2px 12px rgba(0,0,0,0.2)",display:"flex",alignItems:"center",gap:"12px",maxWidth:"90vw",pointerEvents:"auto"}}>
           <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{describeBanner(banner)}</span>
           {(banner.type!=="undo"&&banner.type!=="redo"&&canUndo)&&(
             <button onClick={handleUndo} title="Undo" style={{background:"rgba(255,255,255,0.22)",border:"none",borderRadius:"10px",color:"#fff",padding:"4px 9px",cursor:"pointer",fontFamily:"inherit",flexShrink:0,display:"flex",alignItems:"center"}}><UndoIcon size={15} color="#fff"/></button>
@@ -2289,15 +2386,13 @@ export default function TheList() {
             <div style={{overflowY:"auto",flex:1}}>
               {clientProfile.bookings.length===0&&<div style={{fontSize:"13px",color:"#aaa",fontStyle:"italic"}}>No bookings.</div>}
               {clientProfile.bookings.map(function(b,i){ return (
-                <div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 12px",marginBottom:"4px",background:b.isPast?"#f8f8f6":b.isException?"#fffbf0":b.done?"#f4faf4":"#f8f8f6",border:b.isPast?"1px solid #e8e8e6":b.isException?"1px solid #e8d8a0":b.done?"1px solid #c0d8c0":"1px solid #e8e8e6",borderRadius:"8px",opacity:b.isPast?0.55:1}}>
+                <div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 12px",marginBottom:"4px",background:b.done?"#f4faf4":"#f8f8f6",border:b.done?"1px solid #c0d8c0":"1px solid #e8e8e6",borderRadius:"8px"}}>
                   <div>
                     <div style={{fontSize:"13px",color:"#1a1a1a",marginBottom:"2px"}}>
                       {friendlyDate(b.dateKey)}
-                      {b.isPast&&<span style={{fontSize:"10px",color:"#aaa",marginLeft:"8px"}}>PAST</span>}
-                      {b.isException&&<span style={{fontSize:"10px",color:"#a07830",marginLeft:"8px"}}>MOVED</span>}
                       {b.done&&<span style={{fontSize:"10px",color:"#2a7a2a",marginLeft:"8px"}}>DONE</span>}
                     </div>
-                    <div style={{fontSize:"12px",color:b.isException?"#a07830":"#888"}}>{b.time}</div>
+                    <div style={{fontSize:"12px",color:"#888"}}>{b.time}</div>
                   </div>
                   {!b.isPast&&!b.done&&(
                     <div style={{display:"flex",gap:"6px",marginLeft:"10px",flexShrink:0}}>
@@ -2347,6 +2442,12 @@ export default function TheList() {
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#4a8a5a",marginBottom:"4px"}}>Done</div>
             <div style={{fontSize:"22px",marginBottom:"2px",paddingRight:"32px"}}>{checkoffModal.slot.name}</div>
             <div style={{fontSize:"12px",color:"#999",marginBottom:"18px"}}>{checkoffModal.slot.time} · {friendlyDate(checkoffModal.dateKey)}</div>
+            {checkoffModal.alreadyBookedKey&&(
+              <div style={{background:"#eef3f9",border:"1px solid #b8cce0",borderRadius:"8px",padding:"10px 14px",marginBottom:"16px",fontSize:"13px",color:"#34434c",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px"}}>
+                <span>Already booked for {friendlyDateLong(checkoffModal.alreadyBookedKey)}</span>
+                <button onClick={function(){ var k=checkoffModal.alreadyBookedKey; setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null); jumpToDate(k); }} style={{flexShrink:0,background:"#34434c",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",padding:"5px 11px",fontFamily:"inherit",fontSize:"12px"}}>Go there</button>
+              </div>
+            )}
             {checkoffModal.notRecurring ? (
               <div>
                 <div style={{fontSize:"13px",color:"#888",marginBottom:"14px"}}>Not recurring. When's the next one?</div>
@@ -2473,7 +2574,7 @@ export default function TheList() {
         var tmIsCustom = slot.isCustom===true || (slot.isCustom===undefined && DEFAULT_TIMES.indexOf(slot.time)===-1);
         var tmBase = slot.defaultBaseTime || timeEditModal.original;
         var tmShift = (!tmIsCustom && tmBase && workingTime!==tmBase) ? (timeToAbsMinutes(workingTime)<timeToAbsMinutes(tmBase) ? "earlier" : "later") : null;
-        var tmColor = tmShift==="earlier" ? "#2a4fd6" : tmShift==="later" ? "#742AD6" : tmIsCustom ? "#2f7d8a" : "#1a1a1a";
+        var tmColor = tmShift ? ADJ_BLUE : tmIsCustom ? "#2f7d8a" : "#1a1a1a";
         // Inverted on purpose: the +5/+1 buttons subtract and the −5/−1 buttons add,
         // keeping the same labels and positions but flipping the effect.
         var nudge = function(delta){ return function(){ setTimeEditMinutes(function(m){ return m - delta; }); }; };
@@ -2541,8 +2642,11 @@ export default function TheList() {
             {clientMemory.length>0&&(
               <div style={{marginBottom:"20px",marginTop:"16px"}}>
                 <div style={{fontSize:"10px",letterSpacing:"0.15em",textTransform:"uppercase",color:"#aaa",marginBottom:"8px"}}>Saved Clients</div>
-                <input value={clientSearch} onChange={function(e){ setClientSearch(e.target.value); }} placeholder="Search clients..." style={{...inputStyle,width:"100%",boxSizing:"border-box",marginBottom:"8px",fontSize:"12px"}}/>
-                {clientMemory.filter(function(c){ return clientSearch&&c.name.toLowerCase().includes(clientSearch.toLowerCase()); }).map(function(c,i){ return (
+                <div style={{display:"flex",gap:"6px",marginBottom:"8px"}}>
+                  <input value={clientSearch} onChange={function(e){ setClientSearch(e.target.value); }} placeholder="Search clients..." style={{...inputStyle,flex:1,boxSizing:"border-box",fontSize:"12px"}}/>
+                  <button onClick={function(){ setShowAllClients(function(p){ return !p; }); }} title="Show all clients A–Z" style={{flexShrink:0,padding:"5px 12px",background:showAllClients?"#1a1a1a":"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"4px",color:showAllClients?"#fff":"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",letterSpacing:"0.08em"}}>A–Z</button>
+                </div>
+                {clientMemory.slice().sort(function(a,b){ return a.name.toLowerCase().localeCompare(b.name.toLowerCase()); }).filter(function(c){ if(showAllClients) return true; return clientSearch&&c.name.toLowerCase().includes(clientSearch.toLowerCase()); }).map(function(c,i){ return (
                   <div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 10px",marginBottom:"3px",background:"#f8f8f6",border:"1px solid #e8e8e6",borderRadius:"6px"}}>
                     <div style={{cursor:"pointer",flex:1}} onClick={function(){ openClientProfile(c.name); setShowHistory(false); }}>
                       <span style={{fontSize:"13px",color:"#1a1a1a"}}>{c.name}</span>
@@ -2589,7 +2693,16 @@ export default function TheList() {
       <div style={{borderBottom:"1px solid #e8e8e6",padding:"3px 20px 3px",paddingTop:"calc(env(safe-area-inset-top,0px) + 3px)",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,background:"#ffffff",zIndex:100,flexShrink:0}}>
         <div style={{display:"flex",gap:"2px",background:"#e8e8e6",padding:"3px",borderRadius:"6px",marginLeft:isSplitView?"48px":"0"}}>
           {VIEWS.map(function(v){ return (
-            <button key={v} data-viewtab={v} onClick={function(){ if(v==="Wknd") setBaseDate(getUpcomingWeekend()); else if(v==="Day"||v==="3-Day"||v==="Week") setBaseDate(getAnchorStart()); setView(v); }} style={{padding:"5px 12px",fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",border:"none",borderRadius:"4px",cursor:"pointer",background:view===v?"#1a1a1a":"transparent",color:view===v?"#ffffff":"#999",fontFamily:"inherit",transition:"all 0.15s"}}>{v}</button>
+            <button key={v} data-viewtab={v} onClick={function(){
+              if (v==="Wknd") { setBaseDate(getUpcomingWeekend()); setView(v); return; }
+              if (v==="Day"||v==="3-Day"||v==="Week") {
+                // Re-tapping the tab you're already on snaps the range back to today.
+                // Switching IN from a different view keeps the day you were looking at,
+                // so a 3-Day/Week starts on that day instead of jumping to today.
+                if (v===view) setBaseDate(getAnchorStart());
+              }
+              setView(v);
+            }} style={{padding:"5px 12px",fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",border:"none",borderRadius:"4px",cursor:"pointer",background:view===v?"#1a1a1a":"transparent",color:view===v?"#ffffff":"#999",fontFamily:"inherit",transition:"all 0.15s"}}>{v}</button>
           ); })}
         </div>
         {view==="Month"&&<div style={{fontSize:"14px",color:"#1a1a1a"}}>{baseDate.toLocaleDateString("en-US",{month:"long",year:"numeric"})}</div>}
@@ -2651,24 +2764,24 @@ export default function TheList() {
 
       {view!=="Month"&&(
         <div style={{flex:"1 1 auto",minHeight:0,overflow:"hidden",display:"flex",flexDirection:"column"}}>
-        <div style={{display:"grid",gridTemplateColumns:("repeat("+getDayCount()+",minmax(0,1fr))"),gap:"1px",background:"#d8d8d6",flex:"1 1 auto",minHeight:0,gridAutoRows:"1fr"}}>
+        <div data-gridtop="1" style={{display:"grid",gridTemplateColumns:("repeat("+getDayCount()+",minmax(0,1fr))"),gap:"1px",background:"#d8d8d6",flex:"1 1 auto",minHeight:0,gridAutoRows:"1fr"}}>
           {dates.map(function(date){
             var dateKey=toDateKey(date); var slots=getSlots(dateKey);
             return (
               <div key={dateKey} style={{background:"#ffffff",display:"flex",flexDirection:"column",minHeight:0,overflow:"hidden"}}>
-                <div style={{padding:"2px 10px 3px",borderBottom:"1px solid #ebebea",display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:"4px",flexShrink:0}}>
+                <div style={{padding:"1px 10px 2px",borderBottom:"1px solid #ebebea",display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:"4px",flexShrink:0}}>
                   {(function(){
                     var sz=view==="Day"?"17px":"16px"; var mo=date.getMonth();
                     var monthStr=[3,4,5,6].includes(mo)?date.toLocaleDateString("en-US",{month:"long",day:"numeric"}):date.toLocaleDateString("en-US",{month:"short",day:"numeric"});
-                    var wdStr=isToday(date)?"Today":date.toLocaleDateString("en-US",{weekday:"long"});
+                    var wdStr=date.toLocaleDateString("en-US",{weekday:"long"})+(isToday(date)?" (Today)":"");
                     var hol=getHolidayForDate(dateKey);
                     return (
                       <div style={{minWidth:0,overflow:"hidden",flex:1}}>
                         <div style={{display:"flex",alignItems:"baseline",gap:"6px",minWidth:0}}>
-                          <span style={{fontSize:sz,color:isToday(date)?"#c9893a":"#b89a5a",lineHeight:1.2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",flexShrink:1}}>{wdStr}</span>
+                          <span style={{fontSize:sz,color:isToday(date)?"#c9893a":"#b89a5a",lineHeight:1.2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",flexShrink:1,textTransform:"uppercase",letterSpacing:"0.06em"}}>{wdStr}</span>
                           {hol&&<span style={{fontSize:"9px",color:"#a07830",letterSpacing:"0.08em",textTransform:"uppercase",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:1}}>{hol}</span>}
                         </div>
-                        <div style={{fontSize:sz,color:"#1a1a1a",lineHeight:1.2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{monthStr}</div>
+                        <div style={{fontSize:sz,color:"#1a1a1a",lineHeight:1.2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",textTransform:"uppercase",letterSpacing:"0.06em"}}>{monthStr}</div>
                       </div>
                     );
                   })()}
@@ -2715,7 +2828,7 @@ export default function TheList() {
                         )}
                         <div
                           data-droprow={rowKey} data-dropfilled={filled?"1":"0"} data-dropblocked={slot.blocked?"1":"0"}
-                          style={{display:"flex",alignItems:"center",padding:(getDayCount()>3?"0 7px":"0 14px"),height:"42px",background:slotBg,transition:"background 0.2s",position:"relative",opacity:slot.blocked?0.6:1,userSelect:"none",WebkitUserSelect:"none",outline:isDropTarget?"2px solid #5a9a5a":(showDropHint?"1px dashed #cdddcd":"none"),outlineOffset:"-3px",borderRadius:isDropTarget?"6px":"0"}}
+                          style={{display:"flex",alignItems:"center",padding:(getDayCount()>3?"0 7px":"0 14px"),height:"39px",background:slotBg,transition:"background 0.2s",position:"relative",opacity:slot.blocked?0.6:1,userSelect:"none",WebkitUserSelect:"none",outline:isDropTarget?"2px solid #5a9a5a":(showDropHint?"1px dashed #cdddcd":"none"),outlineOffset:"-3px",borderRadius:isDropTarget?"6px":"0"}}
                           onTouchStart={function(e){ handleTouchStart(e,dateKey,idx); }}
                           onTouchEnd={function(e){ handleTouchEnd(e,dateKey,idx); }}
                           onMouseUp={function(){ if(dragState&&!dragState.multi&&!dragCalHover) handleSlotDrop(dateKey,idx); }}
@@ -2726,7 +2839,7 @@ export default function TheList() {
                             var ds=getSlots(dateKey); var gS=ds.map(function(s,i){ return {...s,i}; }).filter(function(s){ return s.groupId===slot.groupId&&s.name; });
                             var first=gS[0]&&gS[0].i===idx; var last=gS[gS.length-1]&&gS[gS.length-1].i===idx; var inG=gS.some(function(s){ return s.i===idx; });
                             if (!inG) return null;
-                            return <div style={{position:"absolute",left:0,top:first?"50%":"0",bottom:last?"50%":"0",width:"3px",background:"#a07830",borderRadius:first?"3px 3px 0 0":last?"0 0 3px 3px":"0"}}/>;
+                            return <div style={{position:"absolute",left:0,top:first?"50%":"0",bottom:last?"50%":"0",width:"3px",background:ADJ_BLUE,borderRadius:first?"3px 3px 0 0":last?"0 0 3px 3px":"0"}}/>;
                           })()}
                           {selectMode&&filled ? (
                             <div
@@ -2750,7 +2863,7 @@ export default function TheList() {
                             onClick={function(e){ e.stopPropagation(); if(placingClient){ if(!filled) placeClientInSlot(dateKey,idx); return; } if(!isEditing&&!selectMode&&!isLiveDragging&&!(reassignMode&&reassignMode.currentDateKey===dateKey)) openTimeEdit(dateKey,idx); }}
                             onMouseDown={function(e){ e.stopPropagation(); }}
                             onTouchStart={function(e){ e.stopPropagation(); }}
-                            style={{fontSize:"12px",color:defShift==="earlier"?"#2a4fd6":defShift==="later"?"#742AD6":slot.customTime?"#2f7d8a":(filled?"#c9a96e":"#2e2e2e"),fontWeight:(slot.customTime||defShift)?"bold":"normal",width:"40px",flexShrink:0,fontVariantNumeric:"tabular-nums",letterSpacing:"0.02em",userSelect:"none",WebkitUserSelect:"none",cursor:"pointer"}}>{slot.time}</div>
+                            style={{fontSize:"12px",color:defShift?ADJ_BLUE:slot.customTime?"#2f7d8a":(filled?"#c9a96e":"#2e2e2e"),fontWeight:(slot.customTime||defShift)?"bold":"normal",width:"40px",flexShrink:0,fontVariantNumeric:"tabular-nums",letterSpacing:"0.02em",userSelect:"none",WebkitUserSelect:"none",cursor:"pointer"}}>{slot.time}</div>
                           {slot.blocked?(
                             <div onClick={function(){ toggleBlockSlot(dateKey,idx,null); }} style={{flex:1,display:"flex",alignItems:"center",cursor:"pointer"}}>
                               <span style={{fontSize:"12px",color:slot.done?"#3a5a3a":"#aaa",fontStyle:"italic"}}>{slot.blockLabel||"Blocked"}</span>
@@ -2793,12 +2906,12 @@ export default function TheList() {
                                 >
                                   {filled&&slot.pending&&!slot.done&&<button onClick={function(e){ e.stopPropagation(); lockInSlot(dateKey,idx); }} title="Lock in" style={{display:"flex",alignItems:"center",justifyContent:"center",background:"#fff",border:"1px solid #d8c08a",borderRadius:"6px",cursor:"pointer",padding:view==="Week"?"3px 5px":"3px 7px",lineHeight:1,flexShrink:0}}><UnlockIcon size={12} color="#9a7a30"/></button>}
                                   {view!=="Week"&&filled&&slot.price&&<span style={{fontSize:"12px",color:slot.done?"#3a5a3a":"#a07830"}}>{slot.price}</span>}
-                                  {view!=="Week"&&filled&&(
-                                    <div onClick={function(e){ e.stopPropagation(); if(slot.recurWeeks) openClientProfile(slot.name); }} style={{width:"26px",textAlign:"right",fontSize:"9px",color:slot.isException?"#a07830":"#6a8aaa",flexShrink:0,cursor:slot.recurWeeks?"pointer":"default",lineHeight:1}}>
-                                      {slot.recurWeeks?((slot.recurWeeks===1?"1w":(slot.recurWeeks+"w"))+(slot.isException?"*":"")):""}
+                                  {view!=="Week"&&filled&&(slot.recurWeeks?(
+                                    <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:"2px",width:"50px",flexShrink:0}}>
+                                      <span onClick={function(e){ e.stopPropagation(); openClientProfile(slot.name); }} style={{fontSize:"12px",fontWeight:"bold",color:"#4a8a9a",cursor:"pointer",lineHeight:1,letterSpacing:"0.01em"}}>{(slot.recurWeeks===1?"1w":(slot.recurWeeks+"w"))+(slot.isException?"*":"")}</span>
+                                      <button onClick={function(e){ e.stopPropagation(); if(slot.groupId){var aS=getSlots(dateKey);var gS=aS.map(function(s,i){ return {...s,i}; }).filter(function(s){ return s.groupId===slot.groupId&&s.name; });if(gS.length>1){setGroupRecurModal({dateKey,idx,slot,groupSlots:gS,weeks:null});return;}} setRecurringModal({dateKey,idx,slot}); }} title="Recurring — tap to manage" style={{background:"none",border:"none",cursor:"pointer",padding:"0 1px",color:"#4a8a9a",fontSize:"16px",fontWeight:"bold",lineHeight:1}}>{"↺"}</button>
                                     </div>
-                                  )}
-                                  {view!=="Week"&&filled&&(slot.recurWeeks?<button onClick={function(e){ e.stopPropagation(); if(slot.groupId){var aS=getSlots(dateKey);var gS=aS.map(function(s,i){ return {...s,i}; }).filter(function(s){ return s.groupId===slot.groupId&&s.name; });if(gS.length>1){setGroupRecurModal({dateKey,idx,slot,groupSlots:gS,weeks:null});return;}} setRecurringModal({dateKey,idx,slot}); }} title="Recurring — tap to manage" style={{background:"none",border:"none",cursor:"pointer",padding:"2px 5px",color:"#4a8a9a",fontSize:"16px",fontWeight:"normal",lineHeight:1}}>{"↺"}</button>:<div style={{width:"26px",flexShrink:0}}/>)}
+                                  ):<div style={{width:"50px",flexShrink:0}}/>)}
                                   {view!=="Week"&&filled&&<button onClick={function(e){ e.stopPropagation(); setNoteDraft(slot.note||""); setNoteModal({dateKey,idx,name:slot.name}); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 5px",color:slot.note?"#c9a96e":"#bbb",fontSize:"22px",fontWeight:"bold",lineHeight:1,WebkitTextStroke:"0.6px currentColor"}}>{"✎"}</button>}
                                 </div>
                               )}
@@ -2811,9 +2924,9 @@ export default function TheList() {
                     );
                   })}
                 </div>
-                <div style={{display:"flex",gap:"6px",padding:"6px 14px 8px",paddingBottom:"calc(env(safe-area-inset-bottom,0px) + 8px)",flexShrink:0}}>
-                  <button onClick={function(){ addSlotToBeginning(dateKey); }} style={{flex:1,padding:"9px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ AM</button>
-                  <button onClick={function(){ addSlotToEnd(dateKey); }} style={{flex:1,padding:"9px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ PM</button>
+                <div style={{display:"flex",gap:"6px",padding:"4px 12px 4px",paddingBottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",flexShrink:0}}>
+                  <button onClick={function(){ addSlotToBeginning(dateKey); }} style={{flex:1,padding:"7px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ AM</button>
+                  <button onClick={function(){ addSlotToEnd(dateKey); }} style={{flex:1,padding:"7px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ PM</button>
                 </div>
               </div>
             );
