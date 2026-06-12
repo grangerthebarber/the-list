@@ -346,6 +346,11 @@ export default function TheList() {
   const dragPosRef = useRef({x:0,y:0});
   const dragOverRef = useRef(null);
   const dragStateRef = useRef(null);
+  // Persistent element + pointer id used to pointer-capture a live drag so that
+  // switching views mid-drag (which unmounts the source row) can't abort the
+  // gesture. Capture is taken on the app root, which never unmounts.
+  const appRootRef = useRef(null);
+  const dragPointerId = useRef(null);
   const bannerTimer = useRef(null);
   const longPressTimer = useRef(null);
   const checkoffLongPress = useRef(null);
@@ -716,6 +721,12 @@ export default function TheList() {
   const startEdit = function(dateKey, idx, defer) {
     var slot = getSlots(dateKey)[idx];
     var occupied = !!slot.name;
+    // If this slot was just emptied, drop its "recently removed" pink the instant
+    // an edit starts. Otherwise the pink wins the background and the user gets no
+    // visual confirmation the field is live, so they keep tapping the already-
+    // focused input — which is what summons the iOS AutoFill callout.
+    var rmKey = dateKey + "-" + idx;
+    setRecentlyRemoved(function(r){ if(!r[rmKey]) return r; var n={...r}; delete n[rmKey]; return n; });
     editingRef.current = {dateKey,idx};
     setEditingCell({dateKey,idx});
     setEditValues({name:slot.name||"",price:slot.price||""});
@@ -1141,6 +1152,85 @@ export default function TheList() {
     setCheckoffModal(null); setNudgedDate(null); setCheckoffCalMonth(null); setCheckoffRecur(null); setRecurPickerOpen(false);
   };
 
+  // Recurring, pick-the-slot flow: instead of asking for a start date in the
+  // modal, jump straight to (source date + N weeks) in Day view and let the user
+  // tap the exact open slot. The tapped slot becomes the recurring anchor.
+  const startRecurringPlacement = function(weeks) {
+    if (!checkoffModal || !weeks) return;
+    var slot = checkoffModal.slot;
+    var srcDateKey = checkoffModal.dateKey;
+    var srcIdx = checkoffModal.idx;
+    var targetDate = addWeeks(parseDateKey(srcDateKey), weeks);
+    var gTimes = (checkoffModal.groupTimes && checkoffModal.groupTimes.length>1)
+      ? checkoffModal.groupTimes.map(function(t){ return {time:t.time,price:t.price}; })
+      : null;
+    setPlacingClient({
+      name:slot.name, price:slot.price,
+      originalDateKey:null, originalIdx:null,
+      recurBook:true, weeks:weeks,
+      srcDateKey:srcDateKey, srcIdx:srcIdx,
+      groupTimes:gTimes
+    });
+    setBaseDate(targetDate); setView("Day");
+    setCheckoffModal(null); setNudgedDate(null); setCheckoffCalMonth(null); setCheckoffRecur(null); setRecurPickerOpen(false);
+  };
+
+  // Book a recurring series anchored on a tapped slot. Single bookings recur at
+  // the tapped slot's own time; group bookings keep their original spread of
+  // times on the chosen day. Series runs six months out, every N weeks.
+  const bookRecurringFromPlacement = function(targetDateKey, targetIdx, client) {
+    var weeks = client.weeks;
+    if (!weeks) return false;
+    var anchor = getSlots(targetDateKey)[targetIdx];
+    if (!anchor || anchor.name || anchor.blocked) return false;
+    var times = (client.groupTimes && client.groupTimes.length>1)
+      ? client.groupTimes.map(function(t){ return {time:t.time,price:t.price,recurWeeks:weeks}; })
+      : [{time:anchor.time,price:client.price,recurWeeks:weeks}];
+    var nameLower = (client.name||"").toLowerCase();
+    var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
+    pushUndo(snapshot);
+    var newSchedules = {...schedulesRef.current};
+    var placeOnDate = function(dk, allowOverwriteSame) {
+      var daySlots = newSchedules[dk]
+        ? [...newSchedules[dk]]
+        : DEFAULT_TIMES.map(function(t){ return {time:t,name:"",price:"",done:false,recurWeeks:null}; });
+      var dgid = times.length>1 ? newGroupId() : null;
+      times.forEach(function(t){
+        var si = daySlots.findIndex(function(s){ return s.time===t.time; });
+        if (si>=0) {
+          var taken = daySlots[si].name && daySlots[si].name.toLowerCase()!==nameLower;
+          if (!taken && (allowOverwriteSame || !daySlots[si].name)) {
+            daySlots[si] = {...daySlots[si],name:client.name,price:t.price,recurWeeks:t.recurWeeks,isException:true,done:false,groupId:dgid};
+          }
+        } else {
+          daySlots.push({time:t.time,name:client.name,price:t.price,recurWeeks:t.recurWeeks,isException:true,done:false,groupId:dgid});
+        }
+      });
+      daySlots.sort(function(a,b){ return parseTime(a.time)-parseTime(b.time); });
+      newSchedules[dk] = daySlots;
+    };
+    placeOnDate(targetDateKey, true);
+    var sixMo = new Date(); sixMo.setMonth(sixMo.getMonth()+6);
+    var cur = parseDateKey(targetDateKey);
+    while (true) {
+      cur = addWeeks(cur,weeks);
+      if (cur>sixMo) break;
+      placeOnDate(formatDateKey(cur), false);
+    }
+    // Mark the originating (just-checked-off) slot recurring too, so its row badges.
+    if (client.srcDateKey && newSchedules[client.srcDateKey]) {
+      var ss = [...newSchedules[client.srcDateKey]];
+      var sIdx = client.srcIdx;
+      if (ss[sIdx] && ss[sIdx].name && ss[sIdx].name.toLowerCase()===nameLower) {
+        ss[sIdx] = {...ss[sIdx],recurWeeks:weeks};
+        newSchedules[client.srcDateKey] = ss;
+      }
+    }
+    setSchedules(newSchedules);
+    addHistoryEntry({type:"added",time:anchor.time,name:client.name,price:client.price,dateKey:targetDateKey});
+    return true;
+  };
+
   const jumpToDate = function(dateKey) {
     setBaseDate(parseDateKey(dateKey)); setView("Day");
     setCheckoffModal(null); setNudgedDate(null); setCheckoffCalMonth(null);
@@ -1282,6 +1372,10 @@ export default function TheList() {
       var rem=slots.filter(function(x){ return x.groupId===groupId&&x.name; });
       if (rem.length===1) { var ri=slots.findIndex(function(x){ return x.groupId===groupId&&x.name; }); if(ri>=0) slots[ri]={...slots[ri],groupId:null}; }
       addHistoryEntry({type:"removed",time:s.time,name:s.name,dateKey});
+      if (editingRef.current && editingRef.current.dateKey===dateKey && editingRef.current.idx===onlyIdx) {
+        editingRef.current=null; setEditingCell(null); setEditingOccupied(false);
+      }
+      try { if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); } catch(e) {}
       var gk=dateKey+"-"+onlyIdx;
       setRecentlyRemoved(function(r){ return {...r,[gk]:true}; });
       setTimeout(function(){ setRecentlyRemoved(function(r){ var n={...r}; delete n[gk]; return n; }); },8000);
@@ -1306,6 +1400,12 @@ export default function TheList() {
     slots[idx]={...slots[idx],name:"",price:"",done:false,recurWeeks:null,isException:false,pending:false,availStatus:null};
     setSlots(dateKey,slots);
     addHistoryEntry({type:"removed",time:slot.time,name:slot.name,price:slot.price,dateKey});
+    // Drop any stale edit focus on the slot being emptied so iOS doesn't keep a
+    // hidden focused input around (which is what triggers the AutoFill callout).
+    if (editingRef.current && editingRef.current.dateKey===dateKey && editingRef.current.idx===idx) {
+      editingRef.current=null; setEditingCell(null); setEditingOccupied(false);
+    }
+    try { if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); } catch(e) {}
     var key=dateKey+"-"+idx;
     setRecentlyRemoved(function(r){ return {...r,[key]:true}; });
     setTimeout(function(){ setRecentlyRemoved(function(r){ var n={...r}; delete n[key]; return n; }); },8000);
@@ -1394,6 +1494,26 @@ export default function TheList() {
     touchStart.current=null;
   };
 
+  // Redirect all subsequent pointer events for the active drag to the app root,
+  // so a view switch that unmounts the source row can't fire pointercancel and
+  // kill the drag. Wrapped in try/catch: if iOS refuses capture, the drag simply
+  // degrades to the previous window-listener behavior.
+  const captureDragPointer = function() {
+    try {
+      if (appRootRef.current && dragPointerId.current!=null && appRootRef.current.setPointerCapture) {
+        appRootRef.current.setPointerCapture(dragPointerId.current);
+      }
+    } catch(e) {}
+  };
+  const releaseDragPointer = function() {
+    try {
+      if (appRootRef.current && dragPointerId.current!=null && appRootRef.current.releasePointerCapture) {
+        appRootRef.current.releasePointerCapture(dragPointerId.current);
+      }
+    } catch(e) {}
+    dragPointerId.current = null;
+  };
+
   const startDragLongPress = function(dateKey, idx, touchX, touchY, isTouch) {
     if (dragLongPress.current) { clearTimeout(dragLongPress.current); dragLongPress.current = null; }
     dragTouchStart.current = {x: touchX||0, y: touchY||0};
@@ -1416,6 +1536,7 @@ export default function TheList() {
           dragPosRef.current = {x:startX, y:startY};
           dragOverRef.current = null; setDragOverKey(null);
           setIsLiveDragging(true);
+          captureDragPointer();
         } else {
           setDragCalOpen(true); setDragCalMonth(new Date()); setDragCalHover(true);
         }
@@ -1434,6 +1555,7 @@ export default function TheList() {
             dragPosRef.current = {x:startX, y:startY};
             dragOverRef.current = null; setDragOverKey(null);
             setIsLiveDragging(true);
+            captureDragPointer();
           } else {
             setDragCalOpen(true); setDragCalMonth(new Date()); setDragCalHover(true);
           }
@@ -1448,6 +1570,7 @@ export default function TheList() {
         dragPosRef.current = {x:startX, y:startY};
         dragOverRef.current = null; setDragOverKey(null);
         setIsLiveDragging(true);
+        captureDragPointer();
         playSound("lock");
       } else {
         // Mouse / desktop fallback: open the date picker.
@@ -1476,9 +1599,16 @@ export default function TheList() {
   const placeClientInSlot = function(targetDateKey, targetIdx) {
     var client = placingClient;
     if (!client) return;
-    if (client.originalDateKey === targetDateKey && client.originalIdx === targetIdx) { setPlacingClient(null); return; }
     var targetSlot = getSlots(targetDateKey)[targetIdx];
     if (!targetSlot || targetSlot.name || targetSlot.blocked) return;
+    // Recurring placement: the tapped slot anchors a whole series. No original
+    // slot to vacate (this came from the check-off flow, not a move).
+    if (client.recurBook) {
+      var ok = bookRecurringFromPlacement(targetDateKey, targetIdx, client);
+      if (ok) setPlacingClient(null);
+      return;
+    }
+    if (client.originalDateKey === targetDateKey && client.originalIdx === targetIdx) { setPlacingClient(null); return; }
     var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
     pushUndo(snapshot);
     if (client.originalDateKey === targetDateKey) {
@@ -1658,29 +1788,36 @@ export default function TheList() {
       while (el && !(el.dataset && el.dataset.viewtab)) el = el.parentElement;
       return (el && el.dataset && el.dataset.viewtab) ? el.dataset.viewtab : null;
     };
+    // A drop that lands on a Month-view day cell: open that day so the move can be
+    // finished with a single tap-to-place.
+    var findMonthDayKey = function(x, y) {
+      var el = document.elementFromPoint(x, y);
+      while (el && !(el.dataset && el.dataset.monthday)) el = el.parentElement;
+      return (el && el.dataset && el.dataset.monthday) ? el.dataset.monthday : null;
+    };
+    // Only act on the pointer that started this drag (ignore stray pointers).
+    var mine = function(e) { return dragPointerId.current==null || e.pointerId===dragPointerId.current; };
     var onMove = function(e) {
-      var t = e.touches && e.touches[0];
-      if (!t) return;
-      e.preventDefault();
-      dragPosRef.current = {x:t.clientX, y:t.clientY};
-      if (dragChipRef.current) dragChipRef.current.style.transform = "translate(" + (t.clientX + 14) + "px," + (t.clientY - 22) + "px)";
-      // Hovering a view tab while dragging jumps into that view so off-screen days become reachable.
-      var vt = findViewTab(t.clientX, t.clientY);
+      if (!mine(e)) return;
+      var px = e.clientX; var py = e.clientY;
+      dragPosRef.current = {x:px, y:py};
+      if (dragChipRef.current) dragChipRef.current.style.transform = "translate(" + (px + 14) + "px," + (py - 22) + "px)";
+      // Hovering a view tab while dragging jumps into that view so off-screen days
+      // become reachable. Pointer capture keeps the gesture alive across the switch.
+      var vt = findViewTab(px, py);
       if (vt && vt !== viewRef.current) {
         if (vt === "Wknd") setBaseDate(getUpcomingWeekend());
         setView(vt);
       }
       var ds = dragStateRef.current;
-      var key = (ds && ds.multi) ? findAnyRowKey(t.clientX, t.clientY) : findDropKeyNear(t.clientX, t.clientY);
+      var key = (ds && ds.multi) ? findAnyRowKey(px, py) : findDropKeyNear(px, py);
       if (key !== dragOverRef.current) { dragOverRef.current = key; setDragOverKey(key); }
     };
     var onEnd = function(e) {
-      if (e.cancelable) e.preventDefault();
+      if (!mine(e)) return;
       var ds = dragStateRef.current;
-      // Figure out where the finger actually let go.
-      var t = e.changedTouches && e.changedTouches[0];
-      var px = t ? t.clientX : (dragPosRef.current ? dragPosRef.current.x : null);
-      var py = t ? t.clientY : (dragPosRef.current ? dragPosRef.current.y : null);
+      var px = (e.clientX!=null) ? e.clientX : (dragPosRef.current ? dragPosRef.current.x : null);
+      var py = (e.clientY!=null) ? e.clientY : (dragPosRef.current ? dragPosRef.current.y : null);
       var landed = false;
       if (ds && ds.multi) {
         var anyKey = dragOverRef.current || (px!=null ? findAnyRowKey(px, py) : null);
@@ -1694,6 +1831,11 @@ export default function TheList() {
             landed = dropMultiOnDay(dayKey);
           }
         }
+        // Dropped on a Month-view day: drop everyone onto that day.
+        if (!landed && px!=null) {
+          var mdkM = findMonthDayKey(px, py);
+          if (mdkM) landed = dropMultiOnDay(mdkM);
+        }
       } else {
         var key = dragOverRef.current;
         if (!key && px!=null) key = findDropKeyNear(px, py);
@@ -1701,23 +1843,34 @@ export default function TheList() {
           var parts = key.split("-"); var di = parseInt(parts[parts.length-1]); var dk2 = parts.slice(0,parts.length-1).join("-");
           landed = dropPickedUpOnSlot(dk2, di);
         }
-        // Released somewhere that wasn't an open slot (e.g. after switching views
-        // mid-drag): don't drop the move on the floor. Hand the still-intact
-        // appointment to tap-to-place so the next tap on any open slot — in any
-        // view — completes it. The original slot is untouched until then.
+        // Dropped on a Month-view day cell: open that day in Day view and finish
+        // the move with one tap-to-place on whatever open slot they choose.
+        if (!landed && px!=null) {
+          var mdk = findMonthDayKey(px, py);
+          if (mdk) {
+            setBaseDate(parseDateKey(mdk)); setView("Day");
+            if (ds && ds.clients && ds.clients[0]) setPlacingClient(ds.clients[0]);
+            landed = true;
+          }
+        }
+        // Released somewhere that wasn't an open slot (e.g. mid-switch): don't drop
+        // the move on the floor. Hand the still-intact appointment to tap-to-place
+        // so the next tap on any open slot — in any view — completes it.
         if (!landed && ds && ds.clients && ds.clients[0]) {
           setPlacingClient(ds.clients[0]);
         }
       }
+      releaseDragPointer();
       setIsLiveDragging(false);
       dragOverRef.current = null; setDragOverKey(null);
       setDragState(null);
     };
-    var onCancel = function() {
-      // The OS aborted the touch — almost always because switching views mid-drag
-      // unmounted the source row. Don't lose the appointment: complete the drop if
-      // the finger was over an open slot, otherwise hand a single move off to
-      // tap-to-place (works across any view) and a group/multi move to the picker.
+    var onCancel = function(e) {
+      if (!mine(e)) return;
+      // Rare with pointer capture, but if the OS still aborts: complete the drop if
+      // the finger was over an open slot, otherwise hand a single move to
+      // tap-to-place and a group/multi move to the picker.
+      releaseDragPointer();
       setIsLiveDragging(false);
       var overKey = dragOverRef.current;
       dragOverRef.current = null; setDragOverKey(null);
@@ -1735,13 +1888,19 @@ export default function TheList() {
         setDragState(null);
       }
     };
-    window.addEventListener("touchmove", onMove, {passive:false});
-    window.addEventListener("touchend", onEnd);
-    window.addEventListener("touchcancel", onCancel);
+    // Suppress Safari's scroll-takeover for the duration of the drag. Pointer
+    // capture mostly handles this, but a non-passive touchmove block is the only
+    // thing iOS standalone PWAs reliably honor.
+    var touchBlocker = function(ev) { if (ev.cancelable) ev.preventDefault(); };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onEnd);
+    window.addEventListener("pointercancel", onCancel);
+    window.addEventListener("touchmove", touchBlocker, {passive:false});
     return function() {
-      window.removeEventListener("touchmove", onMove, {passive:false});
-      window.removeEventListener("touchend", onEnd);
-      window.removeEventListener("touchcancel", onCancel);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onEnd);
+      window.removeEventListener("pointercancel", onCancel);
+      window.removeEventListener("touchmove", touchBlocker, {passive:false});
     };
   }, [isLiveDragging]);
 
@@ -1883,12 +2042,15 @@ export default function TheList() {
   var canRedo = redoStack.length>0;
 
   return (
-    <div style={{height:"100dvh",overflow:"hidden",boxSizing:"border-box",display:"flex",flexDirection:"column",background:"#ffffff",fontFamily:"Georgia,serif",color:"#1a1a1a",paddingTop:(reassignMode||placingClient)?"calc(env(safe-area-inset-top,0px) + 52px)":"0"}}
+    <div ref={appRootRef} style={{height:"100dvh",overflow:"hidden",boxSizing:"border-box",display:"flex",flexDirection:"column",background:"#ffffff",fontFamily:"Georgia,serif",color:"#1a1a1a",paddingTop:(reassignMode||placingClient)?"calc(env(safe-area-inset-top,0px) + 52px)":"0"}}
       onMouseUp={function(){ endSelectDrag(); if(dragState&&!dragCalHover) { setDragState(null); setDragCalOpen(false); } }}
       onTouchEnd={function(){ endSelectDrag(); }}>
 
+      {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2500,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",pointerEvents:"none",fontFamily:"Georgia,serif"}}>v5</div>
+
       {banner && (
-        <div style={{position:"fixed",top:listTopY>0?(Math.max(4,listTopY/2-14)+"px"):"calc(env(safe-area-inset-top,0px) + 4px)",left:"50%",transform:"translateX(-50%)",zIndex:2000,background:getBannerColor(banner.type),color:"#fff",padding:"6px 14px",borderRadius:"20px",fontSize:"12px",letterSpacing:"0.04em",boxShadow:"0 2px 12px rgba(0,0,0,0.2)",display:"flex",alignItems:"center",gap:"12px",maxWidth:"90vw",pointerEvents:"auto"}}>
+        <div style={{position:"fixed",top:listTopY>0?(listTopY/2+"px"):"calc(env(safe-area-inset-top,0px) + 8px)",left:"50%",transform:listTopY>0?"translate(-50%,-50%)":"translateX(-50%)",zIndex:2000,background:getBannerColor(banner.type),color:"#fff",padding:"6px 14px",borderRadius:"20px",fontSize:"12px",letterSpacing:"0.04em",boxShadow:"0 2px 12px rgba(0,0,0,0.2)",display:"flex",alignItems:"center",gap:"12px",maxWidth:"90vw",pointerEvents:"auto"}}>
           <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{describeBanner(banner)}</span>
           {(banner.type!=="undo"&&banner.type!=="redo"&&canUndo)&&(
             <button onClick={handleUndo} title="Undo" style={{background:"rgba(255,255,255,0.22)",border:"none",borderRadius:"10px",color:"#fff",padding:"4px 9px",cursor:"pointer",fontFamily:"inherit",flexShrink:0,display:"flex",alignItems:"center"}}><UndoIcon size={15} color="#fff"/></button>
@@ -2081,8 +2243,10 @@ export default function TheList() {
       {placingClient && !reassignMode && (
         <div style={{position:"fixed",top:0,left:0,right:0,zIndex:900,background:"#1a1a1a",color:"#fff",padding:"12px 20px",paddingTop:"calc(env(safe-area-inset-top,0px) + 12px)",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
           <div>
-            <div style={{fontSize:"11px",letterSpacing:"0.15em",textTransform:"uppercase",color:"#c9a96e",marginBottom:"2px"}}>Moving</div>
-            <div style={{fontSize:"14px"}}>Tap any open slot to place <strong>{placingClient.name}</strong></div>
+            <div style={{fontSize:"11px",letterSpacing:"0.15em",textTransform:"uppercase",color:"#c9a96e",marginBottom:"2px"}}>{placingClient.recurBook?"Recurring":"Moving"}</div>
+            {placingClient.recurBook
+              ? (<div style={{fontSize:"14px"}}>Tap a slot for <strong>{placingClient.name}</strong> — repeats every {placingClient.weeks===1?"week":(placingClient.weeks+" weeks")}</div>)
+              : (<div style={{fontSize:"14px"}}>Tap any open slot to place <strong>{placingClient.name}</strong></div>)}
           </div>
           <button onClick={function(){ setPlacingClient(null); }} style={{background:"none",border:"1px solid #444",borderRadius:"6px",color:"#888",padding:"6px 12px",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>Cancel</button>
         </div>
@@ -2196,7 +2360,7 @@ export default function TheList() {
                     <div style={{display:"flex",alignItems:"center",gap:"6px",flexWrap:"wrap"}}>
                       <span style={{fontSize:"12px",color:"#888"}}>Every</span>
                       {[1,2,3,4,5,6,7,8].map(function(n){
-                        return <button key={n} onClick={function(){ setCheckoffRecur(n); setRecurPickerOpen(false); }} style={{minWidth:"34px",padding:"7px 0",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"8px",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",color:"#1a1a1a"}}>{n}w</button>;
+                        return <button key={n} onClick={function(){ startRecurringPlacement(n); }} style={{minWidth:"34px",padding:"7px 0",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"8px",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",color:"#1a1a1a"}}>{n}w</button>;
                       })}
                       <button onClick={function(){ setRecurPickerOpen(false); }} style={{background:"none",border:"none",color:"#aaa",fontSize:"16px",cursor:"pointer",padding:"2px 4px",lineHeight:1}}>{"×"}</button>
                     </div>
@@ -2303,7 +2467,13 @@ export default function TheList() {
       {timeEditModal && (function(){
         var workingTime = absMinutesToTime(timeEditMinutes);
         var slot = getSlots(timeEditModal.dateKey)[timeEditModal.idx] || {};
-        var isDefaultTime = DEFAULT_TIMES.indexOf(workingTime) >= 0;
+        // Color the working time the same way the main list does: cobalt when it's
+        // earlier than this slot's default base, matched-purple when later. Custom
+        // slots keep the teal "custom" treatment.
+        var tmIsCustom = slot.isCustom===true || (slot.isCustom===undefined && DEFAULT_TIMES.indexOf(slot.time)===-1);
+        var tmBase = slot.defaultBaseTime || timeEditModal.original;
+        var tmShift = (!tmIsCustom && tmBase && workingTime!==tmBase) ? (timeToAbsMinutes(workingTime)<timeToAbsMinutes(tmBase) ? "earlier" : "later") : null;
+        var tmColor = tmShift==="earlier" ? "#2a4fd6" : tmShift==="later" ? "#742AD6" : tmIsCustom ? "#2f7d8a" : "#1a1a1a";
         // Inverted on purpose: the +5/+1 buttons subtract and the −5/−1 buttons add,
         // keeping the same labels and positions but flipping the effect.
         var nudge = function(delta){ return function(){ setTimeEditMinutes(function(m){ return m - delta; }); }; };
@@ -2314,8 +2484,9 @@ export default function TheList() {
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#a07830",marginBottom:"8px"}}>Adjust Time</div>
             {slot.name&&<div style={{fontSize:"14px",color:"#1a1a1a",marginBottom:"2px"}}>{slot.name}</div>}
             <div style={{display:"flex",alignItems:"baseline",gap:"10px",marginBottom:"4px"}}>
-              <div style={{fontSize:"34px",color:isDefaultTime?"#1a1a1a":"#2f7d8a",fontWeight:isDefaultTime?"normal":"bold",lineHeight:1.1}}>{workingTime}</div>
-              {!isDefaultTime&&<div style={{fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",color:"#2f7d8a"}}>custom</div>}
+              <div style={{fontSize:"34px",color:tmColor,fontWeight:(tmShift||tmIsCustom)?"bold":"normal",lineHeight:1.1}}>{workingTime}</div>
+              {tmShift&&<div style={{fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",color:tmColor}}>{tmShift}</div>}
+              {!tmShift&&tmIsCustom&&<div style={{fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",color:"#2f7d8a"}}>custom</div>}
             </div>
             <div style={{fontSize:"12px",color:"#aaa",marginBottom:"18px"}}>Default was {timeEditModal.original}</div>
             <div style={{display:"flex",gap:"8px",marginBottom:"8px"}}>
@@ -2503,7 +2674,7 @@ export default function TheList() {
                   })()}
                   <button onClick={function(e){ e.stopPropagation(); setNoteDraft(dayNotes[dateKey]||""); setNoteModal({dayKey:dateKey,isDay:true,name:friendlyDateLong(dateKey)}); }} title="Note for the day" style={{background:"none",border:"none",cursor:"pointer",padding:"0 2px",color:dayNotes[dateKey]?"#c9a96e":"#bbb",fontSize:"26px",lineHeight:1,flexShrink:0,WebkitTextStroke:"0.5px currentColor"}}>{"✎"}</button>
                 </div>
-                <div data-slotscroll="1" style={{flex:1,minHeight:0,paddingBottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",overflowX:"hidden",overscrollBehavior:"contain"}}
+                <div data-slotscroll="1" style={{flex:1,minHeight:0,paddingBottom:"2px",overflowX:"hidden",overscrollBehavior:"contain"}}
                   onTouchMove={function(e){
                     if (!selectDragAnchor.current) return;
                     var t=e.touches[0]; if(!t) return;
@@ -2522,7 +2693,7 @@ export default function TheList() {
                     var isOccEdit=isEditing&&editingOccupied;
                     var isSelected=selectMode&&!!selectedSlots[rowKey];
                     var isDragging=dragState&&dragState.sourceKey===rowKey;
-                    var slotBg=slot.blocked?"#f4f4f2":wasRemoved?"#fff0ee":isOccEdit?"#fff0ee":isSelected?"#f0f4ff":slot.done?"#f4faf4":(isEditing&&editChromeReady)?"#f0f0ee":filled?"#fcfcfa":"transparent";
+                    var slotBg=slot.blocked?"#f4f4f2":(wasRemoved&&!isEditing)?"#fff0ee":isOccEdit?"#fff0ee":isSelected?"#f0f4ff":slot.done?"#f4faf4":(isEditing&&editChromeReady)?"#f0f0ee":filled?"#fcfcfa":"transparent";
                     var isCustomSlot=slot.isCustom===true||(slot.isCustom===undefined&&!DEFAULT_TIMES.includes(slot.time));
                     var defShift=(!isCustomSlot&&slot.defaultBaseTime&&slot.time!==slot.defaultBaseTime)?(timeToAbsMinutes(slot.time)<timeToAbsMinutes(slot.defaultBaseTime)?"earlier":"later"):null;
                     var isDropTarget=isLiveDragging&&dragOverKey===rowKey&&!filled&&!slot.blocked;
@@ -2579,7 +2750,7 @@ export default function TheList() {
                             onClick={function(e){ e.stopPropagation(); if(placingClient){ if(!filled) placeClientInSlot(dateKey,idx); return; } if(!isEditing&&!selectMode&&!isLiveDragging&&!(reassignMode&&reassignMode.currentDateKey===dateKey)) openTimeEdit(dateKey,idx); }}
                             onMouseDown={function(e){ e.stopPropagation(); }}
                             onTouchStart={function(e){ e.stopPropagation(); }}
-                            style={{fontSize:"12px",color:defShift==="earlier"?"#2a4fd6":defShift==="later"?"#8a4fd6":slot.customTime?"#2f7d8a":(filled?"#c9a96e":"#2e2e2e"),fontWeight:(slot.customTime||defShift)?"bold":"normal",width:"40px",flexShrink:0,fontVariantNumeric:"tabular-nums",letterSpacing:"0.02em",userSelect:"none",WebkitUserSelect:"none",cursor:"pointer"}}>{slot.time}</div>
+                            style={{fontSize:"12px",color:defShift==="earlier"?"#2a4fd6":defShift==="later"?"#742AD6":slot.customTime?"#2f7d8a":(filled?"#c9a96e":"#2e2e2e"),fontWeight:(slot.customTime||defShift)?"bold":"normal",width:"40px",flexShrink:0,fontVariantNumeric:"tabular-nums",letterSpacing:"0.02em",userSelect:"none",WebkitUserSelect:"none",cursor:"pointer"}}>{slot.time}</div>
                           {slot.blocked?(
                             <div onClick={function(){ toggleBlockSlot(dateKey,idx,null); }} style={{flex:1,display:"flex",alignItems:"center",cursor:"pointer"}}>
                               <span style={{fontSize:"12px",color:slot.done?"#3a5a3a":"#aaa",fontStyle:"italic"}}>{slot.blockLabel||"Blocked"}</span>
@@ -2591,6 +2762,7 @@ export default function TheList() {
                           ):(
                             <div style={{flex:1,minWidth:0,display:"flex",alignItems:"center",gap:"4px"}}
                               onClick={function(){ if(filled&&slot.done) handleDoneRowTap(dateKey,idx); else if(!filled&&!slot.blocked){ if(slot.availStatus) startEdit(dateKey,idx,false); else handleOpenSlotTap(dateKey,idx); } }}
+                              onPointerDown={function(e){ dragPointerId.current=e.pointerId; }}
                               onMouseDown={function(){ if(filled&&!slot.done&&!isEditing&&(!selectMode||selectedSlots[rowKey])) startDragLongPress(dateKey,idx,0,0); }}
                               onMouseUp={function(){ cancelDragLongPress(); }}
                               onMouseLeave={cancelDragLongPress}
@@ -2638,10 +2810,10 @@ export default function TheList() {
                       </div>
                     );
                   })}
-                  <div style={{display:"flex",gap:"6px",padding:"6px 14px 8px"}}>
-                    <button onClick={function(){ addSlotToBeginning(dateKey); }} style={{flex:1,padding:"9px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ AM</button>
-                    <button onClick={function(){ addSlotToEnd(dateKey); }} style={{flex:1,padding:"9px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ PM</button>
-                  </div>
+                </div>
+                <div style={{display:"flex",gap:"6px",padding:"6px 14px 8px",paddingBottom:"calc(env(safe-area-inset-bottom,0px) + 8px)",flexShrink:0}}>
+                  <button onClick={function(){ addSlotToBeginning(dateKey); }} style={{flex:1,padding:"9px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ AM</button>
+                  <button onClick={function(){ addSlotToEnd(dateKey); }} style={{flex:1,padding:"9px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ PM</button>
                 </div>
               </div>
             );
