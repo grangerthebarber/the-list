@@ -1,4 +1,19 @@
 import { useState, useRef, useCallback, useEffect } from "react";
+import { initializeApp } from "firebase/app";
+import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail, signOut } from "firebase/auth";
+import { getFirestore, doc, onSnapshot, setDoc, serverTimestamp } from "firebase/firestore";
+
+var firebaseConfig = {
+  apiKey: "AIzaSyBJhakukEUD2n84bo6ccdV4I2bwVYY8arM",
+  authDomain: "the-list-9efdb.firebaseapp.com",
+  projectId: "the-list-9efdb",
+  storageBucket: "the-list-9efdb.firebasestorage.app",
+  messagingSenderId: "17185461265",
+  appId: "1:17185461265:web:fda3224257665a88964db0"
+};
+var fbApp = initializeApp(firebaseConfig);
+var fbAuth = getAuth(fbApp);
+var fbDb = getFirestore(fbApp);
 
 const ALL_TIMES = [
   "4:59","5:21","5:43","6:06","6:28","6:51",
@@ -394,6 +409,26 @@ export default function TheList() {
   // When set (2-8), the next booking made from the checkoff/quick-book modal recurs every N weeks.
   const [checkoffRecur, setCheckoffRecur] = useState(null);
   const [recurPickerOpen, setRecurPickerOpen] = useState(false);
+  // --- Firebase auth + cloud-sync state (cloud migration) ---
+  const [authChecked, setAuthChecked] = useState(false);
+  const [authUser, setAuthUser] = useState(null);
+  const [hydrated, setHydrated] = useState(false);
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authMode, setAuthMode] = useState("signin");
+  const [authError, setAuthError] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authNotice, setAuthNotice] = useState("");
+  const clientMemoryRef = useRef(clientMemory);
+  clientMemoryRef.current = clientMemory;
+  const customHolidaysRef = useRef(customHolidays);
+  customHolidaysRef.current = customHolidays;
+  const historyRef = useRef(history);
+  historyRef.current = history;
+  const dayNotesRef = useRef(dayNotes);
+  dayNotesRef.current = dayNotes;
+  const lastSyncRef = useRef(null);
+  const saveTimer = useRef(null);
 
   // Single source of truth for two layout concerns that CSS can't handle on iOS:
   //  1. Phantom scrolling — toggle each list column's overflowY to "auto" ONLY when
@@ -449,6 +484,61 @@ export default function TheList() {
   useEffect(function() { try { localStorage.setItem("tl_holidays", JSON.stringify(customHolidays)); } catch(e) {} }, [customHolidays]);
   useEffect(function() { try { localStorage.setItem("tl_history", JSON.stringify(history)); } catch(e) {} }, [history]);
   useEffect(function() { try { localStorage.setItem("tl_daynotes", JSON.stringify(dayNotes)); } catch(e) {} }, [dayNotes]);
+
+  useEffect(function() {
+    var unsub = onAuthStateChanged(fbAuth, function(u) {
+      if (u) { setAuthUser({uid:u.uid, email:u.email}); }
+      else { setAuthUser(null); setHydrated(false); lastSyncRef.current = null; }
+      setAuthChecked(true);
+    });
+    return function() { try { unsub(); } catch(e) {} };
+  }, []);
+
+  useEffect(function() {
+    if (!authUser) return;
+    var userDoc = doc(fbDb, "users", authUser.uid);
+    var first = true;
+    var unsub = onSnapshot(userDoc, function(snap) {
+      if (!snap.exists()) {
+        if (first) {
+          first = false;
+          var seedSch = migrateSchedules(schedulesRef.current || {});
+          var seeded = {schedules:seedSch, clients:clientMemoryRef.current, holidays:customHolidaysRef.current, history:historyRef.current, dayNotes:dayNotesRef.current};
+          lastSyncRef.current = JSON.stringify(seeded);
+          try { setDoc(userDoc, {schedules:seedSch, clients:seeded.clients, holidays:seeded.holidays, history:seeded.history, dayNotes:seeded.dayNotes, updatedAt:serverTimestamp()}, {merge:true}); } catch(e) {}
+          setHydrated(true);
+        }
+        return;
+      }
+      var data = snap.data() || {};
+      var migrated = migrateSchedules(data.schedules || {});
+      var applied = {schedules:migrated, clients:data.clients||[], holidays:data.holidays||[], history:data.history||[], dayNotes:data.dayNotes||{}};
+      var json = JSON.stringify(applied);
+      if (!first && json === lastSyncRef.current) return;
+      first = false;
+      lastSyncRef.current = json;
+      setSchedules(migrated);
+      setClientMemory(applied.clients);
+      setCustomHolidays(applied.holidays);
+      setHistory(applied.history);
+      setDayNotes(applied.dayNotes);
+      setHydrated(true);
+    }, function(err) { setHydrated(true); });
+    return function() { try { unsub(); } catch(e) {} };
+  }, [authUser]);
+
+  useEffect(function() {
+    if (!hydrated || !authUser) return;
+    var payload = {schedules:schedules, clients:clientMemory, holidays:customHolidays, history:history, dayNotes:dayNotes};
+    var json = JSON.stringify(payload);
+    if (json === lastSyncRef.current) return;
+    lastSyncRef.current = json;
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    var uid = authUser.uid;
+    saveTimer.current = setTimeout(function() {
+      try { setDoc(doc(fbDb, "users", uid), {schedules:payload.schedules, clients:payload.clients, holidays:payload.holidays, history:payload.history, dayNotes:payload.dayNotes, updatedAt:serverTimestamp()}, {merge:true}); } catch(e) {}
+    }, 600);
+  }, [schedules, clientMemory, customHolidays, history, dayNotes, hydrated, authUser]);
 
   // Stop the whole page from bouncing/scrolling when there is nothing under the
   // list. iOS standalone PWAs ignore CSS overscroll-behavior, so the only thing
@@ -1559,7 +1649,7 @@ export default function TheList() {
   };
 
   const exportData = function() {
-    var data = {schedules:schedulesRef.current, clients:clientMemory, holidays:customHolidays, exportedAt:new Date().toISOString()};
+    var data = {schedules:schedulesRef.current, clients:clientMemory, holidays:customHolidays, history:history, dayNotes:dayNotes, exportedAt:new Date().toISOString()};
     var blob = new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
     var url = URL.createObjectURL(blob);
     var a = document.createElement("a");
@@ -1578,6 +1668,8 @@ export default function TheList() {
         if (data.schedules) { setSchedules(migrateSchedules(data.schedules)); }
         if (data.clients) setClientMemory(data.clients);
         if (data.holidays) setCustomHolidays(data.holidays);
+        if (data.history) setHistory(data.history);
+        if (data.dayNotes) setDayNotes(data.dayNotes);
         showBanner({type:"added",name:"Backup restored",time:null,dateKey:null});
       } catch(err) { alert("Couldn't read that file."); }
     };
@@ -2138,13 +2230,56 @@ export default function TheList() {
   var canUndo = undoStack.length>0;
   var canRedo = redoStack.length>0;
 
+  var screenWrap = {height:"100dvh",display:"flex",alignItems:"center",justifyContent:"center",background:"#ffffff",fontFamily:"Georgia,serif",color:"#1a1a1a",padding:"24px",boxSizing:"border-box"};
+  if (!authChecked) {
+    return (<div style={screenWrap}><div style={{color:"#999",fontSize:"14px",letterSpacing:"0.08em"}}>Loading…</div></div>);
+  }
+  if (!authUser) {
+    var doSignIn = function() {
+      if (authBusy) return;
+      setAuthError(""); setAuthNotice(""); setAuthBusy(true);
+      signInWithEmailAndPassword(fbAuth, authEmail.trim(), authPassword).then(function(){ setAuthBusy(false); setAuthPassword(""); }).catch(function(err){ setAuthBusy(false); setAuthError(err && err.message ? err.message : "Could not sign in."); });
+    };
+    var doSignUp = function() {
+      if (authBusy) return;
+      setAuthError(""); setAuthNotice(""); setAuthBusy(true);
+      createUserWithEmailAndPassword(fbAuth, authEmail.trim(), authPassword).then(function(){ setAuthBusy(false); setAuthPassword(""); }).catch(function(err){ setAuthBusy(false); setAuthError(err && err.message ? err.message : "Could not create account."); });
+    };
+    var doReset = function() {
+      if (!authEmail.trim()) { setAuthError("Enter your email first, then tap reset."); return; }
+      setAuthError(""); setAuthNotice("");
+      sendPasswordResetEmail(fbAuth, authEmail.trim()).then(function(){ setAuthNotice("Password reset email sent."); }).catch(function(err){ setAuthError(err && err.message ? err.message : "Could not send reset email."); });
+    };
+    var onAuthKey = function(e) { if (e.key==="Enter") { if (authMode==="signup") doSignUp(); else doSignIn(); } };
+    return (
+      <div style={screenWrap}>
+        <div style={{width:"min(360px,92vw)",border:"1px solid #e4e4e2",borderRadius:"16px",padding:"32px 28px",boxShadow:"0 8px 32px rgba(0,0,0,0.06)"}}>
+          <div style={{fontSize:"11px",letterSpacing:"0.25em",textTransform:"uppercase",color:"#c9a96e",marginBottom:"6px"}}>The List</div>
+          <div style={{fontSize:"22px",marginBottom:"20px"}}>{authMode==="signup"?"Create your account":"Sign in"}</div>
+          <input value={authEmail} onChange={function(e){ setAuthEmail(e.target.value); }} onKeyDown={onAuthKey} placeholder="Email" type="email" autoCapitalize="none" autoCorrect="off" spellCheck={false} style={{width:"100%",boxSizing:"border-box",marginBottom:"10px",background:"#efefed",border:"1px solid #d8d8d6",borderRadius:"8px",padding:"11px 12px",fontSize:"15px",fontFamily:"Georgia,serif",color:"#1a1a1a",outline:"none"}}/>
+          <input value={authPassword} onChange={function(e){ setAuthPassword(e.target.value); }} onKeyDown={onAuthKey} placeholder="Password" type="password" style={{width:"100%",boxSizing:"border-box",marginBottom:"16px",background:"#efefed",border:"1px solid #d8d8d6",borderRadius:"8px",padding:"11px 12px",fontSize:"15px",fontFamily:"Georgia,serif",color:"#1a1a1a",outline:"none"}}/>
+          {authError && (<div style={{fontSize:"12px",color:"#c0392b",marginBottom:"12px"}}>{authError}</div>)}
+          {authNotice && (<div style={{fontSize:"12px",color:"#2a7a2a",marginBottom:"12px"}}>{authNotice}</div>)}
+          <button onClick={authMode==="signup"?doSignUp:doSignIn} style={{width:"100%",padding:"12px",background:"#c9a96e",border:"none",borderRadius:"8px",color:"#0f0f0f",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",marginBottom:"12px",opacity:authBusy?0.6:1}}>{authBusy?"Please wait…":(authMode==="signup"?"Create account":"Sign in")}</button>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <button onClick={function(){ setAuthError(""); setAuthNotice(""); setAuthMode(authMode==="signup"?"signin":"signup"); }} style={{background:"none",border:"none",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",padding:0}}>{authMode==="signup"?"Have an account? Sign in":"New here? Create account"}</button>
+            <button onClick={doReset} style={{background:"none",border:"none",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",padding:0}}>Forgot password?</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  if (!hydrated) {
+    return (<div style={screenWrap}><div style={{color:"#999",fontSize:"14px",letterSpacing:"0.08em"}}>Loading your schedule…</div></div>);
+  }
+
   return (
     <div ref={appRootRef} style={{height:"100dvh",overflow:"hidden",boxSizing:"border-box",display:"flex",flexDirection:"column",background:"#ffffff",fontFamily:"Georgia,serif",color:"#1a1a1a",paddingTop:(reassignMode||placingClient)?"calc(env(safe-area-inset-top,0px) + 52px)":"0"}}
       onMouseUp={function(){ endSelectDrag(); if(dragState&&!dragCalHover) { setDragState(null); setDragCalOpen(false); } }}
       onTouchEnd={function(){ endSelectDrag(); }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2500,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",pointerEvents:"none",fontFamily:"Georgia,serif"}}>v6</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2500,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",pointerEvents:"none",fontFamily:"Georgia,serif"}}>v7</div>
 
       {banner && (
         <div style={{position:"fixed",top:gridTopY>0?(gridTopY/2+"px"):listTopY>0?(listTopY/2+"px"):"calc(env(safe-area-inset-top,0px) + 8px)",left:"50%",transform:(gridTopY>0||listTopY>0)?"translate(-50%,-50%)":"translateX(-50%)",zIndex:2000,background:getBannerColor(banner.type),color:"#fff",padding:"6px 14px",borderRadius:"20px",fontSize:"12px",letterSpacing:"0.04em",boxShadow:"0 2px 12px rgba(0,0,0,0.2)",display:"flex",alignItems:"center",gap:"12px",maxWidth:"90vw",pointerEvents:"auto"}}>
@@ -2639,6 +2774,7 @@ export default function TheList() {
                 <input type="file" accept=".json" onChange={importData} style={{display:"none"}}/>
               </label>
             </div>
+            <button onClick={function(){ try { signOut(fbAuth); } catch(e) {} }} style={{width:"100%",padding:"8px",marginBottom:"8px",background:"none",border:"1px solid #e0b0a8",borderRadius:"6px",color:"#b04a3a",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.05em"}}>{authUser?("Sign out ("+authUser.email+")"):"Sign out"}</button>
             {clientMemory.length>0&&(
               <div style={{marginBottom:"20px",marginTop:"16px"}}>
                 <div style={{fontSize:"10px",letterSpacing:"0.15em",textTransform:"uppercase",color:"#aaa",marginBottom:"8px"}}>Saved Clients</div>
