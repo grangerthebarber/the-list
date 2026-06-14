@@ -56,7 +56,7 @@ const WEEK_OPTIONS = [1,2,3,4,5,6,7,8];
 // One blue for every "off the default" cue: an earlier-or-later nudged time AND
 // the vertical bar that marks linked/grouped slots. Muted, deep, Farrow & Ball
 // "Hague Blue"-ish — not the old electric/royal blue.
-const ADJ_BLUE = "#34434c";
+const ADJ_BLUE = "#5a7a8a";
 
 function parseTime(t) { var parts = t.split(":").map(Number); return parts[0]*60+parts[1]; }
 var _gid = 1;
@@ -309,6 +309,7 @@ function absMinutesToTime(min) {
 export default function TheList() {
   const [view, setView] = useState("3-Day");
   const [isSplitView, setIsSplitView] = useState(false);
+  const [isPhone, setIsPhone] = useState(false);
   const [baseDate, setBaseDate] = useState(new Date());
   const [schedules, setSchedules] = useState(function() {
     var raw = loadFromStorage("tl_schedules", {});
@@ -380,6 +381,7 @@ export default function TheList() {
   const editValuesRef = useRef(editValues);
   editValuesRef.current = editValues;
   const touchStart = useRef(null);
+  const swipeNavStart = useRef(null);
   const dragTouchStart = useRef(null);
   const selectDragAnchor = useRef(null);
   const schedulesRef = useRef(schedules);
@@ -610,11 +612,13 @@ export default function TheList() {
   // When an iPad app shares the screen (Split View / Stage Manager) the system
   // window controls sit over our top-left. Detect "not full width on a touch
   // device" so we can scoot the view tabs clear of them.
+  // Also detect phone-width so the header can compact into two rows.
   useEffect(function() {
     var check = function() {
       var touch = (navigator.maxTouchPoints||0) > 0 || ("ontouchstart" in window);
       var sw = (window.screen && window.screen.width) ? window.screen.width : window.innerWidth;
       setIsSplitView(touch && window.innerWidth < (sw - 20));
+      setIsPhone(window.innerWidth <= 430);
     };
     check();
     window.addEventListener("resize", check);
@@ -2276,10 +2280,48 @@ export default function TheList() {
   return (
     <div ref={appRootRef} style={{height:"100dvh",overflow:"hidden",boxSizing:"border-box",display:"flex",flexDirection:"column",background:"#ffffff",fontFamily:"Georgia,serif",color:"#1a1a1a",paddingTop:(reassignMode||placingClient)?"calc(env(safe-area-inset-top,0px) + 52px)":"0"}}
       onMouseUp={function(){ endSelectDrag(); if(dragState&&!dragCalHover) { setDragState(null); setDragCalOpen(false); } }}
-      onTouchEnd={function(){ endSelectDrag(); }}>
+      onTouchStart={function(e){
+        // Record touch start for swipe-to-navigate (horizontal swipe on the app chrome,
+        // not inside a slot row or modal). Only track single-finger touches.
+        if (isLiveDraggingRef.current) return;
+        if (e.touches.length !== 1) return;
+        swipeNavStart.current = {x:e.touches[0].clientX, y:e.touches[0].clientY};
+      }}
+      onTouchEnd={function(e){
+        endSelectDrag();
+        // Swipe-to-navigate: require ≥55px horizontal travel and mostly horizontal
+        // direction (horizontal travel > 2× the vertical travel). Bail out if a drag
+        // or modal is active, or if the touch started inside a slot row (which has
+        // its own touch handlers for drag-pickup).
+        if (swipeNavStart.current && !isLiveDraggingRef.current && !dragState && e.changedTouches.length===1) {
+          var dx = e.changedTouches[0].clientX - swipeNavStart.current.x;
+          var dy = e.changedTouches[0].clientY - swipeNavStart.current.y;
+          if (Math.abs(dx) >= 55 && Math.abs(dx) > Math.abs(dy) * 2) {
+            // Check the touch didn't originate inside a slot row (data-droprow)
+            var target = e.target;
+            var inRow = false;
+            while (target && target !== e.currentTarget) {
+              if (target.dataset && target.dataset.droprow) { inRow = true; break; }
+              target = target.parentElement;
+            }
+            if (!inRow) {
+              if (dx < 0) {
+                // Swipe left → go forward (next day/period)
+                if (view==="Month") { setBaseDate(function(d){ var nd=new Date(d); nd.setMonth(nd.getMonth()+1); return nd; }); }
+                else { setBaseDate(function(d){ return addDays(d,1); }); }
+              } else {
+                // Swipe right → go back (previous day/period)
+                if (view==="Month") { setBaseDate(function(d){ var nd=new Date(d); nd.setMonth(nd.getMonth()-1); return nd; }); }
+                else { setBaseDate(function(d){ return addDays(d,-1); }); }
+              }
+            }
+          }
+        }
+        swipeNavStart.current = null;
+      }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2500,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",pointerEvents:"none",fontFamily:"Georgia,serif"}}>v7</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2500,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",pointerEvents:"none",fontFamily:"Georgia,serif"}}>v8</div>
 
       {banner && (
         <div style={{position:"fixed",top:gridTopY>0?(gridTopY/2+"px"):listTopY>0?(listTopY/2+"px"):"calc(env(safe-area-inset-top,0px) + 8px)",left:"50%",transform:(gridTopY>0||listTopY>0)?"translate(-50%,-50%)":"translateX(-50%)",zIndex:2000,background:getBannerColor(banner.type),color:"#fff",padding:"6px 14px",borderRadius:"20px",fontSize:"12px",letterSpacing:"0.04em",boxShadow:"0 2px 12px rgba(0,0,0,0.2)",display:"flex",alignItems:"center",gap:"12px",maxWidth:"90vw",pointerEvents:"auto"}}>
@@ -2825,35 +2867,63 @@ export default function TheList() {
         </div>
       )}
 
-      {/* HEADER */}
-      <div style={{borderBottom:"1px solid #e8e8e6",padding:"3px 20px 3px",paddingTop:"calc(env(safe-area-inset-top,0px) + 3px)",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,background:"#ffffff",zIndex:100,flexShrink:0}}>
-        <div style={{display:"flex",gap:"2px",background:"#e8e8e6",padding:"3px",borderRadius:"6px",marginLeft:isSplitView?"48px":"0"}}>
-          {VIEWS.map(function(v){ return (
-            <button key={v} data-viewtab={v} onClick={function(){
-              if (v==="Wknd") { setBaseDate(getUpcomingWeekend()); setView(v); return; }
-              if (v==="Day"||v==="3-Day"||v==="Week") {
-                // Re-tapping the tab you're already on snaps the range back to today.
-                // Switching IN from a different view keeps the day you were looking at,
-                // so a 3-Day/Week starts on that day instead of jumping to today.
-                if (v===view) setBaseDate(getAnchorStart());
-              }
-              setView(v);
-            }} style={{padding:"5px 12px",fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",border:"none",borderRadius:"4px",cursor:"pointer",background:view===v?"#1a1a1a":"transparent",color:view===v?"#ffffff":"#999",fontFamily:"inherit",transition:"all 0.15s"}}>{v}</button>
-          ); })}
+      {/* HEADER — phone gets a compact two-row layout; iPad keeps the single row */}
+      {isPhone ? (
+        <div style={{borderBottom:"1px solid #e8e8e6",paddingTop:"calc(env(safe-area-inset-top,0px) + 4px)",position:"sticky",top:0,background:"#ffffff",zIndex:100,flexShrink:0}}>
+          {/* Row 1: view tabs full-width */}
+          <div style={{display:"flex",gap:"2px",background:"#e8e8e6",padding:"3px",borderRadius:"6px",margin:"0 10px 4px"}}>
+            {VIEWS.map(function(v){ return (
+              <button key={v} data-viewtab={v} onClick={function(){
+                if (v==="Wknd") { setBaseDate(getUpcomingWeekend()); setView(v); return; }
+                if (v==="Day"||v==="3-Day"||v==="Week") { if (v===view) setBaseDate(getAnchorStart()); }
+                setView(v);
+              }} style={{flex:1,padding:"5px 0",fontSize:"9px",letterSpacing:"0.06em",textTransform:"uppercase",border:"none",borderRadius:"4px",cursor:"pointer",background:view===v?"#1a1a1a":"transparent",color:view===v?"#ffffff":"#999",fontFamily:"inherit",transition:"all 0.15s"}}>{v}</button>
+            ); })}
+          </div>
+          {/* Row 2: nav + undo/redo + menu */}
+          <div style={{display:"flex",gap:"3px",alignItems:"center",padding:"0 10px 5px",justifyContent:"space-between"}}>
+            <div style={{display:"flex",gap:"3px",alignItems:"center"}}>
+              {view!=="Month"&&<button onClick={function(){ setBaseDate(function(d){ return addDays(d,-7); }); }} style={{...navBtnSm,fontSize:"11px",letterSpacing:"-1px"}}>{"‹‹"}</button>}
+              <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()-1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,-1); }); }} style={navBtnSm}>{"‹"}</button>
+              <button onClick={function(){ if(view==="Wknd") setBaseDate(getUpcomingWeekend()); else if(view==="Day"||view==="3-Day"||view==="Week") setBaseDate(getAnchorStart()); else setBaseDate(new Date()); }} style={{...navBtnSm,fontSize:"8px",letterSpacing:"0.1em",padding:"0 8px"}}>TODAY</button>
+              <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()+1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,1); }); }} style={navBtnSm}>{"›"}</button>
+              {view!=="Month"&&<button onClick={function(){ setBaseDate(function(d){ return addDays(d,7); }); }} style={{...navBtnSm,fontSize:"11px",letterSpacing:"-1px"}}>{"››"}</button>}
+            </div>
+            {view==="Month"&&<div style={{fontSize:"12px",color:"#1a1a1a"}}>{baseDate.toLocaleDateString("en-US",{month:"long",year:"numeric"})}</div>}
+            <div style={{display:"flex",gap:"3px",alignItems:"center"}}>
+              <button onClick={handleUndo} title="Undo" style={{...navBtnSm,background:canUndo?"#f0f0ee":"#f8f8f6",border:"1px solid #d8d8d6",width:"28px",padding:"0"}}><UndoIcon size={14} color={canUndo?"#555":"#ccc"}/></button>
+              <button onClick={handleRedo} title="Redo" style={{...navBtnSm,background:canRedo?"#f0f0ee":"#f8f8f6",border:"1px solid #d8d8d6",width:"28px",padding:"0"}}><RedoIcon size={14} color={canRedo?"#555":"#ccc"}/></button>
+              <button onClick={function(){ setShowHistory(true); }} style={{...navBtnSm,background:"#f0f0ee",border:"1px solid #d8d8d6",color:"#666"}}>{"≡"}</button>
+            </div>
+          </div>
         </div>
-        {view==="Month"&&<div style={{fontSize:"14px",color:"#1a1a1a"}}>{baseDate.toLocaleDateString("en-US",{month:"long",year:"numeric"})}</div>}
-        <div style={{display:"flex",gap:"4px",alignItems:"center"}}>
-          {view!=="Month"&&<button onClick={function(){ setBaseDate(function(d){ return addDays(d,-7); }); }} style={{...navBtn,fontSize:"11px",letterSpacing:"-1px"}}>{"‹‹"}</button>}
-          <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()-1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,-1); }); }} style={navBtn}>{"‹"}</button>
-          <button onClick={function(){ if(view==="Wknd") setBaseDate(getUpcomingWeekend()); else if(view==="Day"||view==="3-Day"||view==="Week") setBaseDate(getAnchorStart()); else setBaseDate(new Date()); }} style={{...navBtn,fontSize:"9px",letterSpacing:"0.1em",padding:"0 12px"}}>TODAY</button>
-          <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()+1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,1); }); }} style={navBtn}>{"›"}</button>
-          {view!=="Month"&&<button onClick={function(){ setBaseDate(function(d){ return addDays(d,7); }); }} style={{...navBtn,fontSize:"11px",letterSpacing:"-1px"}}>{"››"}</button>}
-          <div style={{width:"10px"}}/>
-          <button onClick={handleUndo} title="Undo" style={{...navBtn,background:canUndo?"#f0f0ee":"#f8f8f6",border:"1px solid #d8d8d6",width:"32px",padding:"0"}}><UndoIcon size={17} color={canUndo?"#555":"#ccc"}/></button>
-          <button onClick={handleRedo} title="Redo" style={{...navBtn,background:canRedo?"#f0f0ee":"#f8f8f6",border:"1px solid #d8d8d6",width:"32px",padding:"0"}}><RedoIcon size={17} color={canRedo?"#555":"#ccc"}/></button>
-          <button onClick={function(){ setShowHistory(true); }} style={{...navBtn,background:"#f0f0ee",border:"1px solid #d8d8d6",color:"#666"}}>{"≡"}</button>
+      ) : (
+        <div style={{borderBottom:"1px solid #e8e8e6",padding:"6px 20px 6px",paddingTop:"calc(env(safe-area-inset-top,0px) + 6px)",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,background:"#ffffff",zIndex:100,flexShrink:0}}>
+          <div style={{display:"flex",gap:"2px",background:"#e8e8e6",padding:"3px",borderRadius:"6px",marginLeft:isSplitView?"48px":"0"}}>
+            {VIEWS.map(function(v){ return (
+              <button key={v} data-viewtab={v} onClick={function(){
+                if (v==="Wknd") { setBaseDate(getUpcomingWeekend()); setView(v); return; }
+                if (v==="Day"||v==="3-Day"||v==="Week") {
+                  if (v===view) setBaseDate(getAnchorStart());
+                }
+                setView(v);
+              }} style={{padding:"5px 12px",fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",border:"none",borderRadius:"4px",cursor:"pointer",background:view===v?"#1a1a1a":"transparent",color:view===v?"#ffffff":"#999",fontFamily:"inherit",transition:"all 0.15s"}}>{v}</button>
+            ); })}
+          </div>
+          {view==="Month"&&<div style={{fontSize:"14px",color:"#1a1a1a"}}>{baseDate.toLocaleDateString("en-US",{month:"long",year:"numeric"})}</div>}
+          <div style={{display:"flex",gap:"4px",alignItems:"center"}}>
+            {view!=="Month"&&<button onClick={function(){ setBaseDate(function(d){ return addDays(d,-7); }); }} style={{...navBtn,fontSize:"11px",letterSpacing:"-1px"}}>{"‹‹"}</button>}
+            <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()-1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,-1); }); }} style={navBtn}>{"‹"}</button>
+            <button onClick={function(){ if(view==="Wknd") setBaseDate(getUpcomingWeekend()); else if(view==="Day"||view==="3-Day"||view==="Week") setBaseDate(getAnchorStart()); else setBaseDate(new Date()); }} style={{...navBtn,fontSize:"9px",letterSpacing:"0.1em",padding:"0 12px"}}>TODAY</button>
+            <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()+1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,1); }); }} style={navBtn}>{"›"}</button>
+            {view!=="Month"&&<button onClick={function(){ setBaseDate(function(d){ return addDays(d,7); }); }} style={{...navBtn,fontSize:"11px",letterSpacing:"-1px"}}>{"››"}</button>}
+            <div style={{width:"10px"}}/>
+            <button onClick={handleUndo} title="Undo" style={{...navBtn,background:canUndo?"#f0f0ee":"#f8f8f6",border:"1px solid #d8d8d6",width:"32px",padding:"0"}}><UndoIcon size={17} color={canUndo?"#555":"#ccc"}/></button>
+            <button onClick={handleRedo} title="Redo" style={{...navBtn,background:canRedo?"#f0f0ee":"#f8f8f6",border:"1px solid #d8d8d6",width:"32px",padding:"0"}}><RedoIcon size={17} color={canRedo?"#555":"#ccc"}/></button>
+            <button onClick={function(){ setShowHistory(true); }} style={{...navBtn,background:"#f0f0ee",border:"1px solid #d8d8d6",color:"#666"}}>{"≡"}</button>
+          </div>
         </div>
-      </div>
+      )}
 
       {view==="Month"&&(function(){
         var monthDays=getMonthDays();
@@ -2905,7 +2975,7 @@ export default function TheList() {
             var dateKey=toDateKey(date); var slots=getSlots(dateKey);
             return (
               <div key={dateKey} style={{background:"#ffffff",display:"flex",flexDirection:"column",minHeight:0,overflow:"hidden"}}>
-                <div style={{padding:"1px 10px 2px",borderBottom:"1px solid #ebebea",display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:"4px",flexShrink:0}}>
+                <div style={{padding:"4px 10px 5px",borderBottom:"1px solid #ebebea",display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:"4px",flexShrink:0}}>
                   {(function(){
                     var sz=view==="Day"?"17px":"16px"; var mo=date.getMonth();
                     var monthStr=[3,4,5,6].includes(mo)?date.toLocaleDateString("en-US",{month:"long",day:"numeric"}):date.toLocaleDateString("en-US",{month:"short",day:"numeric"});
@@ -2913,11 +2983,11 @@ export default function TheList() {
                     var hol=getHolidayForDate(dateKey);
                     return (
                       <div style={{minWidth:0,overflow:"hidden",flex:1}}>
-                        <div style={{display:"flex",alignItems:"baseline",gap:"6px",minWidth:0}}>
-                          <span style={{fontSize:sz,color:isToday(date)?"#c9893a":"#b89a5a",lineHeight:1.2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",flexShrink:1,textTransform:"uppercase",letterSpacing:"0.06em"}}>{wdStr}</span>
+                        <div style={{display:"flex",alignItems:"baseline",gap:"6px",minWidth:0,marginBottom:"3px"}}>
+                          <span style={{fontSize:sz,color:isToday(date)?"#c9893a":"#b89a5a",lineHeight:1.1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",flexShrink:1,textTransform:"uppercase",letterSpacing:"0.06em"}}>{wdStr}</span>
                           {hol&&<span style={{fontSize:"9px",color:"#a07830",letterSpacing:"0.08em",textTransform:"uppercase",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:1}}>{hol}</span>}
                         </div>
-                        <div style={{fontSize:sz,color:"#1a1a1a",lineHeight:1.2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",textTransform:"uppercase",letterSpacing:"0.06em"}}>{monthStr}</div>
+                        <div style={{fontSize:sz,color:"#1a1a1a",lineHeight:1.1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",textTransform:"uppercase",letterSpacing:"0.06em"}}>{monthStr}</div>
                       </div>
                     );
                   })()}
@@ -3060,7 +3130,7 @@ export default function TheList() {
                     );
                   })}
                 </div>
-                <div style={{display:"flex",gap:"6px",padding:"4px 12px 4px",paddingBottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",flexShrink:0}}>
+                <div style={{display:"flex",gap:"6px",padding:"6px 12px 6px",paddingBottom:"calc(env(safe-area-inset-bottom,0px) + 8px)",flexShrink:0}}>
                   <button onClick={function(){ addSlotToBeginning(dateKey); }} style={{flex:1,padding:"7px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ AM</button>
                   <button onClick={function(){ addSlotToEnd(dateKey); }} style={{flex:1,padding:"7px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ PM</button>
                 </div>
@@ -3075,4 +3145,5 @@ export default function TheList() {
 }
 
 const navBtn = {background:"#e8e8e6",border:"1px solid #d8d8d6",color:"#777",padding:"0 10px",height:"32px",lineHeight:"32px",borderRadius:"4px",cursor:"pointer",fontSize:"15px",fontFamily:"inherit",display:"inline-flex",alignItems:"center",justifyContent:"center"};
+const navBtnSm = {background:"#e8e8e6",border:"1px solid #d8d8d6",color:"#777",padding:"0 8px",height:"26px",lineHeight:"26px",borderRadius:"4px",cursor:"pointer",fontSize:"14px",fontFamily:"inherit",display:"inline-flex",alignItems:"center",justifyContent:"center"};
 const inputStyle = {background:"#efefed",border:"1px solid #d8d8d6",color:"#1a1a1a",padding:"5px 7px",borderRadius:"4px",fontSize:"13px",fontFamily:"Georgia,serif",flex:1,outline:"none"};
