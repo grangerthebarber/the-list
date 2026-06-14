@@ -637,6 +637,7 @@ export default function TheList() {
   // even across reopens, and never re-fires after the user exports or dismisses.
   useEffect(function() {
     if (!authUser || !hydrated) return;
+    if (isPhone) return; // export prompt is iPad-only
     try {
       var todayKey = toDateKey(new Date());
       var last = null;
@@ -2338,7 +2339,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2500,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",pointerEvents:"none",fontFamily:"Georgia,serif"}}>v9</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2500,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",pointerEvents:"none",fontFamily:"Georgia,serif"}}>v10</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -2346,11 +2347,12 @@ export default function TheList() {
       <style>{"html,body,#root,*{touch-action:manipulation;-webkit-text-size-adjust:100%}"}</style>
 
       {banner && (
-        <div style={{position:"fixed",top:gridTopY>0?(gridTopY/2+"px"):listTopY>0?(listTopY/2+"px"):"calc(env(safe-area-inset-top,0px) + 8px)",left:"50%",transform:(gridTopY>0||listTopY>0)?"translate(-50%,-50%)":"translateX(-50%)",zIndex:2000,background:getBannerColor(banner.type),color:"#fff",padding:"6px 14px",borderRadius:"20px",fontSize:"12px",letterSpacing:"0.04em",boxShadow:"0 2px 12px rgba(0,0,0,0.2)",display:"flex",alignItems:"center",gap:"12px",maxWidth:"90vw",pointerEvents:"auto"}}>
+        <div style={{position:"fixed",left:"50%",top:isPhone?"auto":(gridTopY>0?(gridTopY/2+"px"):listTopY>0?(listTopY/2+"px"):"calc(env(safe-area-inset-top,0px) + 8px)"),bottom:isPhone?"calc(env(safe-area-inset-bottom,0px) + 18px)":"auto",transform:(!isPhone&&(gridTopY>0||listTopY>0))?"translate(-50%,-50%)":"translateX(-50%)",zIndex:2000,background:getBannerColor(banner.type),color:"#fff",padding:"6px 10px 6px 14px",borderRadius:"20px",fontSize:"12px",letterSpacing:"0.04em",boxShadow:"0 2px 12px rgba(0,0,0,0.2)",display:"flex",alignItems:"center",gap:"10px",maxWidth:"90vw",pointerEvents:"auto"}}>
           <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{describeBanner(banner)}</span>
           {(banner.type!=="undo"&&banner.type!=="redo"&&canUndo)&&(
             <button onClick={handleUndo} title="Undo" style={{background:"rgba(255,255,255,0.22)",border:"none",borderRadius:"10px",color:"#fff",padding:"4px 9px",cursor:"pointer",fontFamily:"inherit",flexShrink:0,display:"flex",alignItems:"center"}}><UndoIcon size={15} color="#fff"/></button>
           )}
+          <button onClick={function(){ if(bannerTimer.current) clearTimeout(bannerTimer.current); setBanner(null); }} title="Dismiss" style={{background:"rgba(255,255,255,0.22)",border:"none",borderRadius:"50%",color:"#fff",width:"22px",height:"22px",cursor:"pointer",fontFamily:"inherit",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center",lineHeight:1,fontSize:"16px",padding:0}}>{"×"}</button>
         </div>
       )}
 
@@ -2492,7 +2494,6 @@ export default function TheList() {
             <div style={{fontSize:"15px",color:"#1a1a1a",marginBottom:"18px",lineHeight:1.4}}>Back up today's list?</div>
             <div style={{display:"flex",gap:"8px"}}>
               <button onClick={function(){ exportData(); setDailyExportPrompt(false); }} style={{flex:1,padding:"12px",background:"#c9a96e",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",fontWeight:"bold"}}>Export</button>
-              <button onClick={function(){ setDailyExportPrompt(false); }} style={{padding:"12px 16px",background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"14px"}}>Maybe later</button>
             </div>
           </div>
         </div>
@@ -2652,7 +2653,7 @@ export default function TheList() {
           <div style={{background:"#f8f8f6",border:"1px solid #d8d8d6",borderRadius:"16px",padding:"24px 28px 28px",width:"100%",maxWidth:"700px",maxHeight:"92vh",overflowY:"auto",boxSizing:"border-box",position:"relative"}} onClick={function(e){ e.stopPropagation(); }}>
             <button onClick={function(){ setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null);setCheckoffRecur(null);setRecurPickerOpen(false); }} style={{position:"absolute",top:"16px",right:"16px",background:"none",border:"none",color:"#aaa",fontSize:"22px",cursor:"pointer",lineHeight:1,padding:"0 4px"}}>×</button>
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#4a8a5a",marginBottom:"4px"}}>Done</div>
-            <div style={{fontSize:"22px",marginBottom:"2px",paddingRight:"32px"}}>{checkoffModal.slot.name}</div>
+            <div onClick={function(){ var nm=checkoffModal.slot.name; setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null);setCheckoffRecur(null);setRecurPickerOpen(false); openClientProfile(nm); }} title="View profile" style={{fontSize:"22px",marginBottom:"2px",paddingRight:"32px",cursor:"pointer",textDecoration:"underline",textDecorationColor:"#dcd2bd",textUnderlineOffset:"3px"}}>{checkoffModal.slot.name}</div>
             <div style={{fontSize:"12px",color:"#999",marginBottom:"18px"}}>{checkoffModal.slot.time} · {friendlyDate(checkoffModal.dateKey)}</div>
             {checkoffModal.alreadyBookedKey&&(
               <div style={{background:"#eef3f9",border:"1px solid #b8cce0",borderRadius:"8px",padding:"10px 14px",marginBottom:"16px",fontSize:"13px",color:"#34434c",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px"}}>
@@ -2902,22 +2903,11 @@ export default function TheList() {
         </div>
       )}
 
-      {/* HEADER — phone gets a compact two-row layout; iPad keeps the single row */}
+      {/* HEADER — phone gets one compact row (shifters · tabs · undo/redo); iPad keeps its single row */}
       {isPhone ? (
         <div style={{borderBottom:"1px solid #e8e8e6",paddingTop:"calc(env(safe-area-inset-top,0px) + 4px)",position:"sticky",top:0,background:"#ffffff",zIndex:100,flexShrink:0}}>
-          {/* Row 1: view tabs full-width */}
-          <div style={{display:"flex",gap:"2px",background:"#e8e8e6",padding:"3px",borderRadius:"6px",margin:"0 10px 4px"}}>
-            {["Day","Wknd","Month"].map(function(v){ return (
-              <button key={v} data-viewtab={v} onClick={function(){
-                if (v==="Wknd") { setBaseDate(getUpcomingWeekend()); setView(v); return; }
-                if (view==="Wknd") { setBaseDate(v==="Month" ? new Date() : getAnchorStart()); }
-                else if (v===view && (v==="Day"||v==="3-Day"||v==="Week")) { setBaseDate(getAnchorStart()); }
-                setView(v);
-              }} style={{flex:1,padding:"5px 0",fontSize:"9px",letterSpacing:"0.06em",textTransform:"uppercase",border:"none",borderRadius:"4px",cursor:"pointer",background:view===v?"#1a1a1a":"transparent",color:view===v?"#ffffff":"#999",fontFamily:"inherit",transition:"all 0.15s"}}>{v}</button>
-            ); })}
-          </div>
-          {/* Row 2: nav + undo/redo + menu */}
-          <div style={{display:"flex",gap:"3px",alignItems:"center",padding:"0 10px 5px",justifyContent:"space-between"}}>
+          {/* Single compact row: day-shifters · view tabs · undo/redo/menu */}
+          <div style={{display:"flex",gap:"3px",alignItems:"center",padding:"0 8px 5px",justifyContent:"space-between"}}>
             <div style={{display:"flex",gap:"3px",alignItems:"center"}}>
               {view!=="Month"&&<button onClick={function(){ setBaseDate(function(d){ return addDays(d,-7); }); }} style={{...navBtnSm,fontSize:"11px",letterSpacing:"-1px"}}>{"‹‹"}</button>}
               <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()-1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,-1); }); }} style={navBtnSm}>{"‹"}</button>
@@ -2925,13 +2915,23 @@ export default function TheList() {
               <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()+1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,1); }); }} style={navBtnSm}>{"›"}</button>
               {view!=="Month"&&<button onClick={function(){ setBaseDate(function(d){ return addDays(d,7); }); }} style={{...navBtnSm,fontSize:"11px",letterSpacing:"-1px"}}>{"››"}</button>}
             </div>
-            {view==="Month"&&<div style={{fontSize:"12px",color:"#1a1a1a"}}>{baseDate.toLocaleDateString("en-US",{month:"long",year:"numeric"})}</div>}
-            <div style={{display:"flex",gap:"3px",alignItems:"center"}}>
-              <button onClick={handleUndo} title="Undo" style={{...navBtnSm,background:canUndo?"#f0f0ee":"#f8f8f6",border:"1px solid #d8d8d6",width:"28px",padding:"0"}}><UndoIcon size={14} color={canUndo?"#555":"#ccc"}/></button>
-              <button onClick={handleRedo} title="Redo" style={{...navBtnSm,background:canRedo?"#f0f0ee":"#f8f8f6",border:"1px solid #d8d8d6",width:"28px",padding:"0"}}><RedoIcon size={14} color={canRedo?"#555":"#ccc"}/></button>
+            <div style={{display:"flex",gap:"2px",background:"#e8e8e6",padding:"2px",borderRadius:"5px"}}>
+              {["Day","Wknd","Month"].map(function(v){ return (
+                <button key={v} data-viewtab={v} onClick={function(){
+                  if (v==="Wknd") { setBaseDate(getUpcomingWeekend()); setView(v); return; }
+                  if (view==="Wknd") { setBaseDate(v==="Month" ? new Date() : getAnchorStart()); }
+                  else if (v===view && (v==="Day"||v==="3-Day"||v==="Week")) { setBaseDate(getAnchorStart()); }
+                  setView(v);
+                }} style={{padding:"5px 7px",fontSize:"9px",letterSpacing:"0.04em",textTransform:"uppercase",border:"none",borderRadius:"4px",cursor:"pointer",background:view===v?"#1a1a1a":"transparent",color:view===v?"#ffffff":"#999",fontFamily:"inherit",transition:"all 0.15s"}}>{v}</button>
+              ); })}
+            </div>
+            <div style={{display:"flex",gap:"2px",alignItems:"center"}}>
+              <button onClick={handleUndo} title="Undo" style={{...navBtnSm,background:canUndo?"#f0f0ee":"#f8f8f6",border:"1px solid #d8d8d6",width:"26px",padding:"0"}}><UndoIcon size={14} color={canUndo?"#555":"#ccc"}/></button>
+              <button onClick={handleRedo} title="Redo" style={{...navBtnSm,background:canRedo?"#f0f0ee":"#f8f8f6",border:"1px solid #d8d8d6",width:"26px",padding:"0"}}><RedoIcon size={14} color={canRedo?"#555":"#ccc"}/></button>
               <button onClick={function(){ setShowHistory(true); }} style={{...navBtnSm,background:"#f0f0ee",border:"1px solid #d8d8d6",color:"#666"}}>{"≡"}</button>
             </div>
           </div>
+          {view==="Month"&&<div style={{textAlign:"center",fontSize:"12px",color:"#1a1a1a",paddingBottom:"4px"}}>{baseDate.toLocaleDateString("en-US",{month:"long",year:"numeric"})}</div>}
         </div>
       ) : (
         <div style={{borderBottom:"1px solid #e8e8e6",padding:"6px 20px 6px",paddingTop:"calc(env(safe-area-inset-top,0px) + 6px)",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,background:"#ffffff",zIndex:100,flexShrink:0}}>
@@ -3013,7 +3013,7 @@ export default function TheList() {
             var dateKey=toDateKey(date); var slots=getSlots(dateKey);
             return (
               <div key={dateKey} style={{background:"#ffffff",display:"flex",flexDirection:"column",minHeight:0,overflow:"hidden"}}>
-                <div style={{padding:"4px 10px 5px",borderBottom:"1px solid #ebebea",display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:"4px",flexShrink:0}}>
+                <div style={{padding:"4px 10px 5px",borderBottom:"1px solid #ebebea",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"4px",flexShrink:0}}>
                   {(function(){
                     var sz=view==="Day"?"17px":"16px"; if(isPhone) sz=view==="Day"?"15px":"13px";
                     var mo=date.getMonth();
@@ -3034,7 +3034,7 @@ export default function TheList() {
                     }
                     // Day / 3-Day / Wknd: weekday and date sit side by side on one line.
                     return (
-                      <div style={{minWidth:0,overflow:"hidden",flex:1,display:"flex",alignItems:"baseline",gap:"5px"}}>
+                      <div style={{minWidth:0,overflow:"hidden",flex:1,display:"flex",alignItems:"baseline",gap:"9px"}}>
                         <span style={{fontSize:sz,color:isToday(date)?"#c9893a":"#b89a5a",lineHeight:1.1,whiteSpace:"nowrap",flexShrink:0,textTransform:"uppercase",letterSpacing:"0.06em"}}>{wdStr+","}</span>
                         <span style={{fontSize:sz,color:"#1a1a1a",lineHeight:1.1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:1,textTransform:"uppercase",letterSpacing:"0.06em"}}>{monthStr}</span>
                         {hol&&<span style={{fontSize:"9px",color:"#a07830",letterSpacing:"0.08em",textTransform:"uppercase",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:2,alignSelf:"center"}}>{hol}</span>}
@@ -3185,9 +3185,9 @@ export default function TheList() {
                     );
                   })}
                 </div>
-                <div style={{display:"flex",gap:"6px",padding:"6px 12px 6px",paddingBottom:"calc(env(safe-area-inset-bottom,0px) + 8px)",flexShrink:0}}>
-                  <button onClick={function(){ addSlotToBeginning(dateKey); }} style={{flex:1,padding:"7px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ AM</button>
-                  <button onClick={function(){ addSlotToEnd(dateKey); }} style={{flex:1,padding:"7px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ PM</button>
+                <div style={{display:"flex",gap:"6px",padding:isPhone?"3px 10px 3px":"4px 12px 4px",paddingBottom:isPhone?"calc(env(safe-area-inset-bottom,0px) + 4px)":"calc(env(safe-area-inset-bottom,0px) + 5px)",flexShrink:0}}>
+                  <button onClick={function(){ addSlotToBeginning(dateKey); }} style={{flex:1,padding:isPhone?"6px":"7px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ AM</button>
+                  <button onClick={function(){ addSlotToEnd(dateKey); }} style={{flex:1,padding:isPhone?"6px":"7px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ PM</button>
                 </div>
               </div>
             );
