@@ -28,7 +28,7 @@ const DEFAULT_TIMES = [
   "7:13","7:36","7:58",
   "8:21","8:43","9:06","9:28","9:51","10:13","10:36","10:58",
   "11:21","11:43","12:06","12:28","12:51",
-  "1:13","1:36","1:58","2:21"
+  "1:13","1:36","1:58","2:21","2:43","3:06"
 ];
 
 const OLD_DEFAULT_TIMES_A = [
@@ -54,9 +54,9 @@ const OLD_DEFAULT_TIMES_C = [
 const WEEK_OPTIONS = [1,2,3,4,5,6,7,8];
 
 // One blue for every "off the default" cue: an earlier-or-later nudged time AND
-// the vertical bar that marks linked/grouped slots. Muted, deep, Farrow & Ball
-// "Hague Blue"-ish — not the old electric/royal blue.
-const ADJ_BLUE = "#5a7a8a";
+// the vertical bar that marks linked/grouped slots. Matched to the recurring-↺
+// arrow's blue so adjusted times, links, and recurring all read as one color.
+const ADJ_BLUE = "#4a8a9a";
 
 function parseTime(t) { var parts = t.split(":").map(Number); return parts[0]*60+parts[1]; }
 var _gid = 1;
@@ -118,10 +118,11 @@ function isOldDefault(slots) {
   return checkOld(OLD_DEFAULT_TIMES_A) || checkOld(OLD_DEFAULT_TIMES_B) || checkOld(OLD_DEFAULT_TIMES_C);
 }
 
-// A day the user already edited keeps the OLD short default tail (it stops at
-// 1:13 or 1:36) because it has names, so isOldDefault skips it. If the day is
-// still made only of standard default times (no custom rows), top it back up to
-// the full default tail. Idempotent: a full day (ends 2:21) is left untouched.
+// A day the user already edited keeps an OLD short default tail (it stops at
+// 1:13, 1:36, or the previous 2:21 end) because it has names, so isOldDefault
+// skips it. If the day is still made only of standard default times (no custom
+// rows), top it back up to the full default tail (now ends 3:06). Idempotent: a
+// full day (ends 3:06) is left untouched.
 function extendDefaultTail(slots) {
   if (!slots || !slots.length) return slots;
   var present = {};
@@ -136,7 +137,8 @@ function extendDefaultTail(slots) {
   }
   var abs113 = timeToAbsMinutes("1:13");
   var abs136 = timeToAbsMinutes("1:36");
-  if (maxAbs !== abs113 && maxAbs !== abs136) return slots;
+  var abs221 = timeToAbsMinutes("2:21");
+  if (maxAbs !== abs113 && maxAbs !== abs136 && maxAbs !== abs221) return slots;
   var out = slots.slice();
   for (var k = 0; k < DEFAULT_TIMES.length; k++) {
     var dt = DEFAULT_TIMES[k];
@@ -307,9 +309,9 @@ function absMinutesToTime(min) {
 }
 
 export default function TheList() {
-  const [view, setView] = useState("3-Day");
+  const [view, setView] = useState(function() { try { return (typeof window!=="undefined" && window.innerWidth<=430) ? "Day" : "3-Day"; } catch(e) { return "3-Day"; } });
   const [isSplitView, setIsSplitView] = useState(false);
-  const [isPhone, setIsPhone] = useState(false);
+  const [isPhone, setIsPhone] = useState(function() { try { return typeof window!=="undefined" && window.innerWidth<=430; } catch(e) { return false; } });
   const [baseDate, setBaseDate] = useState(new Date());
   const [schedules, setSchedules] = useState(function() {
     var raw = loadFromStorage("tl_schedules", {});
@@ -364,6 +366,7 @@ export default function TheList() {
   const [dragOverKey, setDragOverKey] = useState(null);
   const [timeEditModal, setTimeEditModal] = useState(null);
   const [timeEditMinutes, setTimeEditMinutes] = useState(0);
+  const [dailyExportPrompt, setDailyExportPrompt] = useState(false);
   const dragChipRef = useRef(null);
   const dragPosRef = useRef({x:0,y:0});
   const dragOverRef = useRef(null);
@@ -628,6 +631,28 @@ export default function TheList() {
       window.removeEventListener("orientationchange", check);
     };
   }, []);
+
+  // First app-open each morning: offer a one-click export. We record the date the
+  // moment we SHOW it (in localStorage) so it only appears once per calendar day,
+  // even across reopens, and never re-fires after the user exports or dismisses.
+  useEffect(function() {
+    if (!authUser || !hydrated) return;
+    try {
+      var todayKey = toDateKey(new Date());
+      var last = null;
+      try { last = window.localStorage.getItem("tl_lastExportPrompt"); } catch(e) { last = null; }
+      if (last !== todayKey) {
+        try { window.localStorage.setItem("tl_lastExportPrompt", todayKey); } catch(e) {}
+        setDailyExportPrompt(true);
+      }
+    } catch(e) {}
+  }, [authUser, hydrated]);
+
+  // Safety net: the phone header only exposes Day / Wknd / Month. If the stored view
+  // is ever one of the iPad-only views while on a phone, snap to Day so nothing breaks.
+  useEffect(function() {
+    if (isPhone && (view === "3-Day" || view === "Week")) setView("Day");
+  }, [isPhone, view]);
 
   // Re-run the scroll/banner sync after every render (content can change without a
   // dependency we'd otherwise list), plus on resize/orientation and a couple of
@@ -2291,29 +2316,21 @@ export default function TheList() {
         endSelectDrag();
         // Swipe-to-navigate: require ≥55px horizontal travel and mostly horizontal
         // direction (horizontal travel > 2× the vertical travel). Bail out if a drag
-        // or modal is active, or if the touch started inside a slot row (which has
-        // its own touch handlers for drag-pickup).
-        if (swipeNavStart.current && !isLiveDraggingRef.current && !dragState && e.changedTouches.length===1) {
+        // is active or a slot is being edited. A drag needs a 500ms long-press to lift
+        // and any finger movement cancels that timer, so a quick horizontal swipe can
+        // never start a drag — it is safe to let the swipe run even over slot rows.
+        if (swipeNavStart.current && !isLiveDraggingRef.current && !dragState && !editingCell && e.changedTouches.length===1) {
           var dx = e.changedTouches[0].clientX - swipeNavStart.current.x;
           var dy = e.changedTouches[0].clientY - swipeNavStart.current.y;
           if (Math.abs(dx) >= 55 && Math.abs(dx) > Math.abs(dy) * 2) {
-            // Check the touch didn't originate inside a slot row (data-droprow)
-            var target = e.target;
-            var inRow = false;
-            while (target && target !== e.currentTarget) {
-              if (target.dataset && target.dataset.droprow) { inRow = true; break; }
-              target = target.parentElement;
-            }
-            if (!inRow) {
-              if (dx < 0) {
-                // Swipe left → go forward (next day/period)
-                if (view==="Month") { setBaseDate(function(d){ var nd=new Date(d); nd.setMonth(nd.getMonth()+1); return nd; }); }
-                else { setBaseDate(function(d){ return addDays(d,1); }); }
-              } else {
-                // Swipe right → go back (previous day/period)
-                if (view==="Month") { setBaseDate(function(d){ var nd=new Date(d); nd.setMonth(nd.getMonth()-1); return nd; }); }
-                else { setBaseDate(function(d){ return addDays(d,-1); }); }
-              }
+            if (dx < 0) {
+              // Swipe left → go forward (next day/period)
+              if (view==="Month") { setBaseDate(function(d){ var nd=new Date(d); nd.setMonth(nd.getMonth()+1); return nd; }); }
+              else { setBaseDate(function(d){ return addDays(d,1); }); }
+            } else {
+              // Swipe right → go back (previous day/period)
+              if (view==="Month") { setBaseDate(function(d){ var nd=new Date(d); nd.setMonth(nd.getMonth()-1); return nd; }); }
+              else { setBaseDate(function(d){ return addDays(d,-1); }); }
             }
           }
         }
@@ -2321,7 +2338,12 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2500,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",pointerEvents:"none",fontFamily:"Georgia,serif"}}>v8</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2500,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",pointerEvents:"none",fontFamily:"Georgia,serif"}}>v9</div>
+
+      {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
+          feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
+          still allows normal one-finger panning and two-finger pinch-zoom. */}
+      <style>{"html,body,#root,*{touch-action:manipulation;-webkit-text-size-adjust:100%}"}</style>
 
       {banner && (
         <div style={{position:"fixed",top:gridTopY>0?(gridTopY/2+"px"):listTopY>0?(listTopY/2+"px"):"calc(env(safe-area-inset-top,0px) + 8px)",left:"50%",transform:(gridTopY>0||listTopY>0)?"translate(-50%,-50%)":"translateX(-50%)",zIndex:2000,background:getBannerColor(banner.type),color:"#fff",padding:"6px 14px",borderRadius:"20px",fontSize:"12px",letterSpacing:"0.04em",boxShadow:"0 2px 12px rgba(0,0,0,0.2)",display:"flex",alignItems:"center",gap:"12px",maxWidth:"90vw",pointerEvents:"auto"}}>
@@ -2458,6 +2480,19 @@ export default function TheList() {
             <div style={{display:"flex",gap:"8px"}}>
               <button onClick={function(){ toggleBlockSlot(blockLabelModal.dateKey,blockLabelModal.idx,blockLabel); }} style={{flex:1,padding:"10px",background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Block</button>
               <button onClick={function(){ setBlockLabelModal(null); }} style={{padding:"10px 16px",background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {dailyExportPrompt && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={function(){ setDailyExportPrompt(false); }}>
+          <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"24px",width:"min(320px,90vw)",textAlign:"center"}} onClick={function(e){ e.stopPropagation(); }}>
+            <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#aaa",marginBottom:"10px"}}>Good Morning</div>
+            <div style={{fontSize:"15px",color:"#1a1a1a",marginBottom:"18px",lineHeight:1.4}}>Back up today's list?</div>
+            <div style={{display:"flex",gap:"8px"}}>
+              <button onClick={function(){ exportData(); setDailyExportPrompt(false); }} style={{flex:1,padding:"12px",background:"#c9a96e",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",fontWeight:"bold"}}>Export</button>
+              <button onClick={function(){ setDailyExportPrompt(false); }} style={{padding:"12px 16px",background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"14px"}}>Maybe later</button>
             </div>
           </div>
         </div>
@@ -2872,10 +2907,11 @@ export default function TheList() {
         <div style={{borderBottom:"1px solid #e8e8e6",paddingTop:"calc(env(safe-area-inset-top,0px) + 4px)",position:"sticky",top:0,background:"#ffffff",zIndex:100,flexShrink:0}}>
           {/* Row 1: view tabs full-width */}
           <div style={{display:"flex",gap:"2px",background:"#e8e8e6",padding:"3px",borderRadius:"6px",margin:"0 10px 4px"}}>
-            {VIEWS.map(function(v){ return (
+            {["Day","Wknd","Month"].map(function(v){ return (
               <button key={v} data-viewtab={v} onClick={function(){
                 if (v==="Wknd") { setBaseDate(getUpcomingWeekend()); setView(v); return; }
-                if (v==="Day"||v==="3-Day"||v==="Week") { if (v===view) setBaseDate(getAnchorStart()); }
+                if (view==="Wknd") { setBaseDate(v==="Month" ? new Date() : getAnchorStart()); }
+                else if (v===view && (v==="Day"||v==="3-Day"||v==="Week")) { setBaseDate(getAnchorStart()); }
                 setView(v);
               }} style={{flex:1,padding:"5px 0",fontSize:"9px",letterSpacing:"0.06em",textTransform:"uppercase",border:"none",borderRadius:"4px",cursor:"pointer",background:view===v?"#1a1a1a":"transparent",color:view===v?"#ffffff":"#999",fontFamily:"inherit",transition:"all 0.15s"}}>{v}</button>
             ); })}
@@ -2903,8 +2939,10 @@ export default function TheList() {
             {VIEWS.map(function(v){ return (
               <button key={v} data-viewtab={v} onClick={function(){
                 if (v==="Wknd") { setBaseDate(getUpcomingWeekend()); setView(v); return; }
-                if (v==="Day"||v==="3-Day"||v==="Week") {
-                  if (v===view) setBaseDate(getAnchorStart());
+                if (view==="Wknd") {
+                  setBaseDate(v==="Month" ? new Date() : getAnchorStart());
+                } else if (v===view && (v==="Day"||v==="3-Day"||v==="Week")) {
+                  setBaseDate(getAnchorStart());
                 }
                 setView(v);
               }} style={{padding:"5px 12px",fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",border:"none",borderRadius:"4px",cursor:"pointer",background:view===v?"#1a1a1a":"transparent",color:view===v?"#ffffff":"#999",fontFamily:"inherit",transition:"all 0.15s"}}>{v}</button>
@@ -2929,10 +2967,10 @@ export default function TheList() {
         var monthDays=getMonthDays();
         return (
           <div style={{width:"100vw",position:"relative",left:"50%",right:"50%",marginLeft:"-50vw",marginRight:"-50vw",boxSizing:"border-box",textAlign:"left",flex:"1 1 auto",display:"flex",flexDirection:"column",minHeight:0}}>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",background:"#e8e8e6",gap:"1px",borderBottom:"1px solid #e8e8e6",flexShrink:0}}>
-              {["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"].map(function(d){ return <div key={d} style={{padding:"8px 0",textAlign:"center",fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",color:"#aaa",background:"#fafaf8",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d}</div>; })}
+            <div style={{display:"grid",gridTemplateColumns:"repeat(7,minmax(0,1fr))",background:"#e8e8e6",gap:"1px",borderBottom:"1px solid #e8e8e6",flexShrink:0}}>
+              {(isPhone?["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]:["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]).map(function(d){ return <div key={d} style={{padding:"8px 0",textAlign:"center",fontSize:isPhone?"9px":"10px",letterSpacing:"0.1em",textTransform:"uppercase",color:"#aaa",background:"#fafaf8",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d}</div>; })}
             </div>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:"1px",background:"#e8e8e6",flex:"1 1 auto",gridAutoRows:"1fr",minHeight:0}}>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(7,minmax(0,1fr))",gap:"1px",background:"#e8e8e6",flex:"1 1 auto",gridAutoRows:"1fr",minHeight:0}}>
               {monthDays.map(function(day,i){
                 var outside = day.getMonth() !== baseDate.getMonth();
                 var dk=toDateKey(day); var slots=getSlots(dk); var booked=slots.filter(function(s){ return s.name; });
@@ -2945,7 +2983,7 @@ export default function TheList() {
                     onMouseUp={cancelLongPress} onMouseLeave={function(e){ cancelLongPress();e.currentTarget.style.background=cellBg; }}
                     onTouchStart={function(){ longPressTimer.current=setTimeout(function(){ setMonthLongPress({dateKey:dk,day}); },600); }}
                     onTouchEnd={cancelLongPress} onTouchMove={cancelLongPress}
-                    style={{position:"relative",background:cellBg,minHeight:"64px",padding:"7px 8px",cursor:"pointer",borderTop:isT?"2px solid #a07830":"2px solid transparent",transition:"background 0.1s",userSelect:"none",boxSizing:"border-box",opacity:outside?0.85:1}}
+                    style={{position:"relative",background:cellBg,minHeight:isPhone?"50px":"64px",padding:isPhone?"4px 4px":"7px 8px",cursor:"pointer",borderTop:isT?"2px solid #a07830":"2px solid transparent",transition:"background 0.1s",userSelect:"none",boxSizing:"border-box",overflow:"hidden",opacity:outside?0.85:1}}
                     onMouseEnter={function(e){ e.currentTarget.style.background=outside?"#efefec":(isT?"#fff8e8":"#f4f4f2"); }}
                   >
                     <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:"6px",marginBottom:"3px"}}>
@@ -2977,17 +3015,29 @@ export default function TheList() {
               <div key={dateKey} style={{background:"#ffffff",display:"flex",flexDirection:"column",minHeight:0,overflow:"hidden"}}>
                 <div style={{padding:"4px 10px 5px",borderBottom:"1px solid #ebebea",display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:"4px",flexShrink:0}}>
                   {(function(){
-                    var sz=view==="Day"?"17px":"16px"; var mo=date.getMonth();
+                    var sz=view==="Day"?"17px":"16px"; if(isPhone) sz=view==="Day"?"15px":"13px";
+                    var mo=date.getMonth();
                     var monthStr=[3,4,5,6].includes(mo)?date.toLocaleDateString("en-US",{month:"long",day:"numeric"}):date.toLocaleDateString("en-US",{month:"short",day:"numeric"});
                     var wdStr=date.toLocaleDateString("en-US",{weekday:"long"})+(isToday(date)?" (Today)":"");
                     var hol=getHolidayForDate(dateKey);
-                    return (
-                      <div style={{minWidth:0,overflow:"hidden",flex:1}}>
-                        <div style={{display:"flex",alignItems:"baseline",gap:"6px",minWidth:0,marginBottom:"3px"}}>
-                          <span style={{fontSize:sz,color:isToday(date)?"#c9893a":"#b89a5a",lineHeight:1.1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",flexShrink:1,textTransform:"uppercase",letterSpacing:"0.06em"}}>{wdStr}</span>
-                          {hol&&<span style={{fontSize:"9px",color:"#a07830",letterSpacing:"0.08em",textTransform:"uppercase",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:1}}>{hol}</span>}
+                    if (view==="Week") {
+                      // Week view columns are narrow, so the weekday and date stay stacked.
+                      return (
+                        <div style={{minWidth:0,overflow:"hidden",flex:1}}>
+                          <div style={{display:"flex",alignItems:"baseline",gap:"6px",minWidth:0,marginBottom:"3px"}}>
+                            <span style={{fontSize:sz,color:isToday(date)?"#c9893a":"#b89a5a",lineHeight:1.1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",flexShrink:1,textTransform:"uppercase",letterSpacing:"0.06em"}}>{wdStr}</span>
+                            {hol&&<span style={{fontSize:"9px",color:"#a07830",letterSpacing:"0.08em",textTransform:"uppercase",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:1}}>{hol}</span>}
+                          </div>
+                          <div style={{fontSize:sz,color:"#1a1a1a",lineHeight:1.1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",textTransform:"uppercase",letterSpacing:"0.06em"}}>{monthStr}</div>
                         </div>
-                        <div style={{fontSize:sz,color:"#1a1a1a",lineHeight:1.1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",textTransform:"uppercase",letterSpacing:"0.06em"}}>{monthStr}</div>
+                      );
+                    }
+                    // Day / 3-Day / Wknd: weekday and date sit side by side on one line.
+                    return (
+                      <div style={{minWidth:0,overflow:"hidden",flex:1,display:"flex",alignItems:"baseline",gap:"5px"}}>
+                        <span style={{fontSize:sz,color:isToday(date)?"#c9893a":"#b89a5a",lineHeight:1.1,whiteSpace:"nowrap",flexShrink:0,textTransform:"uppercase",letterSpacing:"0.06em"}}>{wdStr+","}</span>
+                        <span style={{fontSize:sz,color:"#1a1a1a",lineHeight:1.1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:1,textTransform:"uppercase",letterSpacing:"0.06em"}}>{monthStr}</span>
+                        {hol&&<span style={{fontSize:"9px",color:"#a07830",letterSpacing:"0.08em",textTransform:"uppercase",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:2,alignSelf:"center"}}>{hol}</span>}
                       </div>
                     );
                   })()}
@@ -3009,6 +3059,11 @@ export default function TheList() {
                     var isEditing=editingCell&&editingCell.dateKey===dateKey&&editingCell.idx===idx;
                     var filled=!!slot.name; var wasRemoved=recentlyRemoved[dateKey+"-"+idx];
                     var isSwiped=swipedSlot===(dateKey+"-"+idx); var rowKey=dateKey+"-"+idx;
+                    // On a phone, a plain open slot must be a *real* editable field so the
+                    // very first tap (a true user gesture) raises the keyboard. Programmatic
+                    // focus 50ms later — which is what iPad leans on — is ignored by iOS on
+                    // iPhone, which is why the keyboard never appeared. iPad stays read-only.
+                    var phoneEmptyTypable = isPhone && !filled && !slot.blocked && !slot.availStatus && !slot.done;
                     var isOccEdit=isEditing&&editingOccupied;
                     var isSelected=selectMode&&!!selectedSlots[rowKey];
                     var isDragging=dragState&&dragState.sourceKey===rowKey;
@@ -3092,17 +3147,17 @@ export default function TheList() {
                               {isOccEdit&&<div style={{position:"absolute",top:"2px",left:"70px",fontSize:"9px",color:"#c0392b"}}>Editing {slot.name}</div>}
                               <input
                                 value={isEditing?editValues.name:(wasRemoved?"":(slot.name||((!filled&&slot.availStatus)?(slot.availStatus==="overtime"?"OVERTIME (COSTS TIME AND A HALF)":"AVAILABLE"):"")))}
-                                readOnly={!isEditing}
+                                readOnly={!isEditing && !phoneEmptyTypable}
                                 name="tl-slot-name" inputMode="text" data-lpignore="true" data-1p-ignore="true" data-form-type="other" data-bwignore="true"
                                 autoComplete="off" autoCorrect="off" autoCapitalize="words" spellCheck={false}
                                 onFocus={function(){ if(!isEditing&&!selectMode&&!isLiveDragging&&!dragState&&!slot.done) startEdit(dateKey,idx,(!filled&&!slot.availStatus)); }}
-                                onChange={function(e){ if(isEditing){ setEditValues(function(v){ return {...v,name:e.target.value}; }); if(!editChromeReady) setEditChromeReady(true); } }}
+                                onChange={function(e){ if(!isEditing){ if(!selectMode&&!isLiveDragging&&!dragState&&!slot.done) startEdit(dateKey,idx,(!filled&&!slot.availStatus)); } setEditValues(function(v){ return {...v,name:e.target.value}; }); if(!editChromeReady) setEditChromeReady(true); }}
                                 onKeyDown={function(e){ if(isEditing) handleKeyDown(e,dateKey,idx); }}
                                 onBlur={function(e){ if(isEditing) handleBlur(e); }}
                                 onMouseDown={function(){ if(filled&&!slot.done&&!isEditing&&!selectMode) startDragLongPress(dateKey,idx,0,0); }}
                                 onMouseUp={function(){ cancelDragLongPress(); }}
                                 placeholder="" data-rowkey={rowKey}
-                                style={{flex:1,minWidth:0,pointerEvents:slot.done?"none":"auto",fontSize:"13px",color:wasRemoved?"#c0392b":slot.done?"#2a6a2a":slot.pending?"#9a8458":(!filled&&slot.availStatus&&!isEditing)?"#1f7a33":filled?"#1a1a1a":"#999",fontWeight:(!filled&&slot.availStatus&&!isEditing)?"600":"normal",fontStyle:slot.pending?"italic":"normal",textDecoration:"none",background:"transparent",border:"none",outline:"none",padding:"0 2px",fontFamily:"Georgia,serif",cursor:isEditing?"text":"pointer",caretColor:(isEditing&&editChromeReady)?"#444":"transparent",WebkitUserSelect:isEditing?"text":"none",userSelect:isEditing?"text":"none",WebkitAppearance:"none",appearance:"none"}}
+                                style={{flex:1,minWidth:0,pointerEvents:slot.done?"none":"auto",fontSize:isPhone?"16px":"13px",color:wasRemoved?"#c0392b":slot.done?"#2a6a2a":slot.pending?"#9a8458":(!filled&&slot.availStatus&&!isEditing)?"#1f7a33":filled?"#1a1a1a":"#999",fontWeight:(!filled&&slot.availStatus&&!isEditing)?"600":"normal",fontStyle:slot.pending?"italic":"normal",textDecoration:"none",background:"transparent",border:"none",outline:"none",padding:"0 2px",fontFamily:"Georgia,serif",cursor:isEditing?"text":"pointer",caretColor:(isEditing&&editChromeReady)?"#444":"transparent",WebkitUserSelect:isEditing?"text":"none",userSelect:isEditing?"text":"none",WebkitAppearance:"none",appearance:"none"}}
                               />
                               {!isEditing&&(
                                 <div style={{display:"flex",alignItems:"center",gap:"6px",flexShrink:0}}
@@ -3114,14 +3169,14 @@ export default function TheList() {
                                   {view!=="Week"&&filled&&slot.price&&<span style={{fontSize:"12px",color:slot.done?"#3a5a3a":"#a07830"}}>{slot.price}</span>}
                                   {view!=="Week"&&filled&&(slot.recurWeeks?(
                                     <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:"2px",width:"50px",flexShrink:0}}>
-                                      <span onClick={function(e){ e.stopPropagation(); openClientProfile(slot.name); }} style={{fontSize:"12px",fontWeight:"bold",color:"#4a8a9a",cursor:"pointer",lineHeight:1,letterSpacing:"0.01em"}}>{(slot.recurWeeks===1?"1w":(slot.recurWeeks+"w"))+(slot.isException?"*":"")}</span>
-                                      <button onClick={function(e){ e.stopPropagation(); if(slot.groupId){var aS=getSlots(dateKey);var gS=aS.map(function(s,i){ return {...s,i}; }).filter(function(s){ return s.groupId===slot.groupId&&s.name; });if(gS.length>1){setGroupRecurModal({dateKey,idx,slot,groupSlots:gS,weeks:null});return;}} setRecurringModal({dateKey,idx,slot}); }} title="Recurring — tap to manage" style={{background:"none",border:"none",cursor:"pointer",padding:"0 1px",color:"#4a8a9a",fontSize:"16px",fontWeight:"bold",lineHeight:1}}>{"↺"}</button>
+                                      <span onClick={function(e){ e.stopPropagation(); openClientProfile(slot.name); }} style={{fontSize:"12px",fontWeight:"500",color:"#4a8a9a",cursor:"pointer",lineHeight:1,letterSpacing:"0.01em"}}>{(slot.recurWeeks===1?"1w":(slot.recurWeeks+"w"))+(slot.isException?"*":"")}</span>
+                                      <button onClick={function(e){ e.stopPropagation(); if(slot.groupId){var aS=getSlots(dateKey);var gS=aS.map(function(s,i){ return {...s,i}; }).filter(function(s){ return s.groupId===slot.groupId&&s.name; });if(gS.length>1){setGroupRecurModal({dateKey,idx,slot,groupSlots:gS,weeks:null});return;}} setRecurringModal({dateKey,idx,slot}); }} title="Recurring — tap to manage" style={{background:"none",border:"none",cursor:"pointer",padding:"0 1px",color:"#4a8a9a",fontSize:"16px",fontWeight:"500",lineHeight:1}}>{"↺"}</button>
                                     </div>
                                   ):<div style={{width:"50px",flexShrink:0}}/>)}
                                   {view!=="Week"&&filled&&<button onClick={function(e){ e.stopPropagation(); setNoteDraft(slot.note||""); setNoteModal({dateKey,idx,name:slot.name}); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 5px",color:slot.note?"#c9a96e":"#bbb",fontSize:"22px",fontWeight:"bold",lineHeight:1,WebkitTextStroke:"0.6px currentColor"}}>{"✎"}</button>}
                                 </div>
                               )}
-                              {isEditing&&editChromeReady&&<input value={editValues.price} onChange={function(e){ setEditValues(function(v){ return {...v,price:e.target.value}; }); }} onKeyDown={function(e){ handleKeyDown(e,dateKey,idx); }} onBlur={handleBlur} data-rowkey={rowKey} placeholder="$" style={{width:"52px",fontSize:"13px",color:"#1a1a1a",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"4px",outline:"none",padding:"2px 5px",fontFamily:"Georgia,serif",WebkitAppearance:"none",appearance:"none"}}/>}
+                              {isEditing&&editChromeReady&&<input value={editValues.price} onChange={function(e){ setEditValues(function(v){ return {...v,price:e.target.value}; }); }} onKeyDown={function(e){ handleKeyDown(e,dateKey,idx); }} onBlur={handleBlur} data-rowkey={rowKey} placeholder="$" style={{width:"52px",fontSize:isPhone?"16px":"13px",color:"#1a1a1a",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"4px",outline:"none",padding:"2px 5px",fontFamily:"Georgia,serif",WebkitAppearance:"none",appearance:"none"}}/>}
                               {isEditing&&editChromeReady&&<button data-rowkey={rowKey} onMouseDown={function(e){ e.preventDefault(); }} onClick={function(e){ e.preventDefault(); var nm=stripLeadingNumbers(((editValuesRef.current&&editValuesRef.current.name)||"").trim()); if(nm){ commitPenciled(dateKey,idx); } else { setPencilArmed(function(p){ return !p; }); } }} title={pencilArmed?"Pencil mode on — type a name, then Enter to pencil them in":"Penciled in — offered, waiting to hear back"} style={{flexShrink:0,marginLeft:"4px",display:"flex",alignItems:"center",gap:"3px",background:pencilArmed?"#c9a96e":"#fff",border:pencilArmed?"1px solid #c9a96e":"1px solid #d8c08a",borderRadius:"6px",cursor:"pointer",padding:"3px 7px",fontFamily:"Georgia,serif",fontSize:"11px",color:pencilArmed?"#2a2009":"#9a7a30",lineHeight:1,whiteSpace:"nowrap"}}>{"✎ Pencil"}</button>}
                             </div>
                           )}
