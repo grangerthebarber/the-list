@@ -58,7 +58,11 @@ const WEEK_OPTIONS = [1,2,3,4,5,6,7,8];
 // arrow's blue so adjusted times, links, and recurring all read as one color.
 const ADJ_BLUE = "#4a8a9a";
 
-function parseTime(t) { var parts = t.split(":").map(Number); return parts[0]*60+parts[1]; }
+// parseTime is used ONLY as a chronological sort comparator. The barber day runs
+// 7am→3pm, so 1:00–4:00 are afternoon and must sort AFTER 12:xx. Delegate to the
+// afternoon-aware mapper (hoisted) so every sort agrees on the same ordering;
+// otherwise recurring placement put 1:13–3:06 at the top and "ended" the day at 12:51.
+function parseTime(t) { return timeToAbsMinutes(t); }
 var _gid = 1;
 function newGroupId() { return "g"+(_gid++); }
 const SHORT_MONTHS = [3,4,5,6];
@@ -189,6 +193,38 @@ function describeBanner(entry) {
 }
 
 const VIEWS = ["Day","3-Day","Wknd","Week","Month"];
+
+// Compare two schedule snapshots and return the single most salient slot that
+// differs, preferring one where a name appears or disappears. Used to label
+// undo/redo ("Undone James at 2:30") and to jump to the affected day.
+function describeScheduleDiff(fromSch, toSch) {
+  fromSch = fromSch || {}; toSch = toSch || {};
+  var keyset = {};
+  Object.keys(fromSch).forEach(function(k){ keyset[k]=true; });
+  Object.keys(toSch).forEach(function(k){ keyset[k]=true; });
+  var allKeys = Object.keys(keyset).sort();
+  var namedHit = null; var otherHit = null;
+  allKeys.forEach(function(dk){
+    if (namedHit) return;
+    var a = fromSch[dk] || []; var b = toSch[dk] || [];
+    var amap = {}; var bmap = {}; var times = {};
+    a.forEach(function(s){ amap[s.time]=s; times[s.time]=true; });
+    b.forEach(function(s){ bmap[s.time]=s; times[s.time]=true; });
+    Object.keys(times).forEach(function(t){
+      var sa = amap[t]; var sb = bmap[t];
+      var an = (sa&&sa.name)||""; var bn = (sb&&sb.name)||"";
+      if (an !== bn) {
+        var nm = an || bn;
+        if (nm && !namedHit) namedHit = {dateKey:dk, time:t, name:nm, hasName:true};
+      } else if (sa && sb && (!!sa.done)!==(!!sb.done)) {
+        if (!otherHit) otherHit = {dateKey:dk, time:t, name:an||bn||"", hasName:!!(an||bn)};
+      } else if ((!!sa) !== (!!sb)) {
+        if (!otherHit) otherHit = {dateKey:dk, time:t, name:(sa&&sa.name)||(sb&&sb.name)||"", hasName:false};
+      }
+    });
+  });
+  return namedHit || otherHit || null;
+}
 
 function getNthWeekday(year, month, weekday, n) {
   if (n === -1) {
@@ -690,6 +726,18 @@ export default function TheList() {
     var handler = function(e) {
       if ((e.ctrlKey||e.metaKey) && e.key==="z" && !e.shiftKey) { e.preventDefault(); handleUndo(); }
       if ((e.ctrlKey||e.metaKey) && (e.key==="y" || (e.key==="z" && e.shiftKey))) { e.preventDefault(); handleRedo(); }
+      // Left/Right arrows page through days (months in Month view), mirroring the
+      // on-screen ‹ / › buttons. Ignored while a field is focused — there the arrows
+      // move the text cursor / hop slot rows, and Shift+Arrow nudges the time.
+      if ((e.key==="ArrowLeft"||e.key==="ArrowRight") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (editingRef.current) return;
+        var ae = (typeof document!=="undefined") ? document.activeElement : null;
+        if (ae && (ae.tagName==="INPUT" || ae.tagName==="TEXTAREA")) return;
+        e.preventDefault();
+        var back = e.key==="ArrowLeft";
+        if (view==="Month") { var dm=new Date(baseDate); dm.setMonth(dm.getMonth()+(back?-1:1)); setBaseDate(dm); }
+        else setBaseDate(function(prev){ return addDays(prev, back?-1:1); });
+      }
     };
     window.addEventListener("keydown", handler);
     return function() { window.removeEventListener("keydown", handler); };
@@ -746,6 +794,24 @@ export default function TheList() {
     var rem = days.length % 7;
     if (rem !== 0) { for (var k=1; k<=7-rem; k++) days.push(new Date(year, month, dim+k)); }
     return days;
+  };
+
+  // Is a given date currently on screen in the active view? (Month = same month.)
+  const isDateKeyVisible = function(dateKey) {
+    if (!dateKey) return true;
+    if (view==="Month") {
+      var d = parseDateKey(dateKey);
+      return d.getFullYear()===baseDate.getFullYear() && d.getMonth()===baseDate.getMonth();
+    }
+    var vis = getDates().map(function(dt){ return toDateKey(dt); });
+    return vis.indexOf(dateKey) >= 0;
+  };
+  // Jump so an affected day is visible (becomes the first column / its month) only
+  // if it isn't already showing — used after undo/redo so the change is in view.
+  const goToDateKeyIfHidden = function(dateKey) {
+    if (!dateKey) return;
+    if (isDateKeyVisible(dateKey)) return;
+    setBaseDate(parseDateKey(dateKey));
   };
 
   const getSlots = useCallback(function(dateKey) {
@@ -806,6 +872,7 @@ export default function TheList() {
     var idx = findSlotIdxByTime(slots, entry.time);
     if (idx < 0) { showBanner({type:"undo",name:"that change",dateKey:null,time:null}); return; }
     var cur = slots[idx];
+    goToDateKeyIfHidden(dk);
     var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
 
     if (entry.type==="added"||entry.type==="checkoff") {
@@ -868,19 +935,23 @@ export default function TheList() {
   const handleUndo = function() {
     if (undoStack.length === 0) return;
     var snapshot = undoStack[undoStack.length-1];
+    var diff = describeScheduleDiff(schedulesRef.current, snapshot.schedules);
     setRedoStack(function(prev){ return [...prev, {schedules: JSON.parse(JSON.stringify(schedulesRef.current))}]; });
     setUndoStack(function(prev){ return prev.slice(0,-1); });
     setSchedules(snapshot.schedules);
-    showBanner({type:"undo", name:"last change", dateKey:null, time:null});
+    if (diff && diff.dateKey) goToDateKeyIfHidden(diff.dateKey);
+    showBanner({type:"undo", name:(diff&&diff.name)?diff.name:"last change", time:(diff&&diff.hasName)?diff.time:null, dateKey:(diff&&diff.dateKey)?diff.dateKey:null});
   };
 
   const handleRedo = function() {
     if (redoStack.length === 0) return;
     var snapshot = redoStack[redoStack.length-1];
+    var diff = describeScheduleDiff(schedulesRef.current, snapshot.schedules);
     setUndoStack(function(prev){ return [...prev, {schedules: JSON.parse(JSON.stringify(schedulesRef.current))}]; });
     setRedoStack(function(prev){ return prev.slice(0,-1); });
     setSchedules(snapshot.schedules);
-    showBanner({type:"redo", name:"last change", dateKey:null, time:null});
+    if (diff && diff.dateKey) goToDateKeyIfHidden(diff.dateKey);
+    showBanner({type:"redo", name:(diff&&diff.name)?diff.name:"last change", time:(diff&&diff.hasName)?diff.time:null, dateKey:(diff&&diff.dateKey)?diff.dateKey:null});
   };
 
   const snapshotAndChange = function(changeFn, historyEntry) {
@@ -1008,6 +1079,12 @@ export default function TheList() {
     var slots = [...getSlots(dateKey)];
     var prev = slots[idx];
     if (!prev.name || !prev.pending) return;
+    // A penciled occurrence of a recurring series: ask whether to lock just this one
+    // or every future penciled occurrence at once.
+    if (prev.recurWeeks != null) {
+      setSeriesEditModal({field:"lock", dateKey:dateKey, idx:idx, name:prev.name, time:prev.time, price:prev.price, recurWeeks:prev.recurWeeks});
+      return;
+    }
     var snapshot = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
     pushUndo(snapshot);
     slots[idx] = {...prev,pending:false};
@@ -1047,7 +1124,7 @@ export default function TheList() {
     // For default (non-custom) slots, remember the original default time the first
     // time it's nudged, so the render layer can color it cobalt (earlier) or purple (later).
     var baseTime = prev.defaultBaseTime || (!wasCustom ? prev.time : null);
-    slots[idx] = {...prev,time:newTime,customTime: wasCustom && !isStillDefault,defaultBaseTime:(!wasCustom?baseTime:prev.defaultBaseTime)};
+    slots[idx] = {...prev,time:newTime,isCustom:wasCustom,customTime: wasCustom && !isStillDefault,defaultBaseTime:(!wasCustom?baseTime:prev.defaultBaseTime)};
     slots.sort(function(a,b){ return timeToAbsMinutes(a.time)-timeToAbsMinutes(b.time); });
     setSlots(dateKey,slots);
     setTimeEditModal(null);
@@ -1058,6 +1135,47 @@ export default function TheList() {
     if (related && related.dataset && related.dataset.rowkey===((editingRef.current&&editingRef.current.dateKey)+"-"+(editingRef.current&&editingRef.current.idx))) return;
     setTimeout(function(){ if (editingRef.current) doCommit(editingRef.current.dateKey,editingRef.current.idx,editValuesRef.current); },100);
   },[doCommit]);
+
+  // Shift+Arrow while a slot's name field is focused nudges THAT slot's time by 5
+  // minutes (Up = earlier, Down = later) without leaving the edit: the keyboard
+  // stays up and the half-typed name is preserved. Plain Up/Down still hops rows.
+  const nudgeEditingSlotTime = function(dateKey, idx, delta, doSnapshot) {
+    var slots = [...getSlots(dateKey)];
+    var prev = slots[idx];
+    if (!prev || prev.blocked) return;
+    var newTime = absMinutesToTime(timeToAbsMinutes(prev.time) + delta);
+    if (newTime === prev.time) return;
+    // Don't let a nudge land exactly on another slot's time (fails silently, no popup).
+    var clash = false; var ci;
+    for (ci=0; ci<slots.length; ci++) { if (ci!==idx && slots[ci].time===newTime) { clash=true; break; } }
+    if (clash) return;
+    // One undo step per discrete press; holding the key (auto-repeat) keeps adjusting
+    // but doesn't flood the stack.
+    if (doSnapshot) pushUndo({schedules:JSON.parse(JSON.stringify(schedulesRef.current))});
+    var isStillDefault = DEFAULT_TIMES.indexOf(newTime) >= 0;
+    var wasCustom = prev.isCustom===true || (prev.isCustom===undefined && DEFAULT_TIMES.indexOf(prev.time) === -1);
+    var baseTime = prev.defaultBaseTime || (!wasCustom ? prev.time : null);
+    var moved = {...prev,time:newTime,isCustom:wasCustom,customTime: wasCustom && !isStillDefault,defaultBaseTime:(!wasCustom?baseTime:prev.defaultBaseTime)};
+    // A recurring occurrence nudged this way moves only itself (marked an exception),
+    // never the whole series — popping the series modal would interrupt typing.
+    if (prev.recurWeeks && prev.name) moved.isException = true;
+    slots[idx] = moved;
+    slots.sort(function(a,b){ return timeToAbsMinutes(a.time)-timeToAbsMinutes(b.time); });
+    var newIdx = -1; var fi;
+    for (fi=0; fi<slots.length; fi++) { if (slots[fi].time===newTime) { newIdx=fi; break; } }
+    setSlots(dateKey,slots);
+    // If the row changed position, re-aim the live edit at its new index and refocus
+    // so typing continues seamlessly. A 5-min nudge almost never crosses a neighbor,
+    // so normally the index is unchanged and nothing remounts.
+    if (newIdx>=0 && newIdx!==idx) {
+      editingRef.current = {dateKey:dateKey, idx:newIdx};
+      setEditingCell({dateKey:dateKey, idx:newIdx});
+      setTimeout(function(){
+        var el = document.querySelectorAll("[data-rowkey='" + dateKey + "-" + newIdx + "']");
+        if (el && el[0]) el[0].focus();
+      }, 30);
+    }
+  };
 
   const handleKeyDown = function(e, dateKey, idx) {
     if (e.key==="Tab") return;
@@ -1142,6 +1260,7 @@ export default function TheList() {
       }
     } else if (e.key==="ArrowDown") {
       e.preventDefault();
+      if (e.shiftKey) { nudgeEditingSlotTime(dateKey, idx, 5, !e.repeat); return; }
       var curVals = editValuesRef.current;
       var curDateKey = dateKey; var curIdx = idx;
       if (doCommit(curDateKey,curIdx,curVals)) return;
@@ -1151,6 +1270,7 @@ export default function TheList() {
       }
     } else if (e.key==="ArrowUp") {
       e.preventDefault();
+      if (e.shiftKey) { nudgeEditingSlotTime(dateKey, idx, -5, !e.repeat); return; }
       var curVals2 = editValuesRef.current;
       var curDateKey2 = dateKey; var curIdx2 = idx;
       if (doCommit(curDateKey2,curIdx2,curVals2)) return;
@@ -1455,10 +1575,10 @@ export default function TheList() {
         if (si>=0) {
           var taken = daySlots[si].name && daySlots[si].name.toLowerCase()!==nameLower;
           if (!taken && (allowOverwriteSame || !daySlots[si].name)) {
-            daySlots[si] = {...daySlots[si],name:client.name,price:t.price,recurWeeks:t.recurWeeks,isException:true,done:false,groupId:dgid};
+            daySlots[si] = {...daySlots[si],name:client.name,price:t.price,recurWeeks:t.recurWeeks,isException:false,done:false,groupId:dgid};
           }
         } else {
-          daySlots.push({time:t.time,name:client.name,price:t.price,recurWeeks:t.recurWeeks,isException:true,done:false,groupId:dgid});
+          daySlots.push({time:t.time,name:client.name,price:t.price,recurWeeks:t.recurWeeks,isException:false,done:false,groupId:dgid});
         }
       });
       daySlots.sort(function(a,b){ return parseTime(a.time)-parseTime(b.time); });
@@ -1577,8 +1697,8 @@ export default function TheList() {
       var ds=newSch[fk]?[...newSch[fk]]:DEFAULT_TIMES.map(function(t){ return {time:t,name:"",price:"",done:false,recurWeeks:null}; });
       var ei=ds.findIndex(function(s){ return s.time===sourceSlot.time; });
       if (ei>=0&&ds[ei].name&&ds[ei].name!==sourceSlot.name) conflicts.push({dateKey:fk,time:sourceSlot.time,name:sourceSlot.name,price:sourceSlot.price,recurWeeks:weeks,existingName:ds[ei].name});
-      else if (ei>=0&&!ds[ei].name) { ds[ei]={...ds[ei],name:sourceSlot.name,price:sourceSlot.price,recurWeeks:weeks,done:false,groupId:sourceSlot.groupId||null}; newSch[fk]=ds; }
-      else if (ei<0) { ds.push({time:sourceSlot.time,name:sourceSlot.name,price:sourceSlot.price,recurWeeks:weeks,done:false,groupId:sourceSlot.groupId||null}); ds.sort(function(a,b){return parseTime(a.time)-parseTime(b.time);}); newSch[fk]=ds; }
+      else if (ei>=0&&!ds[ei].name) { ds[ei]={...ds[ei],name:sourceSlot.name,price:sourceSlot.price,recurWeeks:weeks,done:false,pending:!!sourceSlot.pending,groupId:sourceSlot.groupId||null}; newSch[fk]=ds; }
+      else if (ei<0) { ds.push({time:sourceSlot.time,name:sourceSlot.name,price:sourceSlot.price,recurWeeks:weeks,done:false,pending:!!sourceSlot.pending,groupId:sourceSlot.groupId||null}); ds.sort(function(a,b){return parseTime(a.time)-parseTime(b.time);}); newSch[fk]=ds; }
     }
     return {newSchedules:newSch,conflicts};
   };
@@ -1588,12 +1708,18 @@ export default function TheList() {
   const recurringNameConflict = function(name, exDateKey, exIdx) {
     var lower=(name||"").toLowerCase();
     if (!lower) return false;
+    // Only an ACTIVELY recurring client reserves a name. A past occurrence, or one
+    // that was already checked off, or a series that's since been cancelled, must NOT
+    // force a rename — otherwise a returning client (e.g. James McGuinness coming back
+    // to recurring after cancelling) gets told his own name is "taken."
+    var todayKey=toDateKey(new Date());
     var found=false;
     Object.keys(schedulesRef.current).forEach(function(dk){
+      if (dk < todayKey) return;
       var ds=schedulesRef.current[dk]; if(!ds) return;
       ds.forEach(function(s,si){
         if (dk===exDateKey && si===exIdx) return;
-        if (s.name && s.name.toLowerCase()===lower && s.recurWeeks!=null) found=true;
+        if (s.name && s.name.toLowerCase()===lower && s.recurWeeks!=null && !s.done) found=true;
       });
     });
     return found;
@@ -1610,7 +1736,7 @@ export default function TheList() {
     Object.keys(newSch).forEach(function(dk){
       if (dk < fromDateKey) return;
       var ds=newSch[dk]?[...newSch[dk]]:DEFAULT_TIMES.map(function(t){ return {time:t,name:"",price:"",done:false,recurWeeks:null}; });
-      var occIdx=ds.findIndex(function(s){ return s.name && s.name.toLowerCase()===lower && s.recurWeeks!=null && !s.done; });
+      var occIdx=ds.findIndex(function(s){ return s.name && s.name.toLowerCase()===lower && !s.done; });
       if (occIdx<0) return;
       var occ=ds[occIdx];
       if (occ.time===newTime) { newSch[dk]=ds; return; }
@@ -1694,7 +1820,7 @@ export default function TheList() {
         if (dk < m.dateKey) return;
         var ds=[...newSch[dk]]; var changed=false;
         ds.forEach(function(s,si){
-          if (s.name && s.name.toLowerCase()===lowerS && s.recurWeeks!=null && !s.done) { ds[si]={...s,name:m.newName,price:m.newPrice}; changed=true; }
+          if (s.name && s.name.toLowerCase()===lowerS && !s.done) { ds[si]={...s,name:m.newName,price:m.newPrice}; changed=true; }
         });
         if (changed) newSch[dk]=ds;
       });
@@ -1731,6 +1857,65 @@ export default function TheList() {
         setConflictModal({conflicts:resT.conflicts, pending:resT.newSchedules, client:{name:occName,price:cur.price||"",recurWeeks:cur.recurWeeks}, history:{type:"edited",time:m.newTime,name:occName,prevName:occName,dateKey:m.dateKey}});
       } else { setSchedules(resT.newSchedules); }
     }
+  };
+
+  // Drop of a recurring occurrence onto a new slot. "Just this one" makes it a single
+  // exception sitting at the dropped slot (this week only); "All" shifts the whole
+  // future series to the dropped time, keeping each occurrence on its own day. (A
+  // cross-day drop therefore only changes the time for "All" — it can't relocate a
+  // weekly series to a different weekday.)
+  const applySeriesDrop = function(scope) {
+    var m=seriesEditModal; if(!m||m.field!=="drop") return;
+    if (scope==="one") {
+      var snap={schedules:JSON.parse(JSON.stringify(schedulesRef.current))}; pushUndo(snap);
+      var tgt=[...getSlots(m.targetDateKey)]; var tslot=tgt[m.targetIdx];
+      if (tslot && !tslot.name && !tslot.blocked) {
+        tgt[m.targetIdx]={...tslot,name:m.name,price:m.price,recurWeeks:m.recurWeeks,isException:true,done:false,groupId:null,pending:!!m.pending};
+        if (m.targetDateKey===m.dateKey) {
+          tgt[m.idx]={...tgt[m.idx],name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null,pending:false,availStatus:null};
+          setSlots(m.targetDateKey,tgt);
+        } else {
+          setSlots(m.targetDateKey,tgt);
+          var src=[...getSlots(m.dateKey)];
+          src[m.idx]={...src[m.idx],name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null,pending:false,availStatus:null};
+          setSlots(m.dateKey,src);
+        }
+        addHistoryEntry({type:"added",time:m.newTime,name:m.name,price:m.price,dateKey:m.targetDateKey});
+      }
+      setSeriesEditModal(null);
+    } else {
+      var snap2={schedules:JSON.parse(JSON.stringify(schedulesRef.current))}; pushUndo(snap2);
+      var res=buildSeriesTimeShift(m.name, m.dateKey, m.newTime);
+      setSeriesEditModal(null);
+      if (res.conflicts.length>0) {
+        setConflictModal({conflicts:res.conflicts, pending:res.newSchedules, client:{name:m.name,price:m.price||"",recurWeeks:m.recurWeeks}, history:{type:"edited",time:m.newTime,name:m.name,prevName:m.name,dateKey:m.dateKey}});
+      } else { setSchedules(res.newSchedules); }
+    }
+  };
+
+  // Locking a penciled occurrence of a recurring series: confirm just this one, or
+  // lock in every future penciled occurrence of the series at once.
+  const applySeriesLock = function(scope) {
+    var m=seriesEditModal; if(!m||m.field!=="lock") return;
+    var snap={schedules:JSON.parse(JSON.stringify(schedulesRef.current))}; pushUndo(snap);
+    if (scope==="one") {
+      var slots=[...getSlots(m.dateKey)]; var p=slots[m.idx];
+      if (p) { slots[m.idx]={...p,pending:false}; setSlots(m.dateKey,slots); addHistoryEntry({type:"added",time:p.time,name:p.name,price:p.price,dateKey:m.dateKey}); }
+    } else {
+      var lower=(m.name||"").toLowerCase();
+      var newSch={...schedulesRef.current};
+      Object.keys(newSch).forEach(function(dk){
+        if (dk < m.dateKey) return;
+        var ds=[...newSch[dk]]; var changed=false;
+        ds.forEach(function(s,si){
+          if (s.name && s.name.toLowerCase()===lower && !s.done && s.pending) { ds[si]={...s,pending:false}; changed=true; }
+        });
+        if (changed) newSch[dk]=ds;
+      });
+      setSchedules(newSch);
+      addHistoryEntry({type:"added",time:m.time||"",name:m.name,dateKey:m.dateKey});
+    }
+    setSeriesEditModal(null);
   };
 
   // 6D conflict resolution. The conflict modal carries {conflicts, pending, client, history}.
@@ -2075,6 +2260,14 @@ export default function TheList() {
     if (client.originalDateKey === targetDateKey && client.originalIdx === targetIdx) return false;
     var targetSlot = getSlots(targetDateKey)[targetIdx];
     if (!targetSlot || targetSlot.name || targetSlot.blocked) return false;
+    // A recurring occurrence being dragged: don't move silently — ask whether this is
+    // just this one or the whole series. Return true (handled); the caller clears the
+    // drag UI and applySeriesDrop performs the move once the user chooses.
+    if (client.recurWeeks != null) {
+      var srcR = getSlots(client.originalDateKey)[client.originalIdx] || {};
+      setSeriesEditModal({field:"drop", dateKey:client.originalDateKey, idx:client.originalIdx, targetDateKey:targetDateKey, targetIdx:targetIdx, name:client.name, price:client.price, recurWeeks:client.recurWeeks, pending:!!srcR.pending, oldTime:srcR.time||"", newTime:targetSlot.time});
+      return true;
+    }
     var sameDay = client.originalDateKey === targetDateKey;
     var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
     pushUndo(snapshot);
@@ -2379,6 +2572,12 @@ export default function TheList() {
     if (client.originalDateKey===targetDateKey && client.originalIdx===targetIdx) { setDragState(null); setDragCalOpen(false); return; }
     var targetSlot = getSlots(targetDateKey)[targetIdx];
     if (targetSlot.name || targetSlot.blocked) { setDragState(null); setDragCalOpen(false); return; }
+    if (client.recurWeeks != null) {
+      var srcM = getSlots(client.originalDateKey)[client.originalIdx] || {};
+      setSeriesEditModal({field:"drop", dateKey:client.originalDateKey, idx:client.originalIdx, targetDateKey:targetDateKey, targetIdx:targetIdx, name:client.name, price:client.price, recurWeeks:client.recurWeeks, pending:!!srcM.pending, oldTime:srcM.time||"", newTime:targetSlot.time});
+      setDragState(null); setDragCalOpen(false);
+      return;
+    }
     var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))}; pushUndo(snapshot);
     var ts = [...getSlots(targetDateKey)];
     ts[targetIdx] = {...ts[targetIdx],name:client.name,price:client.price,recurWeeks:client.recurWeeks,done:false};
@@ -2523,7 +2722,7 @@ export default function TheList() {
   }
 
   return (
-    <div ref={appRootRef} style={{height:"100dvh",overflow:"hidden",boxSizing:"border-box",display:"flex",flexDirection:"column",background:"#ffffff",fontFamily:"Georgia,serif",color:"#1a1a1a",paddingTop:(reassignMode||placingClient)?"calc(env(safe-area-inset-top,0px) + 52px)":"0"}}
+    <div ref={appRootRef} style={{height:"100%",overflow:"hidden",boxSizing:"border-box",display:"flex",flexDirection:"column",background:"#ffffff",fontFamily:"Georgia,serif",color:"#1a1a1a",paddingTop:(reassignMode||placingClient)?"calc(env(safe-area-inset-top,0px) + 52px)":"0"}}
       onMouseUp={function(){ endSelectDrag(); if(dragState&&!dragCalHover) { setDragState(null); setDragCalOpen(false); } }}
       onTouchStart={function(e){
         // Record touch start for swipe-to-navigate (horizontal swipe on the app chrome,
@@ -2558,12 +2757,12 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2500,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",pointerEvents:"none",fontFamily:"Georgia,serif"}}>v11</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2500,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",pointerEvents:"none",fontFamily:"Georgia,serif"}}>v12</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
           still allows normal one-finger panning and two-finger pinch-zoom. */}
-      <style>{"html,body,#root,*{touch-action:manipulation;-webkit-text-size-adjust:100%}@keyframes tlInRight{from{transform:translateX(26px);opacity:0.4}to{transform:translateX(0);opacity:1}}@keyframes tlInLeft{from{transform:translateX(-26px);opacity:0.4}to{transform:translateX(0);opacity:1}}"}</style>
+      <style>{"html,body,#root{height:100%;margin:0;padding:0}body{overflow:hidden}html,body,#root,*{touch-action:manipulation;-webkit-text-size-adjust:100%}@keyframes tlInRight{from{transform:translateX(42px);opacity:0.35}to{transform:translateX(0);opacity:1}}@keyframes tlInLeft{from{transform:translateX(-42px);opacity:0.35}to{transform:translateX(0);opacity:1}}"}</style>
 
       {banner && (
         <div
@@ -2770,10 +2969,10 @@ export default function TheList() {
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:1150,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px",boxSizing:"border-box"}} onClick={function(){ setSeriesEditModal(null); }}>
           <div style={{background:"#f8f8f6",border:"1px solid #d8d8d6",borderRadius:"12px",padding:"26px 26px 22px",width:"min(360px,92vw)"}} onClick={function(e){ e.stopPropagation(); }}>
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#4a8a9a",marginBottom:"8px"}}>Recurring appointment</div>
-            <div style={{fontSize:"16px",color:"#1a1a1a",marginBottom:"6px"}}>{seriesEditModal.field==="time"?"Move this time for…":"Apply this change to…"}</div>
-            <div style={{fontSize:"12px",color:"#888",marginBottom:"20px"}}>{seriesEditModal.field==="time"?((seriesEditModal.name||"This client")+" moves from "+seriesEditModal.oldTime+" to "+seriesEditModal.newTime+"."):((seriesEditModal.oldName||"This client")+(seriesEditModal.newName&&seriesEditModal.newName!==seriesEditModal.oldName?(" \u2192 "+seriesEditModal.newName):"")+".")}</div>
-            <button onClick={function(){ if(seriesEditModal.field==="time"){ applySeriesTime("all"); } else { applySeriesNamePrice("all"); } }} style={{display:"block",width:"100%",padding:"12px",background:"#1a1a1a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",marginBottom:"10px"}}>All of {(seriesEditModal.field==="time"?seriesEditModal.name:seriesEditModal.oldName)||"this client"}'s appointments</button>
-            <button onClick={function(){ if(seriesEditModal.field==="time"){ applySeriesTime("one"); } else { applySeriesNamePrice("one"); } }} style={{display:"block",width:"100%",padding:"12px",background:"#ffffff",border:"1px solid #d0d0ce",borderRadius:"8px",color:"#1a1a1a",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",marginBottom:"14px"}}>Just this one</button>
+            <div style={{fontSize:"16px",color:"#1a1a1a",marginBottom:"6px"}}>{seriesEditModal.field==="time"?"Move this time for…":seriesEditModal.field==="drop"?"Move this appointment…":seriesEditModal.field==="lock"?"Lock in…":"Apply this change to…"}</div>
+            <div style={{fontSize:"12px",color:"#888",marginBottom:"20px"}}>{seriesEditModal.field==="time"?((seriesEditModal.name||"This client")+" moves from "+seriesEditModal.oldTime+" to "+seriesEditModal.newTime+"."):seriesEditModal.field==="drop"?((seriesEditModal.name||"This client")+" moves to "+seriesEditModal.newTime+". \u201cAll\u201d shifts the whole series to this time (each stays on its own day)."):seriesEditModal.field==="lock"?((seriesEditModal.name||"This client")+" is penciled in"+(seriesEditModal.time?(" at "+seriesEditModal.time):"")+"."):((seriesEditModal.oldName||"This client")+(seriesEditModal.newName&&seriesEditModal.newName!==seriesEditModal.oldName?(" \u2192 "+seriesEditModal.newName):"")+".")}</div>
+            <button onClick={function(){ if(seriesEditModal.field==="time"){ applySeriesTime("all"); } else if(seriesEditModal.field==="drop"){ applySeriesDrop("all"); } else if(seriesEditModal.field==="lock"){ applySeriesLock("all"); } else { applySeriesNamePrice("all"); } }} style={{display:"block",width:"100%",padding:"12px",background:"#1a1a1a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",marginBottom:"10px"}}>All of {(seriesEditModal.field==="nameprice"?seriesEditModal.oldName:seriesEditModal.name)||"this client"}'s appointments</button>
+            <button onClick={function(){ if(seriesEditModal.field==="time"){ applySeriesTime("one"); } else if(seriesEditModal.field==="drop"){ applySeriesDrop("one"); } else if(seriesEditModal.field==="lock"){ applySeriesLock("one"); } else { applySeriesNamePrice("one"); } }} style={{display:"block",width:"100%",padding:"12px",background:"#ffffff",border:"1px solid #d0d0ce",borderRadius:"8px",color:"#1a1a1a",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",marginBottom:"14px"}}>Just this one</button>
             <button onClick={function(){ setSeriesEditModal(null); }} style={{display:"block",width:"100%",padding:"8px",background:"none",border:"none",color:"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>Cancel</button>
           </div>
         </div>
@@ -3164,16 +3363,16 @@ export default function TheList() {
             <div style={{display:"flex",gap:"3px",alignItems:"center"}}>
               {view!=="Month"&&<button onClick={function(){ setBaseDate(function(d){ return addDays(d,-7); }); }} style={{...navBtnSm,fontSize:"11px",letterSpacing:"-1px"}}>{"‹‹"}</button>}
               <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()-1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,-1); }); }} style={navBtnSm}>{"‹"}</button>
-              <button onClick={function(){ if(view==="Wknd") setBaseDate(getUpcomingWeekend()); else if(view==="Day"||view==="3-Day"||view==="Week") setBaseDate(getAnchorStart()); else setBaseDate(new Date()); }} style={{...navBtnSm,fontSize:"8px",letterSpacing:"0.1em",padding:"0 8px"}}>TODAY</button>
               <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()+1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,1); }); }} style={navBtnSm}>{"›"}</button>
               {view!=="Month"&&<button onClick={function(){ setBaseDate(function(d){ return addDays(d,7); }); }} style={{...navBtnSm,fontSize:"11px",letterSpacing:"-1px"}}>{"››"}</button>}
             </div>
             <div style={{display:"flex",gap:"2px",background:"#e8e8e6",padding:"2px",borderRadius:"5px"}}>
               {["Day","Wknd","Month"].map(function(v){ return (
                 <button key={v} data-viewtab={v} onClick={function(){
-                  if (v==="Wknd") { setBaseDate(getUpcomingWeekend()); setView(v); return; }
+                  if (v==="Wknd") { setBaseDate(view==="Wknd" ? getAnchorStart() : getUpcomingWeekend()); setView(v); return; }
                   if (view==="Wknd") { setBaseDate(v==="Month" ? new Date() : getAnchorStart()); }
                   else if (v===view && (v==="Day"||v==="3-Day"||v==="Week")) { setBaseDate(getAnchorStart()); }
+                  else if (v===view && v==="Month") { setBaseDate(new Date()); }
                   setView(v);
                 }} style={{padding:"5px 7px",fontSize:"9px",letterSpacing:"0.04em",textTransform:"uppercase",border:"none",borderRadius:"4px",cursor:"pointer",background:view===v?"#1a1a1a":"transparent",color:view===v?"#ffffff":"#999",fontFamily:"inherit",transition:"all 0.15s"}}>{v}</button>
               ); })}
@@ -3191,11 +3390,13 @@ export default function TheList() {
           <div style={{display:"flex",gap:"2px",background:"#e8e8e6",padding:"3px",borderRadius:"6px",marginLeft:isSplitView?"48px":"0"}}>
             {VIEWS.map(function(v){ return (
               <button key={v} data-viewtab={v} onClick={function(){
-                if (v==="Wknd") { setBaseDate(getUpcomingWeekend()); setView(v); return; }
+                if (v==="Wknd") { setBaseDate(view==="Wknd" ? getAnchorStart() : getUpcomingWeekend()); setView(v); return; }
                 if (view==="Wknd") {
                   setBaseDate(v==="Month" ? new Date() : getAnchorStart());
                 } else if (v===view && (v==="Day"||v==="3-Day"||v==="Week")) {
                   setBaseDate(getAnchorStart());
+                } else if (v===view && v==="Month") {
+                  setBaseDate(new Date());
                 }
                 setView(v);
               }} style={{padding:"5px 12px",fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",border:"none",borderRadius:"4px",cursor:"pointer",background:view===v?"#1a1a1a":"transparent",color:view===v?"#ffffff":"#999",fontFamily:"inherit",transition:"all 0.15s"}}>{v}</button>
@@ -3205,7 +3406,6 @@ export default function TheList() {
           <div style={{display:"flex",gap:"4px",alignItems:"center"}}>
             {view!=="Month"&&<button onClick={function(){ setBaseDate(function(d){ return addDays(d,-7); }); }} style={{...navBtn,fontSize:"11px",letterSpacing:"-1px"}}>{"‹‹"}</button>}
             <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()-1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,-1); }); }} style={navBtn}>{"‹"}</button>
-            <button onClick={function(){ if(view==="Wknd") setBaseDate(getUpcomingWeekend()); else if(view==="Day"||view==="3-Day"||view==="Week") setBaseDate(getAnchorStart()); else setBaseDate(new Date()); }} style={{...navBtn,fontSize:"9px",letterSpacing:"0.1em",padding:"0 12px"}}>TODAY</button>
             <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()+1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,1); }); }} style={navBtn}>{"›"}</button>
             {view!=="Month"&&<button onClick={function(){ setBaseDate(function(d){ return addDays(d,7); }); }} style={{...navBtn,fontSize:"11px",letterSpacing:"-1px"}}>{"››"}</button>}
             <div style={{width:"10px"}}/>
@@ -3261,7 +3461,7 @@ export default function TheList() {
 
       {view!=="Month"&&(
         <div style={{flex:"1 1 auto",minHeight:0,overflow:"hidden",display:"flex",flexDirection:"column"}}>
-        <div key={"grid-"+navAnim.n} data-gridtop="1" style={{display:"grid",gridTemplateColumns:("repeat("+getDayCount()+",minmax(0,1fr))"),gap:"1px",background:"#d8d8d6",flex:"1 1 auto",minHeight:0,gridAutoRows:"1fr",animation:navAnim.dir===1?"tlInRight 0.22s ease":navAnim.dir===-1?"tlInLeft 0.22s ease":"none"}}>
+        <div key={"grid-"+navAnim.n} data-gridtop="1" style={{display:"grid",gridTemplateColumns:("repeat("+getDayCount()+",minmax(0,1fr))"),gap:"1px",background:"#d8d8d6",flex:"1 1 auto",minHeight:0,gridAutoRows:"1fr",animation:navAnim.dir===1?"tlInRight 0.32s ease-out":navAnim.dir===-1?"tlInLeft 0.32s ease-out":"none"}}>
           {dates.map(function(date){
             var dateKey=toDateKey(date); var slots=getSlots(dateKey);
             return (
@@ -3321,8 +3521,9 @@ export default function TheList() {
                     var isSelected=selectMode&&!!selectedSlots[rowKey];
                     var isDragging=dragState&&dragState.sourceKey===rowKey;
                     var slotBg=slot.blocked?"#f4f4f2":(wasRemoved&&!isEditing)?"#fff0ee":isOccEdit?"#fff0ee":isSelected?"#f0f4ff":slot.done?"#f4faf4":(isEditing&&editChromeReady)?"#f0f0ee":filled?"#fcfcfa":"transparent";
-                    var isCustomSlot=slot.isCustom===true||(slot.isCustom===undefined&&!DEFAULT_TIMES.includes(slot.time));
+                    var isCustomSlot=slot.isCustom===true||(slot.isCustom===undefined&&!slot.defaultBaseTime&&!DEFAULT_TIMES.includes(slot.time));
                     var defShift=(!isCustomSlot&&slot.defaultBaseTime&&slot.time!==slot.defaultBaseTime)?(timeToAbsMinutes(slot.time)<timeToAbsMinutes(slot.defaultBaseTime)?"earlier":"later"):null;
+                    var compactIcons=(view==="Week")||(isPhone&&view==="Wknd");
                     var isDropTarget=isLiveDragging&&dragOverKey===rowKey&&!filled&&!slot.blocked;
                     var showDropHint=(isLiveDragging||placingClient)&&!filled&&!slot.blocked&&!isEditing&&!(dragState&&dragState.sourceKey===rowKey);
                     if (isDropTarget) slotBg="#e3f3e3";
@@ -3418,15 +3619,15 @@ export default function TheList() {
                                   onTouchStart={function(e){ e.stopPropagation(); }}
                                   onTouchEnd={function(e){ e.stopPropagation(); }}
                                 >
-                                  {filled&&slot.pending&&!slot.done&&<button onClick={function(e){ e.stopPropagation(); lockInSlot(dateKey,idx); }} title="Lock in" style={{display:"flex",alignItems:"center",justifyContent:"center",background:"#fff",border:"1px solid #d8c08a",borderRadius:"6px",cursor:"pointer",padding:view==="Week"?"3px 5px":"3px 7px",lineHeight:1,flexShrink:0}}><UnlockIcon size={12} color="#9a7a30"/></button>}
-                                  {view!=="Week"&&filled&&slot.price&&<span style={{fontSize:"12px",color:slot.done?"#3a5a3a":"#a07830"}}>{slot.price}</span>}
-                                  {view!=="Week"&&filled&&(slot.recurWeeks?(
+                                  {filled&&slot.pending&&!slot.done&&<button onClick={function(e){ e.stopPropagation(); lockInSlot(dateKey,idx); }} title="Lock in" style={{display:"flex",alignItems:"center",justifyContent:"center",background:"#fff",border:"1px solid #d8c08a",borderRadius:"6px",cursor:"pointer",padding:compactIcons?"3px 5px":"3px 7px",lineHeight:1,flexShrink:0}}><UnlockIcon size={12} color="#9a7a30"/></button>}
+                                  {!compactIcons&&filled&&slot.price&&<span style={{fontSize:"12px",color:slot.done?"#3a5a3a":"#a07830"}}>{slot.price}</span>}
+                                  {!compactIcons&&filled&&(slot.recurWeeks?(
                                     <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:"2px",width:"50px",flexShrink:0}}>
                                       <span onClick={function(e){ e.stopPropagation(); openClientProfile(slot.name); }} style={{fontSize:"12px",fontWeight:"500",color:"#4a8a9a",cursor:"pointer",lineHeight:1,letterSpacing:"0.01em"}}>{(slot.recurWeeks===1?"1w":(slot.recurWeeks+"w"))+(slot.isException?"*":"")}</span>
                                       <button onClick={function(e){ e.stopPropagation(); if(slot.groupId){var aS=getSlots(dateKey);var gS=aS.map(function(s,i){ return {...s,i}; }).filter(function(s){ return s.groupId===slot.groupId&&s.name; });if(gS.length>1){setGroupRecurModal({dateKey,idx,slot,groupSlots:gS,weeks:null});return;}} setRecurringModal({dateKey,idx,slot}); }} title="Recurring — tap to manage" style={{background:"none",border:"none",cursor:"pointer",padding:"0 1px",color:"#4a8a9a",fontSize:"16px",fontWeight:"500",lineHeight:1}}>{"↺"}</button>
                                     </div>
                                   ):<div style={{width:"50px",flexShrink:0}}/>)}
-                                  {view!=="Week"&&filled&&<button onClick={function(e){ e.stopPropagation(); setNoteDraft(slot.note||""); setNoteModal({dateKey,idx,name:slot.name}); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 5px",color:slot.note?"#c9a96e":"#bbb",fontSize:"22px",fontWeight:"bold",lineHeight:1,WebkitTextStroke:"0.6px currentColor"}}>{"✎"}</button>}
+                                  {!compactIcons&&filled&&<button onClick={function(e){ e.stopPropagation(); setNoteDraft(slot.note||""); setNoteModal({dateKey,idx,name:slot.name}); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 5px",color:slot.note?"#c9a96e":"#bbb",fontSize:"22px",fontWeight:"bold",lineHeight:1,WebkitTextStroke:"0.6px currentColor"}}>{"✎"}</button>}
                                 </div>
                               )}
                               {isEditing&&editChromeReady&&<input value={editValues.price} onChange={function(e){ setEditValues(function(v){ return {...v,price:e.target.value}; }); }} onKeyDown={function(e){ handleKeyDown(e,dateKey,idx); }} onBlur={handleBlur} data-rowkey={rowKey} placeholder="$" style={{width:"52px",fontSize:isPhone?"16px":"13px",color:"#1a1a1a",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"4px",outline:"none",padding:"2px 5px",fontFamily:"Georgia,serif",WebkitAppearance:"none",appearance:"none"}}/>}
