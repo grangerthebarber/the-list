@@ -173,6 +173,7 @@ function getBannerColor(type) {
 
 function describeBanner(entry) {
   if (!entry) return "";
+  if (entry.msg) return entry.msg;
   var type = entry.type;
   if (type==="added" && entry.name && entry.time && entry.dateKey) {
     return entry.name + " is locked in for " + entry.time + " • " + friendlyDateLong(entry.dateKey);
@@ -367,6 +368,11 @@ export default function TheList() {
   const [timeEditModal, setTimeEditModal] = useState(null);
   const [timeEditMinutes, setTimeEditMinutes] = useState(0);
   const [dailyExportPrompt, setDailyExportPrompt] = useState(false);
+  const [seriesEditModal, setSeriesEditModal] = useState(null);
+  const [renameRequiredModal, setRenameRequiredModal] = useState(null);
+  const [navAnim, setNavAnim] = useState({n:0,dir:0});
+  const [bannerSwipeY, setBannerSwipeY] = useState(0);
+  const bannerTouchStart = useRef(null);
   const dragChipRef = useRef(null);
   const dragPosRef = useRef({x:0,y:0});
   const dragOverRef = useRef(null);
@@ -692,8 +698,15 @@ export default function TheList() {
   const showBanner = function(entry, overrideType) {
     if (bannerTimer.current) clearTimeout(bannerTimer.current);
     var displayEntry = overrideType ? {...entry, type:overrideType} : entry;
+    setBannerSwipeY(0);
     setBanner(displayEntry);
     bannerTimer.current = setTimeout(function(){ setBanner(null); }, 10000);
+  };
+  // Dismiss helper shared by the swipe gesture and any programmatic close.
+  const dismissBanner = function() {
+    if (bannerTimer.current) clearTimeout(bannerTimer.current);
+    setBannerSwipeY(0);
+    setBanner(null);
   };
 
   const getHolidayForDate = function(dateKey) {
@@ -916,6 +929,16 @@ export default function TheList() {
     // Removing the name removes the price along with it (a price never outlives
     // its person). Clearing only the price, though, leaves the name in place.
     if (!newName) newPrice = "";
+    // 6C: changing the name or price of an already-recurring person asks whether to
+    // apply the change to just this appointment or the whole future series. (Clearing
+    // the name entirely is treated as a normal one-off removal, not a series edit;
+    // use "Remove recurring" to clear an entire series.)
+    if (prev.recurWeeks && prev.name && newName && (newName!==prev.name || newPrice!==prev.price)) {
+      editingRef.current = null; setEditingCell(null); setEditingOccupied(false);
+      setPencilArmed(false); setEditChromeReady(true);
+      setSeriesEditModal({field:"nameprice", dateKey:dateKey, idx:idx, oldName:prev.name, newName:newName, newPrice:newPrice, time:prev.time});
+      return true;
+    }
     if (asLunch) {
       // Typing "lunch" turns the slot into a Lunch block (fully a block, no client memory).
       if (!prev.blocked) {
@@ -1005,6 +1028,13 @@ export default function TheList() {
     var slots = [...getSlots(dateKey)];
     var prev = slots[idx];
     if (newTime === prev.time) { setTimeEditModal(null); return; }
+    // 6C: nudging the time of an already-recurring person asks whether to move just
+    // this appointment or the whole future series.
+    if (prev.recurWeeks && prev.name) {
+      setTimeEditModal(null);
+      setSeriesEditModal({field:"time", dateKey:dateKey, idx:idx, oldTime:prev.time, newTime:newTime, name:prev.name});
+      return;
+    }
     // Block collisions with another existing slot at that exact time.
     if (slots.some(function(s,i){ return i!==idx && s.time===newTime; })) { setTimeEditModal(null); return; }
     var snapshot = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
@@ -1114,7 +1144,7 @@ export default function TheList() {
       e.preventDefault();
       var curVals = editValuesRef.current;
       var curDateKey = dateKey; var curIdx = idx;
-      doCommit(curDateKey,curIdx,curVals);
+      if (doCommit(curDateKey,curIdx,curVals)) return;
       var s = getSlots(curDateKey);
       if (curIdx < s.length-1) {
         setTimeout(function(){ startEdit(curDateKey, curIdx+1); }, 80);
@@ -1123,7 +1153,7 @@ export default function TheList() {
       e.preventDefault();
       var curVals2 = editValuesRef.current;
       var curDateKey2 = dateKey; var curIdx2 = idx;
-      doCommit(curDateKey2,curIdx2,curVals2);
+      if (doCommit(curDateKey2,curIdx2,curVals2)) return;
       if (curIdx2 > 0) {
         setTimeout(function(){ startEdit(curDateKey2, curIdx2-1); }, 80);
       }
@@ -1398,6 +1428,16 @@ export default function TheList() {
     if (!weeks) return false;
     var anchor = getSlots(targetDateKey)[targetIdx];
     if (!anchor || anchor.name || anchor.blocked) return false;
+    // 6B: don't let a NEW recurring booking reuse a name already held by a different
+    // recurring client. (Extending an already-recurring client is fine.) Block softly
+    // with a banner rather than a modal, matching the quiet-failure feel of placement.
+    var srcWasRecurring = false;
+    if (client.srcDateKey!=null && client.srcIdx!=null) { var ssx=getSlots(client.srcDateKey)[client.srcIdx]; if (ssx && ssx.recurWeeks!=null) srcWasRecurring=true; }
+    if (!srcWasRecurring && recurringNameConflict(client.name, client.srcDateKey, client.srcIdx)) {
+      showBanner({type:"info", msg:client.name + " is already a recurring client — give this one a more specific name first."});
+      setPlacingClient(null);
+      return false;
+    }
     var times = (client.groupTimes && client.groupTimes.length>1)
       ? client.groupTimes.map(function(t){ return {time:t.time,price:t.price,recurWeeks:weeks}; })
       : [{time:anchor.time,price:client.price,recurWeeks:weeks}];
@@ -1543,8 +1583,65 @@ export default function TheList() {
     return {newSchedules:newSch,conflicts};
   };
 
+  // 6B: true if some OTHER slot anywhere already uses this name AND is recurring.
+  // (A non-recurring duplicate name is allowed; only recurring names must be unique.)
+  const recurringNameConflict = function(name, exDateKey, exIdx) {
+    var lower=(name||"").toLowerCase();
+    if (!lower) return false;
+    var found=false;
+    Object.keys(schedulesRef.current).forEach(function(dk){
+      var ds=schedulesRef.current[dk]; if(!ds) return;
+      ds.forEach(function(s,si){
+        if (dk===exDateKey && si===exIdx) return;
+        if (s.name && s.name.toLowerCase()===lower && s.recurWeeks!=null) found=true;
+      });
+    });
+    return found;
+  };
+
+  // 6C (time, "apply to all"): move every future occurrence of a recurring client
+  // to a new time. Sweeps ALL dates from fromDateKey forward (immune to occurrences
+  // whose times were individually nudged). Returns collected conflicts where the new
+  // time is already taken by someone else on that day.
+  const buildSeriesTimeShift = function(name, fromDateKey, newTime) {
+    var lower=(name||"").toLowerCase();
+    var newSch={...schedulesRef.current};
+    var conflicts=[];
+    Object.keys(newSch).forEach(function(dk){
+      if (dk < fromDateKey) return;
+      var ds=newSch[dk]?[...newSch[dk]]:DEFAULT_TIMES.map(function(t){ return {time:t,name:"",price:"",done:false,recurWeeks:null}; });
+      var occIdx=ds.findIndex(function(s){ return s.name && s.name.toLowerCase()===lower && s.recurWeeks!=null && !s.done; });
+      if (occIdx<0) return;
+      var occ=ds[occIdx];
+      if (occ.time===newTime) { newSch[dk]=ds; return; }
+      var tIdx=ds.findIndex(function(s){ return s.time===newTime; });
+      if (tIdx>=0 && tIdx!==occIdx && ds[tIdx].name && ds[tIdx].name.toLowerCase()!==lower) {
+        conflicts.push({dateKey:dk,time:newTime,name:name,price:occ.price,recurWeeks:occ.recurWeeks,existingName:ds[tIdx].name});
+        return;
+      }
+      var isStillDefault=DEFAULT_TIMES.indexOf(newTime)>=0;
+      var wasCustom=occ.isCustom===true||(occ.isCustom===undefined&&DEFAULT_TIMES.indexOf(occ.time)===-1);
+      var baseTime=occ.defaultBaseTime||(!wasCustom?occ.time:null);
+      if (tIdx>=0 && tIdx!==occIdx && !ds[tIdx].name) {
+        ds[tIdx]={...ds[tIdx],name:occ.name,price:occ.price,recurWeeks:occ.recurWeeks,isException:true,done:false,groupId:occ.groupId||null,customTime:wasCustom&&!isStillDefault,defaultBaseTime:(!wasCustom?baseTime:occ.defaultBaseTime)};
+        ds[occIdx]={time:occ.time,name:"",price:"",done:false,recurWeeks:null};
+      } else {
+        ds[occIdx]={...occ,time:newTime,isException:true,customTime:wasCustom&&!isStillDefault,defaultBaseTime:(!wasCustom?baseTime:occ.defaultBaseTime)};
+        if (DEFAULT_TIMES.indexOf(occ.time)>=0 && !ds.some(function(s){ return s.time===occ.time; })) ds.push({time:occ.time,name:"",price:"",done:false,recurWeeks:null});
+      }
+      ds.sort(function(a,b){ return timeToAbsMinutes(a.time)-timeToAbsMinutes(b.time); });
+      newSch[dk]=ds;
+    });
+    return {newSchedules:newSch,conflicts:conflicts};
+  };
+
   const setRecurring = function(dateKey, idx, weeks) {
     var srcSlots=[...getSlots(dateKey)]; var srcSlot=srcSlots[idx];
+    if (weeks && !srcSlot.recurWeeks && srcSlot.name && recurringNameConflict(srcSlot.name, dateKey, idx)) {
+      setRenameRequiredModal({dateKey:dateKey, idx:idx, weeks:weeks, name:srcSlot.name, draft:srcSlot.name});
+      setRecurringModal(null);
+      return;
+    }
     srcSlots[idx]={...srcSlot,recurWeeks:weeks};
     var baseSch={...schedulesRef.current,[dateKey]:srcSlots};
     var snapshot={schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
@@ -1552,21 +1649,143 @@ export default function TheList() {
     if (weeks) {
       var res=buildRecurringSchedules(baseSch,dateKey,srcSlot,weeks);
       if (res.conflicts.length>0) {
-        setConflictModal({conflicts:res.conflicts,onCancel:function(){ setSchedules(res.newSchedules); addHistoryEntry({type:"recurring_set",time:srcSlot.time,name:srcSlot.name,weeks,dateKey}); setConflictModal(null); setRecurringModal(null); }});
+        setRecurringModal(null);
+        setConflictModal({conflicts:res.conflicts, pending:res.newSchedules, client:{name:srcSlot.name,price:srcSlot.price||"",recurWeeks:weeks}, history:{type:"recurring_set",time:srcSlot.time,name:srcSlot.name,weeks:weeks,dateKey:dateKey}});
       } else { setSchedules(res.newSchedules); addHistoryEntry({type:"recurring_set",time:srcSlot.time,name:srcSlot.name,weeks,dateKey}); setRecurringModal(null); }
     } else {
+      // 6A: removing recurring clears THIS person's future recurring appointments.
+      // Sweep every date strictly after the source date and clear any slot carrying
+      // this name that is still recurring and not yet done — matched by NAME only, so
+      // occurrences whose times were individually nudged are no longer missed.
       var newSch2={...schedulesRef.current,[dateKey]:srcSlots};
-      var oldW=srcSlot.recurWeeks;
-      if (oldW) {
-        var sixMo2=new Date(); sixMo2.setMonth(sixMo2.getMonth()+6);
-        var cur2=parseDateKey(dateKey);
-        while (true) { cur2=addWeeks(cur2,oldW); if(cur2>sixMo2) break;
-          var fk2=formatDateKey(cur2);
-          if (newSch2[fk2]) { var ds2=[...newSch2[fk2]]; var si2=ds2.findIndex(function(s){ return s.time===srcSlot.time&&s.name===srcSlot.name&&s.recurWeeks===oldW&&!s.done; }); if(si2>=0){ds2[si2]={...ds2[si2],name:"",price:"",recurWeeks:null,done:false};newSch2[fk2]=ds2;} }
-        }
+      var nameLowerR=(srcSlot.name||"").toLowerCase();
+      if (nameLowerR) {
+        Object.keys(newSch2).forEach(function(dk){
+          if (dk <= dateKey) return;
+          var ds2=[...newSch2[dk]]; var touched=false;
+          ds2.forEach(function(s,si){
+            if (s.name && s.name.toLowerCase()===nameLowerR && s.recurWeeks!=null && !s.done) {
+              ds2[si]={...s,name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null,pending:false,availStatus:null};
+              touched=true;
+            }
+          });
+          if (touched) newSch2[dk]=ds2;
+        });
       }
       setSchedules(newSch2); addHistoryEntry({type:"recurring_set",time:srcSlot.time,name:srcSlot.name,weeks,dateKey}); setRecurringModal(null);
     }
+  };
+
+  // ---- 6C/6D series-edit + conflict-resolution helpers ----
+  // 6C name/price: apply a rename/price change to just this occurrence or to the
+  // whole future series.
+  const applySeriesNamePrice = function(scope) {
+    var m=seriesEditModal; if(!m) return;
+    var snap={schedules:JSON.parse(JSON.stringify(schedulesRef.current))}; pushUndo(snap);
+    if (scope==="one") {
+      var slots=[...getSlots(m.dateKey)]; var p=slots[m.idx];
+      slots[m.idx]={...p,name:m.newName,price:m.newPrice,availStatus:null,pending:false,isException:true};
+      setSlots(m.dateKey,slots);
+      addHistoryEntry({type:"edited",time:p.time,name:m.newName,prevName:m.oldName,dateKey:m.dateKey});
+    } else {
+      var lowerS=(m.oldName||"").toLowerCase();
+      var newSch={...schedulesRef.current};
+      Object.keys(newSch).forEach(function(dk){
+        if (dk < m.dateKey) return;
+        var ds=[...newSch[dk]]; var changed=false;
+        ds.forEach(function(s,si){
+          if (s.name && s.name.toLowerCase()===lowerS && s.recurWeeks!=null && !s.done) { ds[si]={...s,name:m.newName,price:m.newPrice}; changed=true; }
+        });
+        if (changed) newSch[dk]=ds;
+      });
+      setSchedules(newSch);
+      addHistoryEntry({type:"edited",time:m.time||"",name:m.newName,prevName:m.oldName,dateKey:m.dateKey});
+      setClientMemory(function(mem){ var ex=mem.findIndex(function(c){ return c.name.toLowerCase()===m.newName.toLowerCase(); }); if(ex>=0){ var u=[...mem]; u[ex]={name:m.newName,price:m.newPrice||mem[ex].price}; return u; } return [...mem,{name:m.newName,price:m.newPrice}]; });
+    }
+    setSeriesEditModal(null);
+    editingRef.current=null; setEditingCell(null); setEditingOccupied(false); setPencilArmed(false); setEditChromeReady(true);
+  };
+
+  // 6C time: move just this occurrence, or the whole future series (which may collect
+  // conflicts that then route through the shared conflict modal).
+  const applySeriesTime = function(scope) {
+    var m=seriesEditModal; if(!m) return;
+    if (scope==="one") {
+      var slots=[...getSlots(m.dateKey)]; var p=slots[m.idx];
+      if (slots.some(function(s,i){ return i!==m.idx && s.time===m.newTime; })) { setSeriesEditModal(null); return; }
+      var snap={schedules:JSON.parse(JSON.stringify(schedulesRef.current))}; pushUndo(snap);
+      var isStillDefault=DEFAULT_TIMES.indexOf(m.newTime)>=0;
+      var wasCustom=p.isCustom===true||(p.isCustom===undefined&&DEFAULT_TIMES.indexOf(p.time)===-1);
+      var baseTime=p.defaultBaseTime||(!wasCustom?p.time:null);
+      slots[m.idx]={...p,time:m.newTime,isException:true,customTime:wasCustom&&!isStillDefault,defaultBaseTime:(!wasCustom?baseTime:p.defaultBaseTime)};
+      slots.sort(function(a,b){ return timeToAbsMinutes(a.time)-timeToAbsMinutes(b.time); });
+      setSlots(m.dateKey,slots);
+      setSeriesEditModal(null);
+    } else {
+      var cur=getSlots(m.dateKey)[m.idx]||{};
+      var occName=cur.name||m.name||"";
+      var snap2={schedules:JSON.parse(JSON.stringify(schedulesRef.current))}; pushUndo(snap2);
+      var resT=buildSeriesTimeShift(occName, m.dateKey, m.newTime);
+      setSeriesEditModal(null);
+      if (resT.conflicts.length>0) {
+        setConflictModal({conflicts:resT.conflicts, pending:resT.newSchedules, client:{name:occName,price:cur.price||"",recurWeeks:cur.recurWeeks}, history:{type:"edited",time:m.newTime,name:occName,prevName:occName,dateKey:m.dateKey}});
+      } else { setSchedules(resT.newSchedules); }
+    }
+  };
+
+  // 6D conflict resolution. The conflict modal carries {conflicts, pending, client, history}.
+  const commitConflictPending = function() {
+    if(!conflictModal) return;
+    setSchedules(conflictModal.pending);
+    if(conflictModal.history) addHistoryEntry(conflictModal.history);
+    setConflictModal(null);
+  };
+  const shareSlotInto = function(pend, c, client) {
+    var ds=pend[c.dateKey]?[...pend[c.dateKey]]:DEFAULT_TIMES.map(function(t){ return {time:t,name:"",price:"",done:false,recurWeeks:null}; });
+    ds.push({time:c.time,name:client.name,price:client.price||"",recurWeeks:client.recurWeeks,done:false,isException:true,groupId:null});
+    ds.sort(function(a,b){ return parseTime(a.time)-parseTime(b.time); });
+    pend[c.dateKey]=ds;
+    return pend;
+  };
+  const conflictShareOne = function(i) {
+    if(!conflictModal) return;
+    var c=conflictModal.conflicts[i];
+    var pend=shareSlotInto({...conflictModal.pending}, c, conflictModal.client);
+    var rem=conflictModal.conflicts.filter(function(_,j){ return j!==i; });
+    if (rem.length>0) { setConflictModal({...conflictModal,conflicts:rem,pending:pend}); }
+    else { setSchedules(pend); if(conflictModal.history) addHistoryEntry(conflictModal.history); setConflictModal(null); }
+  };
+  const conflictShareAll = function() {
+    if(!conflictModal) return;
+    var pend={...conflictModal.pending};
+    conflictModal.conflicts.forEach(function(c){ pend=shareSlotInto(pend, c, conflictModal.client); });
+    setSchedules(pend); if(conflictModal.history) addHistoryEntry(conflictModal.history); setConflictModal(null);
+  };
+  const conflictJump = function(i) {
+    if(!conflictModal) return;
+    var c=conflictModal.conflicts[i];
+    var rem=conflictModal.conflicts.filter(function(_,j){ return j!==i; });
+    var cl=conflictModal.client;
+    setSchedules(conflictModal.pending);
+    if(conflictModal.history) addHistoryEntry(conflictModal.history);
+    setConflictModal(null);
+    setReassignMode({client:{name:cl.name,price:cl.price||"",recurWeeks:cl.recurWeeks},currentDateKey:c.dateKey,remainingConflicts:rem});
+    jumpToDate(c.dateKey);
+  };
+
+  // 6B: confirm a unique rename, then make recurring.
+  const confirmRenameRecurring = function() {
+    var m=renameRequiredModal; if(!m) return;
+    var nm=capitalizeFirst(stripLeadingNumbers((m.draft||"").trim()));
+    if (!nm) return;
+    if (recurringNameConflict(nm, m.dateKey, m.idx)) { return; }
+    var slots=[...getSlots(m.dateKey)]; var p=slots[m.idx];
+    var snap={schedules:JSON.parse(JSON.stringify(schedulesRef.current))}; pushUndo(snap);
+    slots[m.idx]={...p,name:nm};
+    setSlots(m.dateKey,slots);
+    var dk=m.dateKey, ix=m.idx, wk=m.weeks;
+    setRenameRequiredModal(null);
+    setTimeout(function(){ setRecurring(dk, ix, wk); }, 60);
   };
 
   const requestRemoveSlot = function(dateKey, idx) {
@@ -2327,11 +2546,11 @@ export default function TheList() {
             if (dx < 0) {
               // Swipe left → go forward (next day/period)
               if (view==="Month") { setBaseDate(function(d){ var nd=new Date(d); nd.setMonth(nd.getMonth()+1); return nd; }); }
-              else { setBaseDate(function(d){ return addDays(d,1); }); }
+              else { setBaseDate(function(d){ return addDays(d,1); }); setNavAnim(function(p){ return {n:p.n+1,dir:1}; }); }
             } else {
               // Swipe right → go back (previous day/period)
               if (view==="Month") { setBaseDate(function(d){ var nd=new Date(d); nd.setMonth(nd.getMonth()-1); return nd; }); }
-              else { setBaseDate(function(d){ return addDays(d,-1); }); }
+              else { setBaseDate(function(d){ return addDays(d,-1); }); setNavAnim(function(p){ return {n:p.n+1,dir:-1}; }); }
             }
           }
         }
@@ -2339,20 +2558,23 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2500,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",pointerEvents:"none",fontFamily:"Georgia,serif"}}>v10</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2500,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",pointerEvents:"none",fontFamily:"Georgia,serif"}}>v11</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
           still allows normal one-finger panning and two-finger pinch-zoom. */}
-      <style>{"html,body,#root,*{touch-action:manipulation;-webkit-text-size-adjust:100%}"}</style>
+      <style>{"html,body,#root,*{touch-action:manipulation;-webkit-text-size-adjust:100%}@keyframes tlInRight{from{transform:translateX(26px);opacity:0.4}to{transform:translateX(0);opacity:1}}@keyframes tlInLeft{from{transform:translateX(-26px);opacity:0.4}to{transform:translateX(0);opacity:1}}"}</style>
 
       {banner && (
-        <div style={{position:"fixed",left:"50%",top:isPhone?"auto":(gridTopY>0?(gridTopY/2+"px"):listTopY>0?(listTopY/2+"px"):"calc(env(safe-area-inset-top,0px) + 8px)"),bottom:isPhone?"calc(env(safe-area-inset-bottom,0px) + 18px)":"auto",transform:(!isPhone&&(gridTopY>0||listTopY>0))?"translate(-50%,-50%)":"translateX(-50%)",zIndex:2000,background:getBannerColor(banner.type),color:"#fff",padding:"6px 10px 6px 14px",borderRadius:"20px",fontSize:"12px",letterSpacing:"0.04em",boxShadow:"0 2px 12px rgba(0,0,0,0.2)",display:"flex",alignItems:"center",gap:"10px",maxWidth:"90vw",pointerEvents:"auto"}}>
+        <div
+          onTouchStart={function(e){ if(e.touches&&e.touches.length===1){ bannerTouchStart.current=e.touches[0].clientY; } }}
+          onTouchMove={function(e){ if(bannerTouchStart.current==null||!e.touches||!e.touches.length) return; var dy=e.touches[0].clientY-bannerTouchStart.current; setBannerSwipeY(Math.min(0,dy)); }}
+          onTouchEnd={function(){ var dy=bannerSwipeY; bannerTouchStart.current=null; if(dy<-30){ dismissBanner(); } else { setBannerSwipeY(0); } }}
+          style={{position:"fixed",left:"50%",top:isPhone?"auto":(gridTopY>0?(gridTopY/2+"px"):listTopY>0?(listTopY/2+"px"):"calc(env(safe-area-inset-top,0px) + 8px)"),bottom:isPhone?"calc(env(safe-area-inset-bottom,0px) + 18px)":"auto",transform:((!isPhone&&(gridTopY>0||listTopY>0))?"translate(-50%,-50%)":"translateX(-50%)")+" translateY("+bannerSwipeY+"px)",opacity:Math.max(0.2,1+bannerSwipeY/80),transition:bannerSwipeY===0?"transform 0.2s ease, opacity 0.2s ease":"none",zIndex:2000,background:getBannerColor(banner.type),color:"#fff",padding:"6px 14px",borderRadius:"20px",fontSize:"12px",letterSpacing:"0.04em",boxShadow:"0 2px 12px rgba(0,0,0,0.2)",display:"flex",alignItems:"center",gap:"10px",maxWidth:"90vw",pointerEvents:"auto",touchAction:"none"}}>
           <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{describeBanner(banner)}</span>
           {(banner.type!=="undo"&&banner.type!=="redo"&&canUndo)&&(
             <button onClick={handleUndo} title="Undo" style={{background:"rgba(255,255,255,0.22)",border:"none",borderRadius:"10px",color:"#fff",padding:"4px 9px",cursor:"pointer",fontFamily:"inherit",flexShrink:0,display:"flex",alignItems:"center"}}><UndoIcon size={15} color="#fff"/></button>
           )}
-          <button onClick={function(){ if(bannerTimer.current) clearTimeout(bannerTimer.current); setBanner(null); }} title="Dismiss" style={{background:"rgba(255,255,255,0.22)",border:"none",borderRadius:"50%",color:"#fff",width:"22px",height:"22px",cursor:"pointer",fontFamily:"inherit",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center",lineHeight:1,fontSize:"16px",padding:0}}>{"×"}</button>
         </div>
       )}
 
@@ -2522,20 +2744,51 @@ export default function TheList() {
           <div style={{background:"#ffffff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"28px 28px 24px",width:"min(400px,92vw)",maxHeight:"80vh",overflowY:"auto"}} onClick={function(e){ e.stopPropagation(); }}>
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#c0392b",marginBottom:"8px"}}>Scheduling Conflicts</div>
             <div style={{fontSize:"15px",color:"#1a1a1a",marginBottom:"6px"}}>Some slots are already taken</div>
-            <div style={{fontSize:"12px",color:"#888",marginBottom:"16px"}}>{conflictModal.conflicts[0]&&conflictModal.conflicts[0].name} will be placed on all open dates. The following dates need attention.</div>
-            <div style={{marginBottom:"20px"}}>
+            <div style={{fontSize:"12px",color:"#888",marginBottom:"16px"}}>{conflictModal.client&&conflictModal.client.name} will be placed on all open dates. For each clash below you can <strong>jump</strong> there to pick another open time, or <strong>share</strong> the slot (both names at once).</div>
+            <div style={{marginBottom:"16px"}}>
               {conflictModal.conflicts.map(function(c,i){ return (
                 <div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"9px 10px",marginBottom:"4px",background:"#fff5f4",border:"1px solid #f0d0cc",borderRadius:"6px"}}>
-                  <div>
+                  <div style={{minWidth:0,flex:"1 1 auto"}}>
                     <div style={{fontSize:"12px",color:"#1a1a1a"}}>{friendlyDate(c.dateKey)} · {c.time}</div>
-                    <div style={{fontSize:"11px",color:"#c0392b",marginTop:"2px"}}>{c.existingName} is already here</div>
+                    <div style={{fontSize:"11px",color:"#c0392b",marginTop:"2px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.existingName} is already here</div>
                   </div>
-                  <button onClick={function(){ var rem=conflictModal.conflicts.filter(function(_,j){ return j!==i; }); conflictModal.onCancel(); setReassignMode({client:{name:c.name,price:c.price||"",recurWeeks:c.recurWeeks},currentDateKey:c.dateKey,remainingConflicts:rem}); jumpToDate(c.dateKey); }} style={{padding:"6px 12px",background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",flexShrink:0,marginLeft:"10px"}}>Jump</button>
+                  <div style={{display:"flex",gap:"6px",flexShrink:0,marginLeft:"10px"}}>
+                    <button onClick={function(){ conflictShareOne(i); }} style={{padding:"6px 11px",background:"#4a8a9a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"11px"}}>Share</button>
+                    <button onClick={function(){ conflictJump(i); }} style={{padding:"6px 11px",background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"11px"}}>Jump</button>
+                  </div>
                 </div>
               ); })}
             </div>
-            <button onClick={conflictModal.onCancel} style={{width:"100%",padding:"10px",background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",marginBottom:"8px"}}>Place on open dates only</button>
+            {conflictModal.conflicts.length>1&&<button onClick={conflictShareAll} style={{width:"100%",padding:"10px",background:"#4a8a9a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",marginBottom:"8px"}}>Share all {conflictModal.conflicts.length} slots</button>}
+            <button onClick={commitConflictPending} style={{width:"100%",padding:"10px",background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",marginBottom:"8px"}}>Place on open dates only</button>
             <button onClick={function(){ setConflictModal(null); }} style={{display:"block",width:"100%",padding:"8px",background:"none",border:"none",color:"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {seriesEditModal && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:1150,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px",boxSizing:"border-box"}} onClick={function(){ setSeriesEditModal(null); }}>
+          <div style={{background:"#f8f8f6",border:"1px solid #d8d8d6",borderRadius:"12px",padding:"26px 26px 22px",width:"min(360px,92vw)"}} onClick={function(e){ e.stopPropagation(); }}>
+            <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#4a8a9a",marginBottom:"8px"}}>Recurring appointment</div>
+            <div style={{fontSize:"16px",color:"#1a1a1a",marginBottom:"6px"}}>{seriesEditModal.field==="time"?"Move this time for…":"Apply this change to…"}</div>
+            <div style={{fontSize:"12px",color:"#888",marginBottom:"20px"}}>{seriesEditModal.field==="time"?((seriesEditModal.name||"This client")+" moves from "+seriesEditModal.oldTime+" to "+seriesEditModal.newTime+"."):((seriesEditModal.oldName||"This client")+(seriesEditModal.newName&&seriesEditModal.newName!==seriesEditModal.oldName?(" \u2192 "+seriesEditModal.newName):"")+".")}</div>
+            <button onClick={function(){ if(seriesEditModal.field==="time"){ applySeriesTime("all"); } else { applySeriesNamePrice("all"); } }} style={{display:"block",width:"100%",padding:"12px",background:"#1a1a1a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",marginBottom:"10px"}}>All of {(seriesEditModal.field==="time"?seriesEditModal.name:seriesEditModal.oldName)||"this client"}'s appointments</button>
+            <button onClick={function(){ if(seriesEditModal.field==="time"){ applySeriesTime("one"); } else { applySeriesNamePrice("one"); } }} style={{display:"block",width:"100%",padding:"12px",background:"#ffffff",border:"1px solid #d0d0ce",borderRadius:"8px",color:"#1a1a1a",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",marginBottom:"14px"}}>Just this one</button>
+            <button onClick={function(){ setSeriesEditModal(null); }} style={{display:"block",width:"100%",padding:"8px",background:"none",border:"none",color:"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {renameRequiredModal && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:1150,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px",boxSizing:"border-box"}} onClick={function(){ setRenameRequiredModal(null); }}>
+          <div style={{background:"#f8f8f6",border:"1px solid #d8d8d6",borderRadius:"12px",padding:"26px 26px 22px",width:"min(360px,92vw)"}} onClick={function(e){ e.stopPropagation(); }}>
+            <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#c0392b",marginBottom:"8px"}}>Name already recurring</div>
+            <div style={{fontSize:"15px",color:"#1a1a1a",marginBottom:"6px"}}>Another recurring client is already called "{renameRequiredModal.name}"</div>
+            <div style={{fontSize:"12px",color:"#888",marginBottom:"16px"}}>Give this one a more specific name so the two never get mixed up (for example a last initial).</div>
+            <input value={renameRequiredModal.draft||""} onChange={function(e){ setRenameRequiredModal({...renameRequiredModal,draft:e.target.value}); }} onKeyDown={function(e){ if(e.key==="Enter"){ e.preventDefault(); confirmRenameRecurring(); } }} autoFocus={true} autoComplete="off" autoCorrect="off" autoCapitalize="words" spellCheck={false} style={{width:"100%",boxSizing:"border-box",padding:"10px 12px",fontSize:"15px",fontFamily:"inherit",border:"1px solid #d0d0ce",borderRadius:"8px",marginBottom:"6px",background:"#fff",color:"#1a1a1a"}} />
+            {(renameRequiredModal.draft&&recurringNameConflict(capitalizeFirst(stripLeadingNumbers((renameRequiredModal.draft||"").trim())),renameRequiredModal.dateKey,renameRequiredModal.idx))?<div style={{fontSize:"11px",color:"#c0392b",marginBottom:"6px"}}>That name is still in use by a recurring client.</div>:<div style={{height:"6px"}} />}
+            <button onClick={confirmRenameRecurring} style={{display:"block",width:"100%",padding:"12px",background:"#1a1a1a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",marginBottom:"10px",marginTop:"8px"}}>Rename &amp; make recurring</button>
+            <button onClick={function(){ setRenameRequiredModal(null); }} style={{display:"block",width:"100%",padding:"8px",background:"none",border:"none",color:"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>Cancel</button>
           </div>
         </div>
       )}
@@ -2907,7 +3160,7 @@ export default function TheList() {
       {isPhone ? (
         <div style={{borderBottom:"1px solid #e8e8e6",paddingTop:"calc(env(safe-area-inset-top,0px) + 4px)",position:"sticky",top:0,background:"#ffffff",zIndex:100,flexShrink:0}}>
           {/* Single compact row: day-shifters · view tabs · undo/redo/menu */}
-          <div style={{display:"flex",gap:"3px",alignItems:"center",padding:"0 8px 5px",justifyContent:"space-between"}}>
+          <div style={{display:"flex",gap:"3px",alignItems:"center",padding:"0 8px 3px",justifyContent:"space-between"}}>
             <div style={{display:"flex",gap:"3px",alignItems:"center"}}>
               {view!=="Month"&&<button onClick={function(){ setBaseDate(function(d){ return addDays(d,-7); }); }} style={{...navBtnSm,fontSize:"11px",letterSpacing:"-1px"}}>{"‹‹"}</button>}
               <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()-1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,-1); }); }} style={navBtnSm}>{"‹"}</button>
@@ -2934,7 +3187,7 @@ export default function TheList() {
           {view==="Month"&&<div style={{textAlign:"center",fontSize:"12px",color:"#1a1a1a",paddingBottom:"4px"}}>{baseDate.toLocaleDateString("en-US",{month:"long",year:"numeric"})}</div>}
         </div>
       ) : (
-        <div style={{borderBottom:"1px solid #e8e8e6",padding:"6px 20px 6px",paddingTop:"calc(env(safe-area-inset-top,0px) + 6px)",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,background:"#ffffff",zIndex:100,flexShrink:0}}>
+        <div style={{borderBottom:"1px solid #e8e8e6",padding:"4px 20px 4px",paddingTop:"calc(env(safe-area-inset-top,0px) + 4px)",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,background:"#ffffff",zIndex:100,flexShrink:0}}>
           <div style={{display:"flex",gap:"2px",background:"#e8e8e6",padding:"3px",borderRadius:"6px",marginLeft:isSplitView?"48px":"0"}}>
             {VIEWS.map(function(v){ return (
               <button key={v} data-viewtab={v} onClick={function(){
@@ -3008,12 +3261,12 @@ export default function TheList() {
 
       {view!=="Month"&&(
         <div style={{flex:"1 1 auto",minHeight:0,overflow:"hidden",display:"flex",flexDirection:"column"}}>
-        <div data-gridtop="1" style={{display:"grid",gridTemplateColumns:("repeat("+getDayCount()+",minmax(0,1fr))"),gap:"1px",background:"#d8d8d6",flex:"1 1 auto",minHeight:0,gridAutoRows:"1fr"}}>
+        <div key={"grid-"+navAnim.n} data-gridtop="1" style={{display:"grid",gridTemplateColumns:("repeat("+getDayCount()+",minmax(0,1fr))"),gap:"1px",background:"#d8d8d6",flex:"1 1 auto",minHeight:0,gridAutoRows:"1fr",animation:navAnim.dir===1?"tlInRight 0.22s ease":navAnim.dir===-1?"tlInLeft 0.22s ease":"none"}}>
           {dates.map(function(date){
             var dateKey=toDateKey(date); var slots=getSlots(dateKey);
             return (
               <div key={dateKey} style={{background:"#ffffff",display:"flex",flexDirection:"column",minHeight:0,overflow:"hidden"}}>
-                <div style={{padding:"4px 10px 5px",borderBottom:"1px solid #ebebea",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"4px",flexShrink:0}}>
+                <div style={{padding:"3px 10px 3px",borderBottom:"1px solid #ebebea",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"4px",flexShrink:0}}>
                   {(function(){
                     var sz=view==="Day"?"17px":"16px"; if(isPhone) sz=view==="Day"?"15px":"13px";
                     var mo=date.getMonth();
@@ -3041,9 +3294,9 @@ export default function TheList() {
                       </div>
                     );
                   })()}
-                  <button onClick={function(e){ e.stopPropagation(); setNoteDraft(dayNotes[dateKey]||""); setNoteModal({dayKey:dateKey,isDay:true,name:friendlyDateLong(dateKey)}); }} title="Note for the day" style={{background:"none",border:"none",cursor:"pointer",padding:"0 2px",color:dayNotes[dateKey]?"#c9a96e":"#bbb",fontSize:"26px",lineHeight:1,flexShrink:0,WebkitTextStroke:"0.5px currentColor"}}>{"✎"}</button>
+                  <button onClick={function(e){ e.stopPropagation(); setNoteDraft(dayNotes[dateKey]||""); setNoteModal({dayKey:dateKey,isDay:true,name:friendlyDateLong(dateKey)}); }} title="Note for the day" style={{background:"none",border:"none",cursor:"pointer",padding:"0 2px",color:dayNotes[dateKey]?"#c9a96e":"#bbb",fontSize:"22px",lineHeight:1,flexShrink:0,WebkitTextStroke:"0.5px currentColor"}}>{"✎"}</button>
                 </div>
-                <div data-slotscroll="1" style={{flex:1,minHeight:0,paddingBottom:"2px",overflowX:"hidden",overscrollBehavior:"contain"}}
+                <div data-slotscroll="1" style={{flex:1,minHeight:0,paddingBottom:"0px",overflowX:"hidden",overscrollBehavior:"contain"}}
                   onTouchMove={function(e){
                     if (!selectDragAnchor.current) return;
                     var t=e.touches[0]; if(!t) return;
@@ -3089,7 +3342,7 @@ export default function TheList() {
                         )}
                         <div
                           data-droprow={rowKey} data-dropfilled={filled?"1":"0"} data-dropblocked={slot.blocked?"1":"0"}
-                          style={{display:"flex",alignItems:"center",padding:(getDayCount()>3?"0 7px":"0 14px"),height:"39px",background:slotBg,transition:"background 0.2s",position:"relative",opacity:slot.blocked?0.6:1,userSelect:"none",WebkitUserSelect:"none",outline:isDropTarget?"2px solid #5a9a5a":(showDropHint?"1px dashed #cdddcd":"none"),outlineOffset:"-3px",borderRadius:isDropTarget?"6px":"0"}}
+                          style={{display:"flex",alignItems:"center",padding:(getDayCount()>3?"0 7px":"0 14px"),height:"36px",background:slotBg,transition:"background 0.2s",position:"relative",opacity:slot.blocked?0.6:1,userSelect:"none",WebkitUserSelect:"none",outline:isDropTarget?"2px solid #5a9a5a":(showDropHint?"1px dashed #cdddcd":"none"),outlineOffset:"-3px",borderRadius:isDropTarget?"6px":"0"}}
                           onTouchStart={function(e){ handleTouchStart(e,dateKey,idx); }}
                           onTouchEnd={function(e){ handleTouchEnd(e,dateKey,idx); }}
                           onMouseUp={function(){ if(dragState&&!dragState.multi&&!dragCalHover) handleSlotDrop(dateKey,idx); }}
@@ -3148,7 +3401,7 @@ export default function TheList() {
                               <input
                                 value={isEditing?editValues.name:(wasRemoved?"":(slot.name||((!filled&&slot.availStatus)?(slot.availStatus==="overtime"?"OVERTIME (COSTS TIME AND A HALF)":"AVAILABLE"):"")))}
                                 readOnly={!isEditing && !phoneEmptyTypable}
-                                name="tl-slot-name" inputMode="text" data-lpignore="true" data-1p-ignore="true" data-form-type="other" data-bwignore="true"
+                                name="tlentry" inputMode="text" data-lpignore="true" data-1p-ignore="true" data-form-type="other" data-bwignore="true"
                                 autoComplete="off" autoCorrect="off" autoCapitalize="words" spellCheck={false}
                                 onFocus={function(){ if(!isEditing&&!selectMode&&!isLiveDragging&&!dragState&&!slot.done) startEdit(dateKey,idx,(!filled&&!slot.availStatus)); }}
                                 onChange={function(e){ if(!isEditing){ if(!selectMode&&!isLiveDragging&&!dragState&&!slot.done) startEdit(dateKey,idx,(!filled&&!slot.availStatus)); } setEditValues(function(v){ return {...v,name:e.target.value}; }); if(!editChromeReady) setEditChromeReady(true); }}
@@ -3185,9 +3438,9 @@ export default function TheList() {
                     );
                   })}
                 </div>
-                <div style={{display:"flex",gap:"6px",padding:isPhone?"3px 10px 3px":"4px 12px 4px",paddingBottom:isPhone?"calc(env(safe-area-inset-bottom,0px) + 4px)":"calc(env(safe-area-inset-bottom,0px) + 5px)",flexShrink:0}}>
-                  <button onClick={function(){ addSlotToBeginning(dateKey); }} style={{flex:1,padding:isPhone?"6px":"7px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ AM</button>
-                  <button onClick={function(){ addSlotToEnd(dateKey); }} style={{flex:1,padding:isPhone?"6px":"7px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ PM</button>
+                <div style={{display:"flex",gap:"6px",padding:isPhone?"2px 10px 2px":"2px 12px 2px",paddingBottom:isPhone?"calc(env(safe-area-inset-bottom,0px) + 2px)":"calc(env(safe-area-inset-bottom,0px) + 2px)",flexShrink:0}}>
+                  <button onClick={function(){ addSlotToBeginning(dateKey); }} style={{flex:1,padding:isPhone?"5px":"5px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ AM</button>
+                  <button onClick={function(){ addSlotToEnd(dateKey); }} style={{flex:1,padding:isPhone?"5px":"5px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ PM</button>
                 </div>
               </div>
             );
