@@ -28,7 +28,7 @@ const DEFAULT_TIMES = [
   "7:13","7:36","7:58",
   "8:21","8:43","9:06","9:28","9:51","10:13","10:36","10:58",
   "11:21","11:43","12:06","12:28","12:51",
-  "1:13","1:36","1:58","2:21","2:43","3:06"
+  "1:13","1:36","1:58","2:21","2:43","3:06","3:28","3:51"
 ];
 
 const OLD_DEFAULT_TIMES_A = [
@@ -63,6 +63,15 @@ const ADJ_BLUE = "#4a8a9a";
 // afternoon-aware mapper (hoisted) so every sort agrees on the same ordering;
 // otherwise recurring placement put 1:13–3:06 at the top and "ended" the day at 12:51.
 function parseTime(t) { return timeToAbsMinutes(t); }
+
+// When re-placing a recurring client onto FUTURE days, ignore any one-off time
+// tweak made to a single appointment (e.g. a default 7:58 nudged to 7:48) and use
+// the slot's ORIGINAL default time, so the booking drops into the existing default
+// slot on each future day instead of spawning a second, off-grid time. A genuinely
+// custom slot has no defaultBaseTime, so it keeps its own time. (defaultBaseTime is
+// stamped the first time a default slot's minutes are edited — see commitTimeEdit.)
+function placementTime(slot) { return (slot && slot.defaultBaseTime) ? slot.defaultBaseTime : (slot ? slot.time : ""); }
+
 var _gid = 1;
 function newGroupId() { return "g"+(_gid++); }
 const SHORT_MONTHS = [3,4,5,6];
@@ -125,8 +134,8 @@ function isOldDefault(slots) {
 // A day the user already edited keeps an OLD short default tail (it stops at
 // 1:13, 1:36, or the previous 2:21 end) because it has names, so isOldDefault
 // skips it. If the day is still made only of standard default times (no custom
-// rows), top it back up to the full default tail (now ends 3:06). Idempotent: a
-// full day (ends 3:06) is left untouched.
+// rows), top it back up to the full default tail (now ends 3:51). Idempotent: a
+// full day (ends 3:51) is left untouched.
 function extendDefaultTail(slots) {
   if (!slots || !slots.length) return slots;
   var present = {};
@@ -154,6 +163,38 @@ function extendDefaultTail(slots) {
   return out;
 }
 
+// Catch-all that guarantees every day carries the current default afternoon tail
+// (now ending 3:51). extendDefaultTail is conservative — it skips any day that has
+// names, time-nudged slots, or custom rows — so days the user actually uses would
+// otherwise never gain the two new tail slots. This appends any missing default
+// times that fall after the day's latest slot, as empty default slots. It bails the
+// moment a day already reaches 3:28+ (extended by default OR by a custom +PM slot),
+// so a user-stretched afternoon is never touched, and present[] guards against ever
+// duplicating a time that is already on the day.
+function topUpAfternoonTail(slots) {
+  if (!slots || !slots.length) return slots;
+  var present = {};
+  var maxAbs = 0;
+  var i;
+  for (i = 0; i < slots.length; i++) {
+    present[slots[i].time] = true;
+    var a = timeToAbsMinutes(slots[i].time);
+    if (a > maxAbs) maxAbs = a;
+  }
+  if (maxAbs >= timeToAbsMinutes("3:28")) return slots;
+  var out = slots.slice();
+  var k;
+  for (k = 0; k < DEFAULT_TIMES.length; k++) {
+    var dt = DEFAULT_TIMES[k];
+    if (present[dt]) continue;
+    if (timeToAbsMinutes(dt) > maxAbs) {
+      out.push({time:dt,name:"",price:"",done:false,recurWeeks:null,isCustom:false});
+    }
+  }
+  out.sort(function(a,b){ return timeToAbsMinutes(a.time)-timeToAbsMinutes(b.time); });
+  return out;
+}
+
 function migrateSchedules(raw) {
   var result = {};
   var keys = Object.keys(raw);
@@ -162,7 +203,7 @@ function migrateSchedules(raw) {
     if (isOldDefault(raw[dk])) {
       result[dk] = DEFAULT_TIMES.map(function(t){ return {time:t,name:"",price:"",done:false,recurWeeks:null,isCustom:false}; });
     } else {
-      result[dk] = extendDefaultTail(raw[dk]);
+      result[dk] = topUpAfternoonTail(extendDefaultTail(raw[dk]));
     }
   }
   return result;
@@ -1303,12 +1344,24 @@ export default function TheList() {
     var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
     pushUndo(snapshot);
     var newDone = !slot.done;
-    var updated = slots.map(function(s, i){
-      if (i===idx) return {...s,done:newDone};
-      // Checking off one member of a group checks off the whole group.
-      if (slot.groupId && s.groupId===slot.groupId && s.name) return {...s,done:newDone};
-      return s;
-    });
+    // Decide every row that should flip together. Two appointments check off as one
+    // when they're either (a) explicitly linked (shared groupId) or (b) an unbroken
+    // run of the same name in adjacent rows — a back-to-back booking for one client,
+    // which is what "all members of the group" means visually even if they were never
+    // formally linked. Any empty/blocked/different-name row breaks the adjacent run.
+    var flip = {};
+    flip[idx] = true;
+    var gid = slot.groupId;
+    var nm = (slot.name||"").toLowerCase();
+    var gi;
+    for (gi=0; gi<slots.length; gi++) {
+      if (gid && slots[gi].groupId===gid && slots[gi].name) flip[gi] = true;
+    }
+    if (nm) {
+      var up = idx; while (up>0 && (slots[up-1].name||"").toLowerCase()===nm) { flip[up-1]=true; up--; }
+      var dn = idx; while (dn<slots.length-1 && (slots[dn+1].name||"").toLowerCase()===nm) { flip[dn+1]=true; dn++; }
+    }
+    var updated = slots.map(function(s, i){ return flip[i] ? {...s,done:newDone} : s; });
     setSlots(dateKey,updated);
     if (newDone) {
       playSound("lock");
@@ -1374,7 +1427,7 @@ export default function TheList() {
     return getSlots(dateKey)
       .filter(function(s){ return s.groupId && s.groupId===slot.groupId && s.name; })
       .sort(function(a,b){ return parseTime(a.time)-parseTime(b.time); })
-      .map(function(s){ return {time:s.time,price:s.price,recurWeeks:s.recurWeeks}; });
+      .map(function(s){ return {time:s.time,price:s.price,recurWeeks:s.recurWeeks,defaultBaseTime:s.defaultBaseTime}; });
   };
 
   // Earliest date AFTER fromDateKey on which this client already has something booked
@@ -1400,7 +1453,7 @@ export default function TheList() {
     var alreadyBookedKey = findExistingFutureBooking(slot.name, dateKey);
     if (slot.recurWeeks) {
       var nextKey = getNextDateKey(dateKey,slot.recurWeeks);
-      var conflict = isSlotTaken(nextKey,slot.time,slot.name);
+      var conflict = isSlotTaken(nextKey,placementTime(slot),slot.name);
       setNudgedDate(nextKey); setCheckoffCalMonth(null);
       setCheckoffModal({dateKey,idx,slot,nextDateKey:nextKey,conflict,notRecurring:false,groupTimes:groupTimes||null,alreadyBookedKey:alreadyBookedKey});
     } else {
@@ -1424,8 +1477,8 @@ export default function TheList() {
     if (!checkoffModal) return;
     var slot = checkoffModal.slot;
     var times = (checkoffModal.groupTimes && checkoffModal.groupTimes.length>0)
-      ? checkoffModal.groupTimes
-      : [{time:slot.time,price:slot.price,recurWeeks:slot.recurWeeks}];
+      ? checkoffModal.groupTimes.map(function(t){ return {time:(t.defaultBaseTime||t.time),price:t.price,recurWeeks:t.recurWeeks}; })
+      : [{time:placementTime(slot),price:slot.price,recurWeeks:slot.recurWeeks}];
     var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
     pushUndo(snapshot);
     var newSchedules = {...schedulesRef.current};
@@ -1459,7 +1512,7 @@ export default function TheList() {
       }
     }
     setSchedules(newSchedules);
-    addHistoryEntry({type:"added",time:slot.time,name:slot.name,price:slot.price,dateKey:targetDateKey});
+    addHistoryEntry({type:"added",time:placementTime(slot),name:slot.name,price:slot.price,dateKey:targetDateKey});
     setCheckoffModal(null); setNudgedDate(null); setCheckoffCalMonth(null);
   };
 
@@ -1472,8 +1525,8 @@ export default function TheList() {
     var srcDateKey = checkoffModal.dateKey;
     var srcIdx = checkoffModal.idx;
     var times = (checkoffModal.groupTimes && checkoffModal.groupTimes.length>0)
-      ? checkoffModal.groupTimes.map(function(t){ return {time:t.time,price:t.price,recurWeeks:weeks}; })
-      : [{time:slot.time,price:slot.price,recurWeeks:weeks}];
+      ? checkoffModal.groupTimes.map(function(t){ return {time:(t.defaultBaseTime||t.time),price:t.price,recurWeeks:weeks}; })
+      : [{time:placementTime(slot),price:slot.price,recurWeeks:weeks}];
     var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
     pushUndo(snapshot);
     var newSchedules = {...schedulesRef.current};
@@ -1513,7 +1566,7 @@ export default function TheList() {
       }
     }
     setSchedules(newSchedules);
-    addHistoryEntry({type:"added",time:slot.time,name:slot.name,price:slot.price,dateKey:targetDateKey});
+    addHistoryEntry({type:"added",time:placementTime(slot),name:slot.name,price:slot.price,dateKey:targetDateKey});
     setCheckoffModal(null); setNudgedDate(null); setCheckoffCalMonth(null); setCheckoffRecur(null); setRecurPickerOpen(false);
   };
 
@@ -1527,7 +1580,7 @@ export default function TheList() {
     var srcIdx = checkoffModal.idx;
     var targetDate = addWeeks(parseDateKey(srcDateKey), weeks);
     var gTimes = (checkoffModal.groupTimes && checkoffModal.groupTimes.length>1)
-      ? checkoffModal.groupTimes.map(function(t){ return {time:t.time,price:t.price}; })
+      ? checkoffModal.groupTimes.map(function(t){ return {time:t.time,price:t.price,defaultBaseTime:t.defaultBaseTime}; })
       : null;
     setPlacingClient({
       name:slot.name, price:slot.price,
@@ -1559,7 +1612,7 @@ export default function TheList() {
       return false;
     }
     var times = (client.groupTimes && client.groupTimes.length>1)
-      ? client.groupTimes.map(function(t){ return {time:t.time,price:t.price,recurWeeks:weeks}; })
+      ? client.groupTimes.map(function(t){ return {time:(t.defaultBaseTime||t.time),price:t.price,recurWeeks:weeks}; })
       : [{time:anchor.time,price:client.price,recurWeeks:weeks}];
     var nameLower = (client.name||"").toLowerCase();
     var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
@@ -2615,7 +2668,7 @@ export default function TheList() {
 
   const dates = getDates();
   const effectiveNextDate = nudgedDate||(checkoffModal&&checkoffModal.nextDateKey);
-  const nudgeConflict = effectiveNextDate?isSlotTaken(effectiveNextDate,checkoffModal&&checkoffModal.slot&&checkoffModal.slot.time,checkoffModal&&checkoffModal.slot&&checkoffModal.slot.name):false;
+  const nudgeConflict = effectiveNextDate?isSlotTaken(effectiveNextDate,checkoffModal&&checkoffModal.slot&&placementTime(checkoffModal.slot),checkoffModal&&checkoffModal.slot&&checkoffModal.slot.name):false;
 
   const renderCheckoffCalendar = function() {
     if (!checkoffModal||!checkoffCalMonth) return null;
@@ -2757,7 +2810,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2500,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",pointerEvents:"none",fontFamily:"Georgia,serif"}}>v12</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2500,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",pointerEvents:"none",fontFamily:"Georgia,serif"}}>v13</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -3147,12 +3200,12 @@ export default function TheList() {
               </div>
             ) : (
               <div>
-                <div style={{fontSize:"12px",color:"#999",marginBottom:"16px"}}>Every {checkoffModal.slot.recurWeeks===1?"week":(checkoffModal.slot.recurWeeks+" weeks")} · {checkoffModal.slot.time} · {DAYS[dayOfWeek(checkoffModal.dateKey)]}s</div>
-                {effectiveNextDate&&!nudgeConflict&&<div style={{background:"#f0fff0",border:"1px solid #a0d0a0",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#2a7a2a"}}>{"✓"} {friendlyDateTime(checkoffModal.slot.time,effectiveNextDate)} is open</div>}
-                {effectiveNextDate&&nudgeConflict&&<div style={{background:"#fff0ee",border:"1px solid #e0b0a8",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#1a1a1a"}}>{"⚠"} That slot is already taken on {friendlyDateTime(checkoffModal.slot.time,effectiveNextDate)}</div>}
+                <div style={{fontSize:"12px",color:"#999",marginBottom:"16px"}}>Every {checkoffModal.slot.recurWeeks===1?"week":(checkoffModal.slot.recurWeeks+" weeks")} · {placementTime(checkoffModal.slot)} · {DAYS[dayOfWeek(checkoffModal.dateKey)]}s</div>
+                {effectiveNextDate&&!nudgeConflict&&<div style={{background:"#f0fff0",border:"1px solid #a0d0a0",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#2a7a2a"}}>{"✓"} {friendlyDateTime(placementTime(checkoffModal.slot),effectiveNextDate)} is open</div>}
+                {effectiveNextDate&&nudgeConflict&&<div style={{background:"#fff0ee",border:"1px solid #e0b0a8",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#1a1a1a"}}>{"⚠"} That slot is already taken on {friendlyDateTime(placementTime(checkoffModal.slot),effectiveNextDate)}</div>}
                 {nudgedDate&&nudgedDate!==checkoffModal.nextDateKey&&<div style={{fontSize:"11px",color:"#a07830",marginBottom:"10px"}}>Nudged — resumes every {checkoffModal.slot.recurWeeks===1?"week":(checkoffModal.slot.recurWeeks+" weeks")} after this</div>}
                 <div style={{display:"flex",gap:"8px",marginBottom:"20px"}}>
-                  <button onClick={function(){ confirmNextBooking(effectiveNextDate); }} style={{flex:1,padding:"12px",background:nudgeConflict?"#5a2a1a":"#c9a96e",border:"none",borderRadius:"8px",color:nudgeConflict?"#e8b84b":"#0f0f0f",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>{nudgeConflict?"Book anyway":("Book "+friendlyDateTime(checkoffModal.slot.time,effectiveNextDate))}</button>
+                  <button onClick={function(){ confirmNextBooking(effectiveNextDate); }} style={{flex:1,padding:"12px",background:nudgeConflict?"#5a2a1a":"#c9a96e",border:"none",borderRadius:"8px",color:nudgeConflict?"#e8b84b":"#0f0f0f",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>{nudgeConflict?"Book anyway":("Book "+friendlyDateTime(placementTime(checkoffModal.slot),effectiveNextDate))}</button>
                   <button onClick={function(){ jumpToDate(effectiveNextDate); }} style={{padding:"12px 18px",background:"#efefed",border:"1px solid #d8d8d6",borderRadius:"8px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>Jump</button>
                 </div>
                 <div style={{fontSize:"11px",letterSpacing:"0.1em",textTransform:"uppercase",color:"#aaa",marginBottom:"12px"}}>Change date</div>
@@ -3359,12 +3412,10 @@ export default function TheList() {
       {isPhone ? (
         <div style={{borderBottom:"1px solid #e8e8e6",paddingTop:"calc(env(safe-area-inset-top,0px) + 4px)",position:"sticky",top:0,background:"#ffffff",zIndex:100,flexShrink:0}}>
           {/* Single compact row: day-shifters · view tabs · undo/redo/menu */}
-          <div style={{display:"flex",gap:"3px",alignItems:"center",padding:"0 8px 3px",justifyContent:"space-between"}}>
+          <div style={{display:"flex",gap:"3px",alignItems:"center",padding:"5px 8px",justifyContent:"space-between"}}>
             <div style={{display:"flex",gap:"3px",alignItems:"center"}}>
-              {view!=="Month"&&<button onClick={function(){ setBaseDate(function(d){ return addDays(d,-7); }); }} style={{...navBtnSm,fontSize:"11px",letterSpacing:"-1px"}}>{"‹‹"}</button>}
-              <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()-1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,-1); }); }} style={navBtnSm}>{"‹"}</button>
-              <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()+1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,1); }); }} style={navBtnSm}>{"›"}</button>
-              {view!=="Month"&&<button onClick={function(){ setBaseDate(function(d){ return addDays(d,7); }); }} style={{...navBtnSm,fontSize:"11px",letterSpacing:"-1px"}}>{"››"}</button>}
+              <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()-1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,-7); }); }} style={{...navBtnSm,fontSize:"11px",letterSpacing:"-1px"}}>{"‹‹"}</button>
+              <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()+1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,7); }); }} style={{...navBtnSm,fontSize:"11px",letterSpacing:"-1px"}}>{"››"}</button>
             </div>
             <div style={{display:"flex",gap:"2px",background:"#e8e8e6",padding:"2px",borderRadius:"5px"}}>
               {["Day","Wknd","Month"].map(function(v){ return (
@@ -3386,7 +3437,7 @@ export default function TheList() {
           {view==="Month"&&<div style={{textAlign:"center",fontSize:"12px",color:"#1a1a1a",paddingBottom:"4px"}}>{baseDate.toLocaleDateString("en-US",{month:"long",year:"numeric"})}</div>}
         </div>
       ) : (
-        <div style={{borderBottom:"1px solid #e8e8e6",padding:"4px 20px 4px",paddingTop:"calc(env(safe-area-inset-top,0px) + 4px)",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,background:"#ffffff",zIndex:100,flexShrink:0}}>
+        <div style={{borderBottom:"1px solid #e8e8e6",padding:"8px 20px",paddingTop:"calc(env(safe-area-inset-top,0px) + 8px)",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,background:"#ffffff",zIndex:100,flexShrink:0}}>
           <div style={{display:"flex",gap:"2px",background:"#e8e8e6",padding:"3px",borderRadius:"6px",marginLeft:isSplitView?"48px":"0"}}>
             {VIEWS.map(function(v){ return (
               <button key={v} data-viewtab={v} onClick={function(){
@@ -3404,10 +3455,8 @@ export default function TheList() {
           </div>
           {view==="Month"&&<div style={{fontSize:"14px",color:"#1a1a1a"}}>{baseDate.toLocaleDateString("en-US",{month:"long",year:"numeric"})}</div>}
           <div style={{display:"flex",gap:"4px",alignItems:"center"}}>
-            {view!=="Month"&&<button onClick={function(){ setBaseDate(function(d){ return addDays(d,-7); }); }} style={{...navBtn,fontSize:"11px",letterSpacing:"-1px"}}>{"‹‹"}</button>}
-            <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()-1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,-1); }); }} style={navBtn}>{"‹"}</button>
-            <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()+1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,1); }); }} style={navBtn}>{"›"}</button>
-            {view!=="Month"&&<button onClick={function(){ setBaseDate(function(d){ return addDays(d,7); }); }} style={{...navBtn,fontSize:"11px",letterSpacing:"-1px"}}>{"››"}</button>}
+            <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()-1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,-7); }); }} style={{...navBtn,fontSize:"11px",letterSpacing:"-1px"}}>{"‹‹"}</button>
+            <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()+1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,7); }); }} style={{...navBtn,fontSize:"11px",letterSpacing:"-1px"}}>{"››"}</button>
             <div style={{width:"10px"}}/>
             <button onClick={handleUndo} title="Undo" style={{...navBtn,background:canUndo?"#f0f0ee":"#f8f8f6",border:"1px solid #d8d8d6",width:"32px",padding:"0"}}><UndoIcon size={17} color={canUndo?"#555":"#ccc"}/></button>
             <button onClick={handleRedo} title="Redo" style={{...navBtn,background:canRedo?"#f0f0ee":"#f8f8f6",border:"1px solid #d8d8d6",width:"32px",padding:"0"}}><RedoIcon size={17} color={canRedo?"#555":"#ccc"}/></button>
