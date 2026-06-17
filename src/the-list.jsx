@@ -793,6 +793,10 @@ export default function TheList() {
       {k:"grid t/b", v:rc(d.grid)},
       {k:"scroller t/b", v:rc(d.scroll)},
       {k:"footer t/b", v:rc(d.foot)},
+      {k:"screen.height", v:String(d.screenH)},
+      {k:"outerHeight", v:String(d.outerH)},
+      {k:"fixed bottom:0", v:String(d.fixBottom)},
+      {k:"screenH - innerH", v:String((d.screenH||0) - (d.innerH||0))},
       {k:"TOP gap (root.t)", v:String(topGap), hot:true},
       {k:"BOT gap vs innerH", v:String(botI), hot:true},
       {k:"BOT gap vs vvH", v:String(botV), hot:true},
@@ -846,6 +850,21 @@ export default function TheList() {
         out.grid = rect(document.querySelector("[data-gridtop]"));
         out.scroll = rect(document.querySelector("[data-slotscroll]"));
         out.foot = rect(document.querySelector("[data-footer]"));
+        // Physical-screen vs page-viewport: if screenH > innerH there is an OS band the
+        // page's height APIs cannot see (would point at index.html viewport-fit, not this file).
+        out.screenH = (window.screen && window.screen.height) ? window.screen.height : 0;
+        out.outerH = window.outerHeight || 0;
+        var botMark = document.createElement("div");
+        botMark.style.position = "fixed";
+        botMark.style.left = "0";
+        botMark.style.bottom = "0";
+        botMark.style.width = "1px";
+        botMark.style.height = "1px";
+        botMark.style.visibility = "hidden";
+        botMark.style.pointerEvents = "none";
+        document.body.appendChild(botMark);
+        out.fixBottom = Math.round(botMark.getBoundingClientRect().bottom);
+        document.body.removeChild(botMark);
         return out;
       } catch (e) {
         return {err: String(e)};
@@ -3034,12 +3053,12 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div onClick={function(){ setDbgOpen(function(p){ return !p; }); }} style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",cursor:"pointer",fontFamily:"Georgia,serif"}}>v17</div>
+      <div onClick={function(){ setDbgOpen(function(p){ return !p; }); }} style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",cursor:"pointer",fontFamily:"Georgia,serif"}}>v18</div>
 
       {/* ===== TEMP DEBUG readout (v16 measurement build) — remove after the gap fix. ===== */}
       {dbgOpen && dbgInfo && (
         <div onClick={function(){ setDbgOpen(false); }} style={{position:"fixed",top:"50%",left:"50%",transform:"translate(-50%,-50%)",zIndex:2600,background:"rgba(18,18,22,0.95)",color:"#e8e8e8",padding:"10px 12px",borderRadius:"8px",fontFamily:"monospace",fontSize:"11px",lineHeight:"1.5",maxWidth:"88vw",boxShadow:"0 6px 30px rgba(0,0,0,0.45)"}}>
-          <div style={{color:"#ffd27f",fontWeight:"bold",marginBottom:"5px"}}>DEBUG v17 — tap to hide</div>
+          <div style={{color:"#ffd27f",fontWeight:"bold",marginBottom:"5px"}}>DEBUG v18 — tap to hide</div>
           {dbgRows(dbgInfo).map(function(r){
             return (
               <div key={r.k} style={{display:"flex",justifyContent:"space-between",gap:"16px",color:r.hot?"#9be29b":"#e8e8e8"}}>
@@ -3945,7 +3964,7 @@ export default function TheList() {
                     );
                   })}
                 </div>
-                <div data-footer="1" style={{display:"flex",gap:"6px",padding:isPhone?"2px 10px 2px":"2px 12px 2px",paddingBottom:"max(10px, calc(env(safe-area-inset-bottom,0px) + 2px))",flexShrink:0}}>
+                <div data-footer="1" style={{display:"flex",gap:"6px",padding:isPhone?"2px 10px 2px":"2px 12px 2px",paddingBottom:"10px",flexShrink:0}}>
                   <button onClick={function(){ addSlotToBeginning(dateKey); }} style={{flex:1,padding:isPhone?"5px":"5px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ AM</button>
                   <button onClick={function(){ addSlotToEnd(dateKey); }} style={{flex:1,padding:isPhone?"5px":"5px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ PM</button>
                 </div>
