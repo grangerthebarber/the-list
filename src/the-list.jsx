@@ -851,9 +851,18 @@ export default function TheList() {
         return {err: String(e)};
       }
     }
-    function go() { setDbgInfo(readDbg()); }
+    var retryIv = null;
+    function go() {
+      var snap = readDbg();
+      setDbgInfo(snap);
+      // The app renders a "Loading…" screen first; on a cold load the calendar tree
+      // (and these elements) mount after our timers. Keep re-measuring until the root
+      // appears, then stop so we are not re-rendering forever.
+      if (snap && snap.root && retryIv) { clearInterval(retryIv); retryIv = null; }
+    }
     var t1 = setTimeout(go, 60);
     var t2 = setTimeout(go, 420);
+    retryIv = setInterval(go, 500);
     window.addEventListener("resize", go);
     window.addEventListener("orientationchange", go);
     if (window.visualViewport) {
@@ -862,6 +871,7 @@ export default function TheList() {
     }
     return function() {
       clearTimeout(t1); clearTimeout(t2);
+      if (retryIv) { clearInterval(retryIv); retryIv = null; }
       window.removeEventListener("resize", go);
       window.removeEventListener("orientationchange", go);
       if (window.visualViewport) {
@@ -3024,12 +3034,12 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div onClick={function(){ setDbgOpen(function(p){ return !p; }); }} style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",cursor:"pointer",fontFamily:"Georgia,serif"}}>v16</div>
+      <div onClick={function(){ setDbgOpen(function(p){ return !p; }); }} style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",cursor:"pointer",fontFamily:"Georgia,serif"}}>v17</div>
 
       {/* ===== TEMP DEBUG readout (v16 measurement build) — remove after the gap fix. ===== */}
       {dbgOpen && dbgInfo && (
         <div onClick={function(){ setDbgOpen(false); }} style={{position:"fixed",top:"50%",left:"50%",transform:"translate(-50%,-50%)",zIndex:2600,background:"rgba(18,18,22,0.95)",color:"#e8e8e8",padding:"10px 12px",borderRadius:"8px",fontFamily:"monospace",fontSize:"11px",lineHeight:"1.5",maxWidth:"88vw",boxShadow:"0 6px 30px rgba(0,0,0,0.45)"}}>
-          <div style={{color:"#ffd27f",fontWeight:"bold",marginBottom:"5px"}}>DEBUG v16 — tap to hide</div>
+          <div style={{color:"#ffd27f",fontWeight:"bold",marginBottom:"5px"}}>DEBUG v17 — tap to hide</div>
           {dbgRows(dbgInfo).map(function(r){
             return (
               <div key={r.k} style={{display:"flex",justifyContent:"space-between",gap:"16px",color:r.hot?"#9be29b":"#e8e8e8"}}>
