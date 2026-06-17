@@ -28,8 +28,28 @@ const DEFAULT_TIMES = [
   "7:13","7:36","7:58",
   "8:21","8:43","9:06","9:28","9:51","10:13","10:36","10:58",
   "11:21","11:43","12:06","12:28","12:51",
-  "1:13","1:36","1:58","2:21","2:43","3:06","3:28","3:51"
+  "1:13","1:36","1:58","2:21","2:43"
 ];
+
+// #15: 3:06 / 3:28 / 3:51 were retired from the auto-populated grid so the
+// remaining rows get more height (no scrolling). They stay in ALL_TIMES, so the
+// user can still hand-add one as a custom +PM slot. Existing saved days that
+// still carry these as EMPTY default placeholders are trimmed on load (named,
+// blocked, custom, marked, or noted slots at these times are always preserved —
+// we never silently delete a booked appointment).
+const REMOVED_TAIL_TIMES = ["3:06","3:28","3:51"];
+function trimRemovedTail(slots) {
+  if (!slots || !slots.length) return slots;
+  var out = [];
+  for (var i = 0; i < slots.length; i++) {
+    var s = slots[i];
+    var isRemoved = REMOVED_TAIL_TIMES.indexOf(s.time) !== -1;
+    var isEmptyPlaceholder = !s.name && !s.blocked && !s.isCustom && !s.availStatus && !s.note;
+    if (isRemoved && isEmptyPlaceholder) continue;
+    out.push(s);
+  }
+  return out;
+}
 
 const OLD_DEFAULT_TIMES_A = [
   "6:51","7:13","7:36","7:58",
@@ -203,7 +223,7 @@ function migrateSchedules(raw) {
     if (isOldDefault(raw[dk])) {
       result[dk] = DEFAULT_TIMES.map(function(t){ return {time:t,name:"",price:"",done:false,recurWeeks:null,isCustom:false}; });
     } else {
-      result[dk] = topUpAfternoonTail(extendDefaultTail(raw[dk]));
+      result[dk] = trimRemovedTail(topUpAfternoonTail(extendDefaultTail(raw[dk])));
     }
   }
   return result;
@@ -213,6 +233,7 @@ function getBannerColor(type) {
   if (type==="penciled") return "#a07830";
   if (type==="added"||type==="slot_added"||type==="unblocked"||type==="checkoff") return "#2a7a2a";
   if (type==="removed"||type==="slot_removed"||type==="blocked") return "#c0392b";
+  if (type==="rescheduled") return "#2a4fd6";
   return "#555";
 }
 
@@ -223,10 +244,13 @@ function describeBanner(entry) {
   if (type==="added" && entry.name && entry.time && entry.dateKey) {
     return entry.name + " is locked in for " + entry.time + " • " + friendlyDateLong(entry.dateKey);
   }
+  if (type==="rescheduled" && entry.name && entry.time && entry.dateKey) {
+    return entry.name + " rescheduled to " + entry.time + " • " + friendlyDateLong(entry.dateKey);
+  }
   if (type==="penciled" && entry.name && entry.time) {
     return entry.name + " penciled in for " + entry.time + (entry.dateKey ? (" • " + friendlyDateLong(entry.dateKey)) : "");
   }
-  var prefix = type==="added"?"Added":type==="checkoff"?"Checked off":type==="removed"?"Removed":type==="edited"?"Edited":type==="recurring_set"?"Set recurring":type==="blocked"?"Blocked":type==="unblocked"?"Unblocked":type==="slot_added"?"Added slot":type==="slot_removed"?"Removed slot":type==="undo"?"Undone":type==="redo"?"Redone":"Changed";
+  var prefix = type==="added"?"Locked in":type==="checkoff"?"Checked off":type==="removed"?"Canceled":type==="rescheduled"?"Rescheduled":type==="edited"?"Edited":type==="recurring_set"?"Set recurring":type==="blocked"?"Blocked":type==="unblocked"?"Unblocked":type==="slot_added"?"Added slot":type==="slot_removed"?"Removed slot":type==="undo"?"Undone":type==="redo"?"Redone":"Changed";
   var name = entry.name ? (" " + entry.name) : "";
   var time = entry.time ? (" at " + entry.time) : "";
   var date = entry.dateKey ? (" · " + friendlyDate(entry.dateKey)) : "";
@@ -372,6 +396,18 @@ function UnlockIcon(props) {
   );
 }
 
+// #17: Apple-style speech-bubble (rounded bubble with a small tail). Stroke-based
+// so its line weight matches the pencil/recurring glyphs. Color is passed in:
+// app-blue when a number is on file, gray when it isn't.
+function MessageIcon(props) {
+  var size = props.size || 17; var color = props.color || "#4a8a9a";
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{display:"block"}}>
+      <path d="M20 11.5a7.5 7.5 0 0 1-10.9 6.7L4 19.5l1.3-3.7A7.5 7.5 0 1 1 20 11.5z"/>
+    </svg>
+  );
+}
+
 // Salon day runs morning (hours 5–12) into afternoon (hours 1–4 = PM). Map a
 // displayed "H:MM" to an absolute minute-of-day so nudging/ordering behave.
 function timeToAbsMinutes(t) {
@@ -420,6 +456,7 @@ export default function TheList() {
   const [blockLabelModal, setBlockLabelModal] = useState(null);
   const [blockLabel, setBlockLabel] = useState("Lunch");
   const [clientProfile, setClientProfile] = useState(null);
+  const [phoneModal, setPhoneModal] = useState(null);
   const [checkoffCalMonth, setCheckoffCalMonth] = useState(null);
   const [editingOccupied, setEditingOccupied] = useState(false);
   const [monthLongPress, setMonthLongPress] = useState(null);
@@ -932,7 +969,11 @@ export default function TheList() {
       if ((e.key==="ArrowLeft"||e.key==="ArrowRight") && !e.ctrlKey && !e.metaKey && !e.altKey) {
         if (editingRef.current) return;
         var ae = (typeof document!=="undefined") ? document.activeElement : null;
-        if (ae && (ae.tagName==="INPUT" || ae.tagName==="TEXTAREA")) return;
+        // Only bail when focus sits in an EDITABLE field (live text entry). After
+        // adding/deleting someone, focus can linger on a now-readOnly slot input;
+        // that used to swallow the arrows until the user changed views. A readOnly
+        // input has no cursor to move, so let the arrows page the day.
+        if (ae && (ae.tagName==="INPUT" || ae.tagName==="TEXTAREA") && !ae.readOnly && !ae.disabled) return;
         e.preventDefault();
         var back = e.key==="ArrowLeft";
         if (view==="Month") { var dm=new Date(baseDate); dm.setMonth(dm.getMonth()+(back?-1:1)); setBaseDate(dm); }
@@ -1094,6 +1135,14 @@ export default function TheList() {
     else playSound("tap");
   };
 
+  // #11: flash a just-emptied slot red for 8 seconds so a cancel is visible no matter
+  // how it happened (swipe-delete, name cleared by editing, or undone).
+  var flashRemoved = function(dateKey, idx) {
+    var fk = dateKey + "-" + idx;
+    setRecentlyRemoved(function(r){ var n={...r}; n[fk]=true; return n; });
+    setTimeout(function(){ setRecentlyRemoved(function(r){ var n={...r}; delete n[fk]; return n; }); }, 8000);
+  };
+
   const pushUndo = function(snapshot) {
     setUndoStack(function(prev){ return [...prev, snapshot].slice(-50); });
     setRedoStack([]);
@@ -1114,7 +1163,7 @@ export default function TheList() {
     goToDateKeyIfHidden(dk);
     var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
 
-    if (entry.type==="added"||entry.type==="checkoff") {
+    if (entry.type==="added"||entry.type==="checkoff"||entry.type==="rescheduled") {
       // expected: this slot holds entry.name. If someone else is here now, conflict.
       if (!override && cur.name && entry.name && cur.name.toLowerCase()!==entry.name.toLowerCase()) {
         setEntryUndoConflict({entry, current:cur, dateKey:dk}); return;
@@ -1122,6 +1171,7 @@ export default function TheList() {
       pushUndo(snapshot);
       slots[idx] = {...cur,name:"",price:"",done:false,recurWeeks:null,isException:false,blocked:false,blockLabel:"",note:""};
       setSlots(dk, slots);
+      flashRemoved(dk, idx);
       showBanner({type:"undo",name:entry.name,time:entry.time,dateKey:dk});
     } else if (entry.type==="removed"||entry.type==="slot_removed") {
       // expected: slot is empty now. Restore the name. If occupied by someone else, conflict.
@@ -1269,7 +1319,7 @@ export default function TheList() {
       pushUndo(snapshot);
       slots[idx] = {...prev,name:newName,price:newPrice,availStatus:null,pending:false};
       setSlots(dateKey,slots);
-      if (prev.name&&!newName) addHistoryEntry({type:"removed",time:prev.time,name:prev.name,dateKey});
+      if (prev.name&&!newName) { addHistoryEntry({type:"removed",time:prev.time,name:prev.name,dateKey}); flashRemoved(dateKey,idx); }
       else if (!prev.name&&newName) {
         addHistoryEntry({type:"added",time:slots[idx].time,name:newName,price:newPrice,dateKey});
         setClientMemory(function(mem) {
@@ -1454,6 +1504,22 @@ export default function TheList() {
         return;
       }
       if (!newName) return;
+      // #16: typing "lunch" + Shift+Enter doesn't book a person named Lunch — it
+      // blocks this slot AND the one directly below as a single linked Lunch break.
+      // (If the slot below is occupied/blocked, just block this one.)
+      if (isLunchName(newName)) {
+        var snapL = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
+        pushUndo(snapL);
+        var canPairL = nextIdx<slots.length && !slots[nextIdx].name && !slots[nextIdx].blocked;
+        var gidL = canPairL ? (curSlot.groupId || newGroupId()) : (curSlot.groupId || null);
+        slots[idx] = {...curSlot,name:"",price:"",done:false,recurWeeks:null,isException:false,blocked:true,blockLabel:"Lunch",groupId:gidL};
+        if (canPairL) slots[nextIdx] = {...slots[nextIdx],name:"",price:"",done:false,recurWeeks:null,isException:false,blocked:true,blockLabel:"Lunch",groupId:gidL};
+        setSlots(dateKey,slots);
+        addHistoryEntry({type:"blocked",time:curSlot.time,name:"Lunch",dateKey});
+        editingRef.current=null; setEditingCell(null); setEditingOccupied(false);
+        setPencilArmed(false); setEditChromeReady(true);
+        return;
+      }
       var hasNext = nextIdx<slots.length && !slots[nextIdx].blocked;
       var nextEmpty = hasNext && !slots[nextIdx].name;
       var nextFilled = hasNext && !!slots[nextIdx].name;
@@ -1713,6 +1779,8 @@ export default function TheList() {
     setSchedules(newSchedules);
     addHistoryEntry({type:"added",time:placementTime(slot),name:slot.name,price:slot.price,dateKey:targetDateKey});
     setCheckoffModal(null); setNudgedDate(null); setCheckoffCalMonth(null);
+    // #1: after a quick-book, land on the date we just placed them on.
+    setBaseDate(parseDateKey(targetDateKey)); setView("Day");
   };
 
   // Book the client at the chosen date AND every N weeks for six months, mark the
@@ -1768,6 +1836,8 @@ export default function TheList() {
     setSchedules(newSchedules);
     addHistoryEntry({type:"added",time:placementTime(slot),name:slot.name,price:slot.price,dateKey:targetDateKey});
     setCheckoffModal(null); setNudgedDate(null); setCheckoffCalMonth(null); setCheckoffRecur(null); setRecurPickerOpen(false);
+    // #1: after a recurring quick-book, land on the date we just placed them on.
+    setBaseDate(parseDateKey(targetDateKey)); setView("Day");
   };
 
   // Recurring, pick-the-slot flow: instead of asking for a start date in the
@@ -1811,9 +1881,25 @@ export default function TheList() {
       setPlacingClient(null);
       return false;
     }
-    var times = (client.groupTimes && client.groupTimes.length>1)
-      ? client.groupTimes.map(function(t){ return {time:(t.defaultBaseTime||t.time),price:t.price,recurWeeks:weeks,name:t.name}; })
-      : [{time:anchor.time,price:client.price,recurWeeks:weeks,name:client.name}];
+    // #2: a tap-to-placed recurring booking ALWAYS lands on the slot the user
+    // tapped — never the original anchor time. For a single person that's the
+    // tapped slot's time. For a linked group, re-anchor the whole group onto the
+    // tapped slot: the earliest member moves to the tapped time and every other
+    // member keeps its original minute-offset from that earliest member, so the
+    // group keeps its shape but starts where you tapped (this also makes the
+    // placement agree with the banner, which already reports the tapped time).
+    var times;
+    if (client.groupTimes && client.groupTimes.length>1) {
+      var sortedG = client.groupTimes.slice().sort(function(a,b){ return timeToAbsMinutes(a.time)-timeToAbsMinutes(b.time); });
+      var baseMin = timeToAbsMinutes(sortedG[0].time);
+      var anchorMin = timeToAbsMinutes(anchor.time);
+      times = sortedG.map(function(t){
+        var offset = timeToAbsMinutes(t.time) - baseMin;
+        return {time:absMinutesToTime(anchorMin+offset),price:t.price,recurWeeks:weeks,name:t.name};
+      });
+    } else {
+      times = [{time:anchor.time,price:client.price,recurWeeks:weeks,name:client.name}];
+    }
     var nameLower = (client.name||"").toLowerCase();
     var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
     pushUndo(snapshot);
@@ -2082,6 +2168,33 @@ export default function TheList() {
     }
   };
 
+  // #10: cancel a recurring series for an entire linked group in a single pass.
+  // (Calling setRecurring once per member would clobber state, since each call
+  // rebuilds from the same pre-update snapshot.) Matches the single-person rule:
+  // on the source day the booking stays but loses its recurring flag; every
+  // future occurrence of any group member's name is cleared.
+  const cancelRecurringForGroup = function(dateKey, groupSlots) {
+    var snap={schedules:JSON.parse(JSON.stringify(schedulesRef.current))}; pushUndo(snap);
+    var names={};
+    groupSlots.forEach(function(gs){ if(gs.name) names[gs.name.toLowerCase()]=true; });
+    var newSch={...schedulesRef.current};
+    Object.keys(newSch).forEach(function(dk){
+      if (dk < dateKey) return;
+      var ds=[...newSch[dk]]; var touched=false;
+      ds.forEach(function(s,si){
+        if (s.name && names[s.name.toLowerCase()] && s.recurWeeks!=null && !s.done) {
+          if (dk===dateKey) { ds[si]={...s,recurWeeks:null}; }
+          else { ds[si]={...s,name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null,pending:false,availStatus:null}; }
+          touched=true;
+        }
+      });
+      if (touched) newSch[dk]=ds;
+    });
+    setSchedules(newSch);
+    addHistoryEntry({type:"recurring_set",time:(groupSlots[0]&&groupSlots[0].time)||"",name:(groupSlots[0]&&groupSlots[0].name)||"group",weeks:null,dateKey:dateKey});
+    setGroupRecurModal(null);
+  };
+
   // ---- 6C/6D series-edit + conflict-resolution helpers ----
   // 6C name/price: apply a rename/price change to just this occurrence or to the
   // whole future series.
@@ -2160,7 +2273,7 @@ export default function TheList() {
           src[m.idx]={...src[m.idx],name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null,pending:false,availStatus:null};
           setSlots(m.dateKey,src);
         }
-        addHistoryEntry({type:"added",time:m.newTime,name:m.name,price:m.price,dateKey:m.targetDateKey});
+        addHistoryEntry({type:"rescheduled",time:m.newTime,name:m.name,price:m.price,dateKey:m.targetDateKey});
       }
       setSeriesEditModal(null);
     } else {
@@ -2545,7 +2658,7 @@ export default function TheList() {
       os[client.originalIdx] = {...os[client.originalIdx],name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null};
       setSlots(client.originalDateKey, os);
     }
-    addHistoryEntry({type:"added",time:targetSlot.time,name:client.name,price:client.price,dateKey:targetDateKey});
+    addHistoryEntry({type:"rescheduled",time:targetSlot.time,name:client.name,price:client.price,dateKey:targetDateKey});
     setPlacingClient(null);
   };
 
@@ -2582,7 +2695,7 @@ export default function TheList() {
       os[client.originalIdx] = {...os[client.originalIdx],name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null};
       setSlots(client.originalDateKey, os);
     }
-    addHistoryEntry({type:"added",time:targetSlot.time,name:client.name,price:client.price,dateKey:targetDateKey});
+    addHistoryEntry({type:"rescheduled",time:targetSlot.time,name:client.name,price:client.price,dateKey:targetDateKey});
     return true;
   };
 
@@ -3053,7 +3166,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div onClick={function(){ setDbgOpen(function(p){ return !p; }); }} style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",cursor:"pointer",fontFamily:"Georgia,serif"}}>v18</div>
+      <div onClick={function(){ setDbgOpen(function(p){ return !p; }); }} style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",cursor:"pointer",fontFamily:"Georgia,serif"}}>v19</div>
 
       {/* ===== TEMP DEBUG readout (v16 measurement build) — remove after the gap fix. ===== */}
       {dbgOpen && dbgInfo && (
@@ -3200,6 +3313,9 @@ export default function TheList() {
                 )}
               </div>
             )}
+            {groupRecurModal.slot.recurWeeks!=null && (
+              <button onClick={function(){ cancelRecurringForGroup(groupRecurModal.dateKey, groupRecurModal.groupSlots); }} style={{display:"block",width:"100%",padding:"10px",background:"none",border:"1px solid #e3b8b0",borderRadius:"8px",color:"#b0392b",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",letterSpacing:"0.08em",textTransform:"uppercase",marginBottom:"8px"}}>Cancel recurring for this group</button>
+            )}
             <button onClick={function(){ setGroupRecurModal(null); }} style={{display:"block",width:"100%",padding:"8px",background:"none",border:"none",color:"#bbb",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>Cancel</button>
           </div>
         </div>
@@ -3215,6 +3331,26 @@ export default function TheList() {
             <div style={{display:"flex",gap:"8px"}}>
               <button onClick={function(){ toggleBlockSlot(blockLabelModal.dateKey,blockLabelModal.idx,blockLabel); }} style={{flex:1,padding:"10px",background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Block</button>
               <button onClick={function(){ setBlockLabelModal(null); }} style={{padding:"10px 16px",background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {phoneModal && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px"}} onClick={function(){ setPhoneModal(null); }}>
+          <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"24px",width:"min(320px,92vw)"}} onClick={function(e){ e.stopPropagation(); }}>
+            <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#aaa",marginBottom:"8px"}}>Message</div>
+            <div style={{fontSize:"16px",color:"#1a1a1a",marginBottom:"4px"}}>{phoneModal.name}</div>
+            <div style={{fontSize:"12px",color:"#999",marginBottom:"14px"}}>Add a mobile number to text them. It's saved to their profile.</div>
+            <input autoFocus type="tel" inputMode="tel" autoComplete="off" value={phoneModal.phone||""} placeholder="Phone number"
+              onChange={function(e){ var v=e.target.value; setPhoneModal(function(p){ return p?{...p,phone:v}:p; }); setClientPhone(phoneModal.name, v); }}
+              onKeyDown={function(e){ if(e.key==="Escape") setPhoneModal(null); }}
+              style={{...inputStyle,width:"100%",boxSizing:"border-box",marginBottom:"14px",fontSize:"15px"}} />
+            <div style={{display:"flex",gap:"8px"}}>
+              {(phoneModal.phone||"").replace(/[^0-9+]/g,"")
+                ? <button onClick={function(){ var d=(phoneModal.phone||"").replace(/[^0-9+]/g,""); setPhoneModal(null); window.location.href="sms:"+d; }} style={{flex:1,padding:"10px",background:"#4a8a9a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Message</button>
+                : <button disabled style={{flex:1,padding:"10px",background:"#ececeb",border:"none",borderRadius:"6px",color:"#bbb",cursor:"default",fontFamily:"inherit",fontSize:"13px"}}>Message</button>}
+              <button onClick={function(){ setPhoneModal(null); }} style={{padding:"10px 16px",background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Done</button>
             </div>
           </div>
         </div>
@@ -3413,7 +3549,7 @@ export default function TheList() {
                 </button>
               ); })}
             </div>
-            {recurringModal.slot.recurWeeks&&<button onClick={function(){ setRecurring(recurringModal.dateKey,recurringModal.idx,null); }} style={{display:"block",width:"100%",padding:"8px",background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#999",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:"12px"}}>Remove recurring</button>}
+            {recurringModal.slot.recurWeeks&&<button onClick={function(){ setRecurring(recurringModal.dateKey,recurringModal.idx,null); }} style={{display:"block",width:"100%",padding:"10px",background:"none",border:"1px solid #e3b8b0",borderRadius:"6px",color:"#b0392b",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",letterSpacing:"0.08em",textTransform:"uppercase",marginBottom:"12px"}}>Cancel recurring</button>}
             <button onClick={function(){ setRecurringModal(null); }} style={{display:"block",width:"100%",padding:"8px",background:"none",border:"none",color:"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>Cancel</button>
           </div>
         </div>
@@ -3476,6 +3612,14 @@ export default function TheList() {
                 </div>
                 <div style={{fontSize:"11px",letterSpacing:"0.1em",textTransform:"uppercase",color:"#aaa",marginBottom:"12px"}}>Change date</div>
                 {renderCheckoffCalendar()}
+                <button onClick={function(){
+                  var dk=checkoffModal.dateKey; var ix=checkoffModal.idx; var sl=checkoffModal.slot;
+                  setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null);setCheckoffRecur(null);setRecurPickerOpen(false);
+                  setTimeout(function(){
+                    if(sl.groupId){ var aS=getSlots(dk); var gS=aS.map(function(s,i){ return {...s,i}; }).filter(function(s){ return s.groupId===sl.groupId&&s.name; }); if(gS.length>1){ cancelRecurringForGroup(dk,gS); return; } }
+                    setRecurring(dk,ix,null);
+                  },40);
+                }} style={{display:"block",width:"100%",marginTop:"16px",padding:"10px",background:"none",border:"1px solid #e3b8b0",borderRadius:"8px",color:"#b0392b",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",letterSpacing:"0.08em",textTransform:"uppercase"}}>Cancel recurring series</button>
               </div>
             )}
           </div>
@@ -3791,7 +3935,7 @@ export default function TheList() {
             var dateKey=toDateKey(date); var slots=getSlots(dateKey);
             return (
               <div key={dateKey} style={{background:"#ffffff",display:"flex",flexDirection:"column",minHeight:0,overflow:"hidden"}}>
-                <div style={{padding:"2px 10px 2px",borderBottom:"1px solid #ebebea",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"4px",flexShrink:0}}>
+                <div style={{padding:"2px 10px 2px",borderBottom:"1px solid #ebebea",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"4px",flex:"1 0 0px",minHeight:"26px"}}>
                   {(function(){
                     var sz=view==="Day"?"17px":"16px"; if(isPhone) sz=view==="Day"?"15px":"13px";
                     var mo=date.getMonth();
@@ -3804,7 +3948,7 @@ export default function TheList() {
                         <div style={{minWidth:0,overflow:"hidden",flex:1}}>
                           <div style={{display:"flex",alignItems:"baseline",gap:"6px",minWidth:0,marginBottom:"3px"}}>
                             <span style={{fontSize:sz,color:isToday(date)?"#c9893a":"#b89a5a",lineHeight:1.1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",flexShrink:1,textTransform:"uppercase",letterSpacing:"0.06em"}}>{wdStr}</span>
-                            {hol&&<span style={{fontSize:"9px",color:"#a07830",letterSpacing:"0.08em",textTransform:"uppercase",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:1}}>{hol}</span>}
+                            {hol&&<span style={{fontSize:sz,color:"#a07830",letterSpacing:"0.08em",textTransform:"uppercase",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:1}}>{hol}</span>}
                           </div>
                           <div style={{fontSize:sz,color:"#1a1a1a",lineHeight:1.1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",textTransform:"uppercase",letterSpacing:"0.06em"}}>{monthStr}</div>
                         </div>
@@ -3815,13 +3959,13 @@ export default function TheList() {
                       <div style={{minWidth:0,overflow:"hidden",flex:1,display:"flex",alignItems:"baseline",gap:"9px"}}>
                         <span style={{fontSize:sz,color:isToday(date)?"#c9893a":"#b89a5a",lineHeight:1.1,whiteSpace:"nowrap",flexShrink:0,textTransform:"uppercase",letterSpacing:"0.06em"}}>{wdStr+","}</span>
                         <span style={{fontSize:sz,color:"#1a1a1a",lineHeight:1.1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:1,textTransform:"uppercase",letterSpacing:"0.06em"}}>{monthStr}</span>
-                        {hol&&<span style={{fontSize:"9px",color:"#a07830",letterSpacing:"0.08em",textTransform:"uppercase",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:2,alignSelf:"center"}}>{hol}</span>}
+                        {hol&&<span style={{fontSize:sz,color:"#a07830",letterSpacing:"0.08em",textTransform:"uppercase",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:2,alignSelf:"center"}}>{hol}</span>}
                       </div>
                     );
                   })()}
-                  <button onClick={function(e){ e.stopPropagation(); setNoteDraft(dayNotes[dateKey]||""); setNoteModal({dayKey:dateKey,isDay:true,name:friendlyDateLong(dateKey)}); }} title="Note for the day" style={{background:"none",border:"none",cursor:"pointer",padding:"0 2px",color:dayNotes[dateKey]?"#c9a96e":"#bbb",fontSize:"22px",lineHeight:1,flexShrink:0,WebkitTextStroke:"0.5px currentColor"}}>{"✎"}</button>
+                  <button onClick={function(e){ e.stopPropagation(); setNoteDraft(dayNotes[dateKey]||""); setNoteModal({dayKey:dateKey,isDay:true,name:friendlyDateLong(dateKey)}); }} title="Note for the day" style={{background:"none",border:"none",cursor:"pointer",padding:(getDayCount()>3?"0 2px":"0 9px 0 2px"),color:dayNotes[dateKey]?"#c9a96e":"#bbb",fontSize:"22px",lineHeight:1,flexShrink:0,WebkitTextStroke:"0.5px currentColor"}}>{"✎"}</button>
                 </div>
-                <div data-slotscroll="1" style={{flex:1,minHeight:0,paddingBottom:"0px",overflowX:"hidden",overscrollBehavior:"contain",display:"flex",flexDirection:"column"}}
+                <div data-slotscroll="1" style={{flex:(slots.length+" 1 0px"),minHeight:0,paddingBottom:"0px",overflowX:"hidden",overscrollBehavior:"contain",display:"flex",flexDirection:"column"}}
                   onTouchMove={function(e){
                     if (!selectDragAnchor.current) return;
                     var t=e.touches[0]; if(!t) return;
@@ -3952,6 +4096,13 @@ export default function TheList() {
                                       <button onClick={function(e){ e.stopPropagation(); if(slot.groupId){var aS=getSlots(dateKey);var gS=aS.map(function(s,i){ return {...s,i}; }).filter(function(s){ return s.groupId===slot.groupId&&s.name; });if(gS.length>1){setGroupRecurModal({dateKey,idx,slot,groupSlots:gS,weeks:null});return;}} setRecurringModal({dateKey,idx,slot}); }} title="Recurring — tap to manage" style={{background:"none",border:"none",cursor:"pointer",padding:"0 1px",color:"#4a8a9a",fontSize:"16px",fontWeight:"500",lineHeight:1}}>{"↺"}</button>
                                     </div>
                                   ):<div style={{width:"50px",flexShrink:0}}/>)}
+                                  {!compactIcons&&filled&&(function(){
+                                    var digits=getClientPhone(slot.name).replace(/[^0-9+]/g,"");
+                                    if (digits) {
+                                      return <button onClick={function(e){ e.stopPropagation(); window.location.href="sms:"+digits; }} title={"Message "+slot.name} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 4px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={17} color="#4a8a9a"/></button>;
+                                    }
+                                    return <button onClick={function(e){ e.stopPropagation(); setPhoneModal({name:slot.name,phone:""}); }} title={"Add a number for "+slot.name} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 4px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={17} color="#c6c6c6"/></button>;
+                                  })()}
                                   {!compactIcons&&filled&&<button onClick={function(e){ e.stopPropagation(); setNoteDraft(slot.note||""); setNoteModal({dateKey,idx,name:slot.name}); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 5px",color:slot.note?"#c9a96e":"#bbb",fontSize:"22px",fontWeight:"bold",lineHeight:1,WebkitTextStroke:"0.6px currentColor"}}>{"✎"}</button>}
                                 </div>
                               )}
