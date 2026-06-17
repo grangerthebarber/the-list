@@ -488,6 +488,23 @@ export default function TheList() {
   const settleTimer = useRef(null);
   const isLiveDraggingRef = useRef(false);
   isLiveDraggingRef.current = isLiveDragging;
+  // #5: ring buffer of the last few JSON payloads WE pushed to the cloud, so the
+  // matching onSnapshot echo can be recognised and ignored (a single lastSyncRef
+  // loses the race when undo writes the old state right after a booked-state push).
+  const recentWritesRef = useRef([]);
+  // #6: navigation history so a Back button can return to the previous view/date.
+  // navStackRef holds prior {view,baseDate}; navSuppressRef marks a goBack() in
+  // flight (so the [view,baseDate] effect doesn't re-push it); lastLocRef tracks
+  // the location the effect last saw.
+  const navStackRef = useRef([]);
+  const navSuppressRef = useRef(false);
+  const lastLocRef = useRef(null);
+  const [navCanBack, setNavCanBack] = useState(false);
+  // #11: iOS standalone PWAs resolve CSS height:100% against a box that can be
+  // shorter than the visible area, leaving dead space below the +AM/+PM footer and
+  // pushing the last rows out of view. Measuring window.innerHeight and pinning the
+  // app root to it makes the flex column fill the real viewport exactly.
+  const [vpH, setVpH] = useState(0);
   // Measured Y of the top of the first list row, used to vertically center the change-log banner.
   const [listTopY, setListTopY] = useState(0);
   // Measured Y of the top of the day columns (the date header), so the banner can sit
@@ -593,6 +610,7 @@ export default function TheList() {
           var seedSch = migrateSchedules(schedulesRef.current || {});
           var seeded = {schedules:seedSch, clients:clientMemoryRef.current, holidays:customHolidaysRef.current, history:historyRef.current, dayNotes:dayNotesRef.current};
           lastSyncRef.current = JSON.stringify(seeded);
+          recentWritesRef.current.push(lastSyncRef.current);
           try { setDoc(userDoc, {schedules:seedSch, clients:seeded.clients, holidays:seeded.holidays, history:seeded.history, dayNotes:seeded.dayNotes, updatedAt:serverTimestamp()}, {merge:true}); } catch(e) {}
           setHydrated(true);
         }
@@ -602,6 +620,7 @@ export default function TheList() {
       var migrated = migrateSchedules(data.schedules || {});
       var applied = {schedules:migrated, clients:data.clients||[], holidays:data.holidays||[], history:data.history||[], dayNotes:data.dayNotes||{}};
       var json = JSON.stringify(applied);
+      if (recentWritesRef.current.indexOf(json) >= 0) { lastSyncRef.current = json; return; }
       if (!first && json === lastSyncRef.current) return;
       first = false;
       lastSyncRef.current = json;
@@ -621,6 +640,8 @@ export default function TheList() {
     var json = JSON.stringify(payload);
     if (json === lastSyncRef.current) return;
     lastSyncRef.current = json;
+    recentWritesRef.current.push(json);
+    if (recentWritesRef.current.length > 12) recentWritesRef.current.shift();
     if (saveTimer.current) clearTimeout(saveTimer.current);
     var uid = authUser.uid;
     saveTimer.current = setTimeout(function() {
@@ -777,12 +798,51 @@ export default function TheList() {
         e.preventDefault();
         var back = e.key==="ArrowLeft";
         if (view==="Month") { var dm=new Date(baseDate); dm.setMonth(dm.getMonth()+(back?-1:1)); setBaseDate(dm); }
-        else setBaseDate(function(prev){ return addDays(prev, back?-1:1); });
+        else { var step = e.shiftKey ? 7 : 1; setBaseDate(function(prev){ return addDays(prev, back?-step:step); }); }
       }
     };
     window.addEventListener("keydown", handler);
     return function() { window.removeEventListener("keydown", handler); };
   });
+
+  // #6: record view/date navigation so the Back button can return to where we were.
+  // Each time the location changes we push the PREVIOUS one. A goBack() sets
+  // navSuppressRef so the resulting change isn't itself recorded.
+  useEffect(function() {
+    var loc = {view:view, baseDate:new Date(baseDate)};
+    if (navSuppressRef.current) {
+      navSuppressRef.current = false;
+      lastLocRef.current = loc;
+      return;
+    }
+    var prev = lastLocRef.current;
+    lastLocRef.current = loc;
+    if (prev && (prev.view!==loc.view || (+prev.baseDate)!==(+loc.baseDate))) {
+      navStackRef.current.push(prev);
+      if (navStackRef.current.length>50) navStackRef.current.shift();
+      if (!navCanBack) setNavCanBack(true);
+    }
+  }, [view, baseDate]);
+
+  const goBack = function() {
+    if (navStackRef.current.length===0) return;
+    var dest = navStackRef.current.pop();
+    if (navStackRef.current.length===0) setNavCanBack(false);
+    var sameView = dest.view===view;
+    var sameDate = (+dest.baseDate)===(+baseDate);
+    if (sameView && sameDate) return;
+    navSuppressRef.current = true;
+    if (!sameView) setView(dest.view);
+    if (!sameDate) setBaseDate(dest.baseDate);
+  };
+
+  useEffect(function() {
+    var apply = function(){ setVpH(window.innerHeight); };
+    apply();
+    window.addEventListener("resize", apply);
+    window.addEventListener("orientationchange", apply);
+    return function(){ window.removeEventListener("resize", apply); window.removeEventListener("orientationchange", apply); };
+  }, []);
 
   const showBanner = function(entry, overrideType) {
     if (bannerTimer.current) clearTimeout(bannerTimer.current);
@@ -1076,7 +1136,7 @@ export default function TheList() {
         addHistoryEntry({type:"added",time:slots[idx].time,name:newName,price:newPrice,dateKey});
         setClientMemory(function(mem) {
           var existing = mem.findIndex(function(c){ return c.name.toLowerCase()===newName.toLowerCase(); });
-          if (existing>=0) { var updated=[...mem]; updated[existing]={name:newName,price:newPrice||mem[existing].price}; return updated; }
+          if (existing>=0) { var updated=[...mem]; updated[existing]={...updated[existing],name:newName,price:newPrice||mem[existing].price}; return updated; }
           return [...mem,{name:newName,price:newPrice}];
         });
       } else if (prev.name&&newName) addHistoryEntry({type:"edited",time:slots[idx].time,name:newName,prevName:prev.name,dateKey});
@@ -1104,7 +1164,7 @@ export default function TheList() {
     if (!prev.name) {
       setClientMemory(function(mem) {
         var existing = mem.findIndex(function(c){ return c.name.toLowerCase()===newName.toLowerCase(); });
-        if (existing>=0) { var u=[...mem]; u[existing]={name:newName,price:newPrice||mem[existing].price}; return u; }
+        if (existing>=0) { var u=[...mem]; u[existing]={...u[existing],name:newName,price:newPrice||mem[existing].price}; return u; }
         return [...mem,{name:newName,price:newPrice}];
       });
     }
@@ -1427,7 +1487,7 @@ export default function TheList() {
     return getSlots(dateKey)
       .filter(function(s){ return s.groupId && s.groupId===slot.groupId && s.name; })
       .sort(function(a,b){ return parseTime(a.time)-parseTime(b.time); })
-      .map(function(s){ return {time:s.time,price:s.price,recurWeeks:s.recurWeeks,defaultBaseTime:s.defaultBaseTime}; });
+      .map(function(s){ return {time:s.time,price:s.price,recurWeeks:s.recurWeeks,defaultBaseTime:s.defaultBaseTime,name:s.name}; });
   };
 
   // Earliest date AFTER fromDateKey on which this client already has something booked
@@ -1477,8 +1537,8 @@ export default function TheList() {
     if (!checkoffModal) return;
     var slot = checkoffModal.slot;
     var times = (checkoffModal.groupTimes && checkoffModal.groupTimes.length>0)
-      ? checkoffModal.groupTimes.map(function(t){ return {time:(t.defaultBaseTime||t.time),price:t.price,recurWeeks:t.recurWeeks}; })
-      : [{time:placementTime(slot),price:slot.price,recurWeeks:slot.recurWeeks}];
+      ? checkoffModal.groupTimes.map(function(t){ return {time:(t.defaultBaseTime||t.time),price:t.price,recurWeeks:t.recurWeeks,name:t.name}; })
+      : [{time:placementTime(slot),price:slot.price,recurWeeks:slot.recurWeeks,name:slot.name}];
     var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
     pushUndo(snapshot);
     var newSchedules = {...schedulesRef.current};
@@ -1488,14 +1548,15 @@ export default function TheList() {
         : DEFAULT_TIMES.map(function(t){ return {time:t,name:"",price:"",done:false,recurWeeks:null}; });
       var dgid = times.length>1 ? newGroupId() : null;
       times.forEach(function(t){
+        var nm = t.name || slot.name;
         var si = daySlots.findIndex(function(s){ return s.time===t.time; });
         if (si>=0) {
-          var taken = daySlots[si].name && daySlots[si].name.toLowerCase()!==slot.name.toLowerCase();
+          var taken = daySlots[si].name && daySlots[si].name.toLowerCase()!==nm.toLowerCase();
           if (!taken && (allowOverwriteSame || !daySlots[si].name)) {
-            daySlots[si] = {...daySlots[si],name:slot.name,price:t.price,recurWeeks:t.recurWeeks,done:false,groupId:dgid};
+            daySlots[si] = {...daySlots[si],name:nm,price:t.price,recurWeeks:t.recurWeeks,done:false,groupId:dgid};
           }
         } else {
-          daySlots.push({time:t.time,name:slot.name,price:t.price,recurWeeks:t.recurWeeks,done:false,groupId:dgid});
+          daySlots.push({time:t.time,name:nm,price:t.price,recurWeeks:t.recurWeeks,done:false,groupId:dgid});
         }
       });
       daySlots.sort(function(a,b){ return parseTime(a.time)-parseTime(b.time); });
@@ -1525,8 +1586,8 @@ export default function TheList() {
     var srcDateKey = checkoffModal.dateKey;
     var srcIdx = checkoffModal.idx;
     var times = (checkoffModal.groupTimes && checkoffModal.groupTimes.length>0)
-      ? checkoffModal.groupTimes.map(function(t){ return {time:(t.defaultBaseTime||t.time),price:t.price,recurWeeks:weeks}; })
-      : [{time:placementTime(slot),price:slot.price,recurWeeks:weeks}];
+      ? checkoffModal.groupTimes.map(function(t){ return {time:(t.defaultBaseTime||t.time),price:t.price,recurWeeks:weeks,name:t.name}; })
+      : [{time:placementTime(slot),price:slot.price,recurWeeks:weeks,name:slot.name}];
     var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
     pushUndo(snapshot);
     var newSchedules = {...schedulesRef.current};
@@ -1536,14 +1597,15 @@ export default function TheList() {
         : DEFAULT_TIMES.map(function(t){ return {time:t,name:"",price:"",done:false,recurWeeks:null}; });
       var dgid = times.length>1 ? newGroupId() : null;
       times.forEach(function(t){
+        var nm = t.name || slot.name;
         var si = daySlots.findIndex(function(s){ return s.time===t.time; });
         if (si>=0) {
-          var taken = daySlots[si].name && daySlots[si].name.toLowerCase()!==slot.name.toLowerCase();
+          var taken = daySlots[si].name && daySlots[si].name.toLowerCase()!==nm.toLowerCase();
           if (!taken && (allowOverwriteSame || !daySlots[si].name)) {
-            daySlots[si] = {...daySlots[si],name:slot.name,price:t.price,recurWeeks:t.recurWeeks,done:false,groupId:dgid};
+            daySlots[si] = {...daySlots[si],name:nm,price:t.price,recurWeeks:t.recurWeeks,done:false,groupId:dgid};
           }
         } else {
-          daySlots.push({time:t.time,name:slot.name,price:t.price,recurWeeks:t.recurWeeks,done:false,groupId:dgid});
+          daySlots.push({time:t.time,name:nm,price:t.price,recurWeeks:t.recurWeeks,done:false,groupId:dgid});
         }
       });
       daySlots.sort(function(a,b){ return parseTime(a.time)-parseTime(b.time); });
@@ -1580,7 +1642,7 @@ export default function TheList() {
     var srcIdx = checkoffModal.idx;
     var targetDate = addWeeks(parseDateKey(srcDateKey), weeks);
     var gTimes = (checkoffModal.groupTimes && checkoffModal.groupTimes.length>1)
-      ? checkoffModal.groupTimes.map(function(t){ return {time:t.time,price:t.price,defaultBaseTime:t.defaultBaseTime}; })
+      ? checkoffModal.groupTimes.map(function(t){ return {time:t.time,price:t.price,defaultBaseTime:t.defaultBaseTime,name:t.name}; })
       : null;
     setPlacingClient({
       name:slot.name, price:slot.price,
@@ -1612,8 +1674,8 @@ export default function TheList() {
       return false;
     }
     var times = (client.groupTimes && client.groupTimes.length>1)
-      ? client.groupTimes.map(function(t){ return {time:(t.defaultBaseTime||t.time),price:t.price,recurWeeks:weeks}; })
-      : [{time:anchor.time,price:client.price,recurWeeks:weeks}];
+      ? client.groupTimes.map(function(t){ return {time:(t.defaultBaseTime||t.time),price:t.price,recurWeeks:weeks,name:t.name}; })
+      : [{time:anchor.time,price:client.price,recurWeeks:weeks,name:client.name}];
     var nameLower = (client.name||"").toLowerCase();
     var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
     pushUndo(snapshot);
@@ -1624,14 +1686,15 @@ export default function TheList() {
         : DEFAULT_TIMES.map(function(t){ return {time:t,name:"",price:"",done:false,recurWeeks:null}; });
       var dgid = times.length>1 ? newGroupId() : null;
       times.forEach(function(t){
+        var nm = t.name || client.name;
         var si = daySlots.findIndex(function(s){ return s.time===t.time; });
         if (si>=0) {
-          var taken = daySlots[si].name && daySlots[si].name.toLowerCase()!==nameLower;
+          var taken = daySlots[si].name && daySlots[si].name.toLowerCase()!==nm.toLowerCase();
           if (!taken && (allowOverwriteSame || !daySlots[si].name)) {
-            daySlots[si] = {...daySlots[si],name:client.name,price:t.price,recurWeeks:t.recurWeeks,isException:false,done:false,groupId:dgid};
+            daySlots[si] = {...daySlots[si],name:nm,price:t.price,recurWeeks:t.recurWeeks,isException:false,done:false,groupId:dgid};
           }
         } else {
-          daySlots.push({time:t.time,name:client.name,price:t.price,recurWeeks:t.recurWeeks,isException:false,done:false,groupId:dgid});
+          daySlots.push({time:t.time,name:nm,price:t.price,recurWeeks:t.recurWeeks,isException:false,done:false,groupId:dgid});
         }
       });
       daySlots.sort(function(a,b){ return parseTime(a.time)-parseTime(b.time); });
@@ -1685,7 +1748,24 @@ export default function TheList() {
     var usualTime = nonEx.length>0?nonEx[0].time:(bookings[0]&&bookings[0].time)||"";
     var recurFound = bookings.find(function(b){ return b.recurWeeks; });
     var recurWeeks = recurFound ? recurFound.recurWeeks : null;
-    setClientProfile({name,recurWeeks,usualTime,bookings});
+    setClientProfile({name,recurWeeks,usualTime,bookings,phone:getClientPhone(name)});
+  };
+
+  // #9: optional phone number kept on the client-memory entry so the profile can offer
+  // Message / Call. iOS PWAs can't read Contacts, so this is a manual field. Keyed by
+  // lower-cased name (imperfect when two clients share a first name — note for later).
+  const getClientPhone = function(name) {
+    var lower=(name||"").toLowerCase();
+    var e=clientMemoryRef.current.find(function(c){ return c.name && c.name.toLowerCase()===lower; });
+    return (e && e.phone) ? e.phone : "";
+  };
+  const setClientPhone = function(name, phone) {
+    if (!name) return;
+    setClientMemory(function(mem) {
+      var i=mem.findIndex(function(c){ return c.name && c.name.toLowerCase()===name.toLowerCase(); });
+      if (i>=0) { var u=[...mem]; u[i]={...u[i],phone:phone}; return u; }
+      return [...mem,{name:name,price:"",phone:phone}];
+    });
   };
 
   const removeClientBooking = function(dateKey, name) {
@@ -1743,15 +1823,23 @@ export default function TheList() {
     var newSch={...baseSch}; var conflicts=[];
     var sixMo=new Date(); sixMo.setMonth(sixMo.getMonth()+6);
     var cursor=parseDateKey(dateKey);
+    // Match future days by the source's ANCHOR time (defaultBaseTime||time), not its
+    // displayed time. A recurring client whose default was nudged (e.g. anchored at
+    // 9:51 but shown as 9:46) must fill the one anchored row and relabel it — not
+    // spawn a second 9:46 row and leave the empty 9:51 default behind. (#13)
+    var anchor=placementTime(sourceSlot);
+    var isCust=sourceSlot.isCustom===true||(sourceSlot.isCustom===undefined&&!sourceSlot.defaultBaseTime&&DEFAULT_TIMES.indexOf(sourceSlot.time)===-1);
+    var srcBase=isCust?null:(sourceSlot.defaultBaseTime||sourceSlot.time);
+    var lower=(sourceSlot.name||"").toLowerCase();
     while (true) {
       cursor=addWeeks(cursor,weeks);
       if (cursor>sixMo) break;
       var fk=formatDateKey(cursor);
       var ds=newSch[fk]?[...newSch[fk]]:DEFAULT_TIMES.map(function(t){ return {time:t,name:"",price:"",done:false,recurWeeks:null}; });
-      var ei=ds.findIndex(function(s){ return s.time===sourceSlot.time; });
-      if (ei>=0&&ds[ei].name&&ds[ei].name!==sourceSlot.name) conflicts.push({dateKey:fk,time:sourceSlot.time,name:sourceSlot.name,price:sourceSlot.price,recurWeeks:weeks,existingName:ds[ei].name});
-      else if (ei>=0&&!ds[ei].name) { ds[ei]={...ds[ei],name:sourceSlot.name,price:sourceSlot.price,recurWeeks:weeks,done:false,pending:!!sourceSlot.pending,groupId:sourceSlot.groupId||null}; newSch[fk]=ds; }
-      else if (ei<0) { ds.push({time:sourceSlot.time,name:sourceSlot.name,price:sourceSlot.price,recurWeeks:weeks,done:false,pending:!!sourceSlot.pending,groupId:sourceSlot.groupId||null}); ds.sort(function(a,b){return parseTime(a.time)-parseTime(b.time);}); newSch[fk]=ds; }
+      var ei=ds.findIndex(function(s){ return placementTime(s)===anchor; });
+      if (ei>=0&&ds[ei].name&&ds[ei].name.toLowerCase()!==lower) conflicts.push({dateKey:fk,time:sourceSlot.time,name:sourceSlot.name,price:sourceSlot.price,recurWeeks:weeks,existingName:ds[ei].name});
+      else if (ei>=0) { ds[ei]={...ds[ei],time:sourceSlot.time,name:sourceSlot.name,price:sourceSlot.price,recurWeeks:weeks,done:false,pending:!!sourceSlot.pending,groupId:sourceSlot.groupId||null,isCustom:sourceSlot.isCustom,customTime:sourceSlot.customTime,defaultBaseTime:srcBase}; ds.sort(function(a,b){return parseTime(a.time)-parseTime(b.time);}); newSch[fk]=ds; }
+      else { ds.push({time:sourceSlot.time,name:sourceSlot.name,price:sourceSlot.price,recurWeeks:weeks,done:false,pending:!!sourceSlot.pending,groupId:sourceSlot.groupId||null,isCustom:sourceSlot.isCustom,customTime:sourceSlot.customTime,defaultBaseTime:srcBase}); ds.sort(function(a,b){return parseTime(a.time)-parseTime(b.time);}); newSch[fk]=ds; }
     }
     return {newSchedules:newSch,conflicts};
   };
@@ -1803,7 +1891,8 @@ export default function TheList() {
       var baseTime=occ.defaultBaseTime||(!wasCustom?occ.time:null);
       if (tIdx>=0 && tIdx!==occIdx && !ds[tIdx].name) {
         ds[tIdx]={...ds[tIdx],name:occ.name,price:occ.price,recurWeeks:occ.recurWeeks,isException:true,done:false,groupId:occ.groupId||null,customTime:wasCustom&&!isStillDefault,defaultBaseTime:(!wasCustom?baseTime:occ.defaultBaseTime)};
-        ds[occIdx]={time:occ.time,name:"",price:"",done:false,recurWeeks:null};
+        if (DEFAULT_TIMES.indexOf(occ.time)>=0) ds[occIdx]={time:occ.time,name:"",price:"",done:false,recurWeeks:null};
+        else ds.splice(occIdx,1);
       } else {
         ds[occIdx]={...occ,time:newTime,isException:true,customTime:wasCustom&&!isStillDefault,defaultBaseTime:(!wasCustom?baseTime:occ.defaultBaseTime)};
         if (DEFAULT_TIMES.indexOf(occ.time)>=0 && !ds.some(function(s){ return s.time===occ.time; })) ds.push({time:occ.time,name:"",price:"",done:false,recurWeeks:null});
@@ -1879,7 +1968,7 @@ export default function TheList() {
       });
       setSchedules(newSch);
       addHistoryEntry({type:"edited",time:m.time||"",name:m.newName,prevName:m.oldName,dateKey:m.dateKey});
-      setClientMemory(function(mem){ var ex=mem.findIndex(function(c){ return c.name.toLowerCase()===m.newName.toLowerCase(); }); if(ex>=0){ var u=[...mem]; u[ex]={name:m.newName,price:m.newPrice||mem[ex].price}; return u; } return [...mem,{name:m.newName,price:m.newPrice}]; });
+      setClientMemory(function(mem){ var ex=mem.findIndex(function(c){ return c.name.toLowerCase()===m.newName.toLowerCase(); }); if(ex>=0){ var u=[...mem]; u[ex]={...u[ex],name:m.newName,price:m.newPrice||mem[ex].price}; return u; } return [...mem,{name:m.newName,price:m.newPrice}]; });
     }
     setSeriesEditModal(null);
     editingRef.current=null; setEditingCell(null); setEditingOccupied(false); setPencilArmed(false); setEditChromeReady(true);
@@ -2065,14 +2154,32 @@ export default function TheList() {
     setGroupConfirm(null); jumpToDate(dateKey);
   };
 
-  const confirmRemoveSlot = function() {
+  const confirmRemoveSlot = function(allFuture) {
     if (!confirmDelete) return;
     var dateKey=confirmDelete.dateKey; var idx=confirmDelete.idx; var slot=confirmDelete.slot;
     var snapshot={schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
     pushUndo(snapshot);
     var slots=[...getSlots(dateKey)];
     slots[idx]={...slots[idx],name:"",price:"",done:false,recurWeeks:null,isException:false,pending:false,availStatus:null};
-    setSlots(dateKey,slots);
+    var working={...schedulesRef.current,[dateKey]:slots};
+    // #2: "all future" also sweeps every later occurrence of this recurring client
+    // (matched by name, exactly like "Remove recurring"), so cancelling a series no
+    // longer leaves its future appointments stranded on the calendar.
+    if (allFuture && slot.name) {
+      var nameLowerD=slot.name.toLowerCase();
+      Object.keys(working).forEach(function(dk){
+        if (dk <= dateKey) return;
+        var ds2=[...working[dk]]; var touched=false;
+        ds2.forEach(function(s,si){
+          if (s.name && s.name.toLowerCase()===nameLowerD && s.recurWeeks!=null && !s.done) {
+            ds2[si]={...s,name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null,pending:false,availStatus:null};
+            touched=true;
+          }
+        });
+        if (touched) working[dk]=ds2;
+      });
+    }
+    setSchedules(working);
     addHistoryEntry({type:"removed",time:slot.time,name:slot.name,price:slot.price,dateKey});
     // Drop any stale edit focus on the slot being emptied so iOS doesn't keep a
     // hidden focused input around (which is what triggers the AutoFill callout).
@@ -2699,7 +2806,6 @@ export default function TheList() {
             var dk=toDateKey(day); var isPast=day<today&&!isToday(day); var isFuture=day>sixMo;
             var holiday=getHolidayForDate(dk); var daySlots=getSlots(dk);
             var bookedSlots=daySlots.filter(function(s){ return s.name; });
-            var takenByOther=daySlots.some(function(s){ return s.time===slot.time&&s.name&&s.name.toLowerCase()!==slot.name.toLowerCase(); });
             var isT=isToday(day); var disabled=isPast||isFuture;
             var range=getDayTimeRange(dk);
             return (
@@ -2710,7 +2816,6 @@ export default function TheList() {
                   <div style={{marginTop:"3px"}}>
                     <div style={{display:"flex",flexWrap:"wrap",gap:"2px",marginBottom:"1px"}}>
                       {bookedSlots.slice(0,4).map(function(s,j){ return <div key={j} style={{width:"5px",height:"5px",borderRadius:"50%",background:s.recurWeeks?"#6a8aaa":"#c9a96e"}}/>; })}
-                      {takenByOther&&<div style={{width:"5px",height:"5px",borderRadius:"50%",background:"#c0392b"}}/>}
                     </div>
                     {range&&<div style={{fontSize:"7px",color:"#aaa",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{range}</div>}
                   </div>
@@ -2722,7 +2827,6 @@ export default function TheList() {
         <div style={{display:"flex",gap:"14px",marginTop:"10px",paddingTop:"8px",borderTop:"1px solid #f0f0ee"}}>
           <div style={{display:"flex",alignItems:"center",gap:"4px"}}><div style={{width:"7px",height:"7px",borderRadius:"50%",background:"#6a8aaa"}}/><span style={{fontSize:"10px",color:"#aaa"}}>recurring</span></div>
           <div style={{display:"flex",alignItems:"center",gap:"4px"}}><div style={{width:"7px",height:"7px",borderRadius:"50%",background:"#c9a96e"}}/><span style={{fontSize:"10px",color:"#aaa"}}>booked</span></div>
-          <div style={{display:"flex",alignItems:"center",gap:"4px"}}><div style={{width:"7px",height:"7px",borderRadius:"50%",background:"#c0392b"}}/><span style={{fontSize:"10px",color:"#aaa"}}>{slot.time} taken</span></div>
         </div>
       </div>
     );
@@ -2775,7 +2879,7 @@ export default function TheList() {
   }
 
   return (
-    <div ref={appRootRef} style={{height:"100%",overflow:"hidden",boxSizing:"border-box",display:"flex",flexDirection:"column",background:"#ffffff",fontFamily:"Georgia,serif",color:"#1a1a1a",paddingTop:(reassignMode||placingClient)?"calc(env(safe-area-inset-top,0px) + 52px)":"0"}}
+    <div ref={appRootRef} style={{height:(vpH>0?(vpH+"px"):"100%"),overflow:"hidden",boxSizing:"border-box",display:"flex",flexDirection:"column",background:"#ffffff",fontFamily:"Georgia,serif",color:"#1a1a1a",paddingTop:(reassignMode||placingClient)?"calc(env(safe-area-inset-top,0px) + 52px)":"0"}}
       onMouseUp={function(){ endSelectDrag(); if(dragState&&!dragCalHover) { setDragState(null); setDragCalOpen(false); } }}
       onTouchStart={function(e){
         // Record touch start for swipe-to-navigate (horizontal swipe on the app chrome,
@@ -2810,7 +2914,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2500,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",pointerEvents:"none",fontFamily:"Georgia,serif"}}>v13</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2500,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",pointerEvents:"none",fontFamily:"Georgia,serif"}}>v14</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -3101,6 +3205,13 @@ export default function TheList() {
             </div>
             {clientProfile.recurWeeks && <div style={{fontSize:"12px",color:"#6a8aaa",marginBottom:"12px"}}>{"↺"} Every {clientProfile.recurWeeks===1?"week":(clientProfile.recurWeeks+" weeks")} · usual time {clientProfile.usualTime}</div>}
             <button onClick={function(){ jumpToDateForBooking(toDateKey(addWeeks(new Date(),2)), clientProfile); setClientProfile(null); }} style={{padding:"10px",background:"#c9a96e",border:"none",borderRadius:"8px",color:"#0f0f0f",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",marginBottom:"14px"}}>Book next appointment</button>
+            <div style={{display:"flex",gap:"6px",alignItems:"center",marginBottom:"14px"}}>
+              <input type="tel" inputMode="tel" autoComplete="off" value={clientProfile.phone||""} placeholder="Phone number"
+                onChange={function(e){ var v=e.target.value; setClientProfile(function(p){ return p?{...p,phone:v}:p; }); setClientPhone(clientProfile.name, v); }}
+                style={{flex:1,padding:"8px 10px",border:"1px solid #d8d8d6",borderRadius:"8px",fontFamily:"inherit",fontSize:"13px",color:"#1a1a1a",background:"#fcfcfb",minWidth:0}} />
+              {(clientProfile.phone||"").replace(/[^0-9+]/g,"")?<button onClick={function(){ window.location.href="sms:"+(clientProfile.phone||"").replace(/[^0-9+]/g,""); }} style={{padding:"8px 12px",background:"#2a6a2a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",flexShrink:0}}>Message</button>:null}
+              {(clientProfile.phone||"").replace(/[^0-9+]/g,"")?<button onClick={function(){ window.location.href="tel:"+(clientProfile.phone||"").replace(/[^0-9+]/g,""); }} style={{padding:"8px 12px",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"8px",color:"#555",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",flexShrink:0}}>Call</button>:null}
+            </div>
             <div style={{overflowY:"auto",flex:1}}>
               {clientProfile.bookings.length===0&&<div style={{fontSize:"13px",color:"#aaa",fontStyle:"italic"}}>No bookings.</div>}
               {clientProfile.bookings.map(function(b,i){ return (
@@ -3237,10 +3348,18 @@ export default function TheList() {
             <div style={{fontSize:"11px",letterSpacing:"0.15em",textTransform:"uppercase",color:"#888",marginBottom:"12px"}}>Cancel Appointment</div>
             <div style={{fontSize:"16px",marginBottom:"6px"}}>{confirmDelete.slot.name?<span style={{color:"#1a1a1a"}}>{confirmDelete.slot.name} at {confirmDelete.slot.time}</span>:<span>Empty slot at {confirmDelete.slot.time}</span>}</div>
             <div style={{fontSize:"12px",color:"#999",marginBottom:"24px"}}>This will be logged in your history.</div>
-            <div style={{display:"flex",gap:"10px",justifyContent:"center"}}>
-              <button onClick={function(){ setConfirmDelete(null); }} style={{padding:"9px 20px",background:"#e8e8e6",border:"1px solid #d8d8d6",color:"#888",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Keep</button>
-              <button onClick={confirmRemoveSlot} style={{padding:"9px 20px",background:"#c0392b",border:"1px solid #c0392b",color:"#fff",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Cancel appointment</button>
-            </div>
+            {confirmDelete.slot.name && confirmDelete.slot.recurWeeks ? (
+              <div style={{display:"flex",flexDirection:"column",gap:"10px"}}>
+                <button onClick={function(){ confirmRemoveSlot(true); }} style={{padding:"11px",background:"#c0392b",border:"1px solid #c0392b",color:"#fff",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Cancel this and all future</button>
+                <button onClick={function(){ confirmRemoveSlot(false); }} style={{padding:"11px",background:"#ffffff",border:"1px solid #d0c4c2",color:"#c0392b",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Cancel only this one</button>
+                <button onClick={function(){ setConfirmDelete(null); }} style={{padding:"9px",background:"none",border:"none",color:"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>Keep</button>
+              </div>
+            ) : (
+              <div style={{display:"flex",gap:"10px",justifyContent:"center"}}>
+                <button onClick={function(){ setConfirmDelete(null); }} style={{padding:"9px 20px",background:"#e8e8e6",border:"1px solid #d8d8d6",color:"#888",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Keep</button>
+                <button onClick={function(){ confirmRemoveSlot(false); }} style={{padding:"9px 20px",background:"#c0392b",border:"1px solid #c0392b",color:"#fff",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Cancel appointment</button>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -3416,6 +3535,7 @@ export default function TheList() {
             <div style={{display:"flex",gap:"3px",alignItems:"center"}}>
               <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()-1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,-7); }); }} style={{...navBtnSm,fontSize:"11px",letterSpacing:"-1px"}}>{"‹‹"}</button>
               <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()+1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,7); }); }} style={{...navBtnSm,fontSize:"11px",letterSpacing:"-1px"}}>{"››"}</button>
+              <button onClick={function(){ if(navCanBack) goBack(); }} title="Back" style={{...navBtnSm,fontSize:"13px",width:"26px",padding:"0",opacity:navCanBack?1:0.35,cursor:navCanBack?"pointer":"default"}}>{"←"}</button>
             </div>
             <div style={{display:"flex",gap:"2px",background:"#e8e8e6",padding:"2px",borderRadius:"5px"}}>
               {["Day","Wknd","Month"].map(function(v){ return (
@@ -3437,7 +3557,7 @@ export default function TheList() {
           {view==="Month"&&<div style={{textAlign:"center",fontSize:"12px",color:"#1a1a1a",paddingBottom:"4px"}}>{baseDate.toLocaleDateString("en-US",{month:"long",year:"numeric"})}</div>}
         </div>
       ) : (
-        <div style={{borderBottom:"1px solid #e8e8e6",padding:"8px 20px",paddingTop:"calc(env(safe-area-inset-top,0px) + 8px)",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,background:"#ffffff",zIndex:100,flexShrink:0}}>
+        <div style={{borderBottom:"1px solid #e8e8e6",padding:"6px 20px",paddingTop:"calc(env(safe-area-inset-top,0px) + 2px)",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,background:"#ffffff",zIndex:100,flexShrink:0}}>
           <div style={{display:"flex",gap:"2px",background:"#e8e8e6",padding:"3px",borderRadius:"6px",marginLeft:isSplitView?"48px":"0"}}>
             {VIEWS.map(function(v){ return (
               <button key={v} data-viewtab={v} onClick={function(){
@@ -3457,6 +3577,7 @@ export default function TheList() {
           <div style={{display:"flex",gap:"4px",alignItems:"center"}}>
             <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()-1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,-7); }); }} style={{...navBtn,fontSize:"11px",letterSpacing:"-1px"}}>{"‹‹"}</button>
             <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()+1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,7); }); }} style={{...navBtn,fontSize:"11px",letterSpacing:"-1px"}}>{"››"}</button>
+            <button onClick={function(){ if(navCanBack) goBack(); }} title="Back to previous view" style={{...navBtn,fontSize:"16px",width:"32px",padding:"0",opacity:navCanBack?1:0.35,cursor:navCanBack?"pointer":"default"}}>{"←"}</button>
             <div style={{width:"10px"}}/>
             <button onClick={handleUndo} title="Undo" style={{...navBtn,background:canUndo?"#f0f0ee":"#f8f8f6",border:"1px solid #d8d8d6",width:"32px",padding:"0"}}><UndoIcon size={17} color={canUndo?"#555":"#ccc"}/></button>
             <button onClick={handleRedo} title="Redo" style={{...navBtn,background:canRedo?"#f0f0ee":"#f8f8f6",border:"1px solid #d8d8d6",width:"32px",padding:"0"}}><RedoIcon size={17} color={canRedo?"#555":"#ccc"}/></button>
