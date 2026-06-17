@@ -505,6 +505,11 @@ export default function TheList() {
   // pushing the last rows out of view. Measuring window.innerHeight and pinning the
   // app root to it makes the flex column fill the real viewport exactly.
   const [vpH, setVpH] = useState(0);
+  // TEMP DEBUG (v16 measurement build — remove after the gap fix lands). Holds a snapshot
+  // of viewport/element measurements so we can see exactly where the top + bottom gaps come
+  // from on the real device. dbgOpen toggles the on-screen readout (tap the build stamp).
+  const [dbgInfo, setDbgInfo] = useState(null);
+  const [dbgOpen, setDbgOpen] = useState(true);
   // Measured Y of the top of the first list row, used to vertically center the change-log banner.
   const [listTopY, setListTopY] = useState(0);
   // Measured Y of the top of the day columns (the date header), so the banner can sit
@@ -763,6 +768,110 @@ export default function TheList() {
   // dependency we'd otherwise list), plus on resize/orientation and a couple of
   // post-layout timeouts to catch async font/layout settling.
   useEffect(function() { syncLayout(); });
+
+  // ===== TEMP DEBUG (v16 measurement build) — remove after the gap fix lands. =====
+  // Builds the labeled rows shown in the on-screen readout from a measurement snapshot.
+  function dbgRows(d) {
+    if (!d) return [];
+    if (d.err) return [{k:"error", v:d.err, hot:true}];
+    function rc(r) { return r ? (r.t + " / " + r.b + "  (h" + r.h + ")") : "—"; }
+    var topGap = d.root ? d.root.t : 0;
+    var botI = (d.foot && typeof d.innerH === "number") ? (d.innerH - d.foot.b) : "—";
+    var botV = (d.foot && d.vvH) ? (d.vvH - d.foot.b) : "—";
+    return [
+      {k:"view / phone", v:(view + " / " + (isPhone ? "yes" : "no"))},
+      {k:"innerHeight", v:String(d.innerH)},
+      {k:"docElem.clientH", v:String(d.docH)},
+      {k:"body.clientH", v:String(d.bodyH)},
+      {k:"100dvh resolves", v:String(d.dvh)},
+      {k:"visualViewport H", v:String(d.vvH)},
+      {k:"vv offsetTop", v:String(d.vvTop)},
+      {k:"safe-area top", v:String(d.saTop)},
+      {k:"safe-area bottom", v:String(d.saBot)},
+      {k:"root t/b", v:rc(d.root)},
+      {k:"header t/b", v:rc(d.hdr)},
+      {k:"grid t/b", v:rc(d.grid)},
+      {k:"scroller t/b", v:rc(d.scroll)},
+      {k:"footer t/b", v:rc(d.foot)},
+      {k:"TOP gap (root.t)", v:String(topGap), hot:true},
+      {k:"BOT gap vs innerH", v:String(botI), hot:true},
+      {k:"BOT gap vs vvH", v:String(botV), hot:true},
+      {k:"dvh - innerH", v:String(d.dvh - d.innerH)},
+      {k:"dvh - vvH", v:String(d.dvh - d.vvH)}
+    ];
+  }
+  // Measure the real viewport + key elements on the device, on mount / resize / orientation /
+  // visualViewport changes / view + day changes. Two delayed reads catch post-animation settle.
+  useEffect(function() {
+    function readDbg() {
+      try {
+        var out = {};
+        out.innerH = window.innerHeight;
+        out.docH = document.documentElement ? document.documentElement.clientHeight : 0;
+        out.bodyH = document.body ? document.body.clientHeight : 0;
+        var vv = window.visualViewport;
+        out.vvH = vv ? Math.round(vv.height) : 0;
+        out.vvTop = vv ? Math.round(vv.offsetTop) : 0;
+        var dvhProbe = document.createElement("div");
+        dvhProbe.style.position = "fixed";
+        dvhProbe.style.top = "0";
+        dvhProbe.style.left = "0";
+        dvhProbe.style.width = "1px";
+        dvhProbe.style.height = "100dvh";
+        dvhProbe.style.visibility = "hidden";
+        dvhProbe.style.pointerEvents = "none";
+        document.body.appendChild(dvhProbe);
+        out.dvh = Math.round(dvhProbe.getBoundingClientRect().height);
+        document.body.removeChild(dvhProbe);
+        var saProbe = document.createElement("div");
+        saProbe.style.position = "fixed";
+        saProbe.style.top = "0";
+        saProbe.style.left = "0";
+        saProbe.style.visibility = "hidden";
+        saProbe.style.pointerEvents = "none";
+        saProbe.style.paddingTop = "env(safe-area-inset-top,0px)";
+        saProbe.style.paddingBottom = "env(safe-area-inset-bottom,0px)";
+        document.body.appendChild(saProbe);
+        var cs = window.getComputedStyle(saProbe);
+        out.saTop = Math.round(parseFloat(cs.paddingTop) || 0);
+        out.saBot = Math.round(parseFloat(cs.paddingBottom) || 0);
+        document.body.removeChild(saProbe);
+        function rect(el) {
+          if (!el) return null;
+          var r = el.getBoundingClientRect();
+          return {t:Math.round(r.top), b:Math.round(r.bottom), h:Math.round(r.height)};
+        }
+        out.root = rect(appRootRef.current);
+        out.hdr = rect(document.querySelector("[data-apphdr]"));
+        out.grid = rect(document.querySelector("[data-gridtop]"));
+        out.scroll = rect(document.querySelector("[data-slotscroll]"));
+        out.foot = rect(document.querySelector("[data-footer]"));
+        return out;
+      } catch (e) {
+        return {err: String(e)};
+      }
+    }
+    function go() { setDbgInfo(readDbg()); }
+    var t1 = setTimeout(go, 60);
+    var t2 = setTimeout(go, 420);
+    window.addEventListener("resize", go);
+    window.addEventListener("orientationchange", go);
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", go);
+      window.visualViewport.addEventListener("scroll", go);
+    }
+    return function() {
+      clearTimeout(t1); clearTimeout(t2);
+      window.removeEventListener("resize", go);
+      window.removeEventListener("orientationchange", go);
+      if (window.visualViewport) {
+        window.visualViewport.removeEventListener("resize", go);
+        window.visualViewport.removeEventListener("scroll", go);
+      }
+    };
+  }, [view, baseDate, isPhone]);
+  // ===== END TEMP DEBUG =====
+
   useEffect(function() {
     var t1 = setTimeout(syncLayout, 80);
     var t2 = setTimeout(syncLayout, 260);
@@ -2913,8 +3022,25 @@ export default function TheList() {
         swipeNavStart.current = null;
       }}>
 
-      {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2500,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",pointerEvents:"none",fontFamily:"Georgia,serif"}}>v15</div>
+      {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
+          TEMP (v16): tap it to show/hide the measurement readout. */}
+      <div onClick={function(){ setDbgOpen(function(p){ return !p; }); }} style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",cursor:"pointer",fontFamily:"Georgia,serif"}}>v16</div>
+
+      {/* ===== TEMP DEBUG readout (v16 measurement build) — remove after the gap fix. ===== */}
+      {dbgOpen && dbgInfo && (
+        <div onClick={function(){ setDbgOpen(false); }} style={{position:"fixed",top:"50%",left:"50%",transform:"translate(-50%,-50%)",zIndex:2600,background:"rgba(18,18,22,0.95)",color:"#e8e8e8",padding:"10px 12px",borderRadius:"8px",fontFamily:"monospace",fontSize:"11px",lineHeight:"1.5",maxWidth:"88vw",boxShadow:"0 6px 30px rgba(0,0,0,0.45)"}}>
+          <div style={{color:"#ffd27f",fontWeight:"bold",marginBottom:"5px"}}>DEBUG v16 — tap to hide</div>
+          {dbgRows(dbgInfo).map(function(r){
+            return (
+              <div key={r.k} style={{display:"flex",justifyContent:"space-between",gap:"16px",color:r.hot?"#9be29b":"#e8e8e8"}}>
+                <span style={{opacity:0.8}}>{r.k}</span>
+                <span style={{fontWeight:r.hot?"bold":"normal"}}>{r.v}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {/* ===== END TEMP DEBUG readout ===== */}
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -3529,7 +3655,7 @@ export default function TheList() {
 
       {/* HEADER — phone gets one compact row (shifters · tabs · undo/redo); iPad keeps its single row */}
       {isPhone ? (
-        <div style={{borderBottom:"1px solid #e8e8e6",paddingTop:"env(safe-area-inset-top,0px)",position:"sticky",top:0,background:"#ffffff",zIndex:100,flexShrink:0}}>
+        <div data-apphdr="1" style={{borderBottom:"1px solid #e8e8e6",paddingTop:"env(safe-area-inset-top,0px)",position:"sticky",top:0,background:"#ffffff",zIndex:100,flexShrink:0}}>
           {/* Single compact row: day-shifters · view tabs · undo/redo/menu */}
           <div style={{display:"flex",gap:"3px",alignItems:"center",padding:"3px 8px",justifyContent:"space-between"}}>
             <div style={{display:"flex",gap:"3px",alignItems:"center"}}>
@@ -3557,7 +3683,7 @@ export default function TheList() {
           {view==="Month"&&<div style={{textAlign:"center",fontSize:"12px",color:"#1a1a1a",paddingBottom:"4px"}}>{baseDate.toLocaleDateString("en-US",{month:"long",year:"numeric"})}</div>}
         </div>
       ) : (
-        <div style={{borderBottom:"1px solid #e8e8e6",padding:"2px 20px",paddingTop:"env(safe-area-inset-top,0px)",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,background:"#ffffff",zIndex:100,flexShrink:0}}>
+        <div data-apphdr="1" style={{borderBottom:"1px solid #e8e8e6",padding:"2px 20px",paddingTop:"env(safe-area-inset-top,0px)",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,background:"#ffffff",zIndex:100,flexShrink:0}}>
           <div style={{display:"flex",gap:"2px",background:"#e8e8e6",padding:"3px",borderRadius:"6px",marginLeft:isSplitView?"48px":"0"}}>
             {VIEWS.map(function(v){ return (
               <button key={v} data-viewtab={v} onClick={function(){
@@ -3809,7 +3935,7 @@ export default function TheList() {
                     );
                   })}
                 </div>
-                <div style={{display:"flex",gap:"6px",padding:isPhone?"2px 10px 2px":"2px 12px 2px",paddingBottom:"max(10px, calc(env(safe-area-inset-bottom,0px) + 2px))",flexShrink:0}}>
+                <div data-footer="1" style={{display:"flex",gap:"6px",padding:isPhone?"2px 10px 2px":"2px 12px 2px",paddingBottom:"max(10px, calc(env(safe-area-inset-bottom,0px) + 2px))",flexShrink:0}}>
                   <button onClick={function(){ addSlotToBeginning(dateKey); }} style={{flex:1,padding:isPhone?"5px":"5px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ AM</button>
                   <button onClick={function(){ addSlotToEnd(dateKey); }} style={{flex:1,padding:isPhone?"5px":"5px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ PM</button>
                 </div>
