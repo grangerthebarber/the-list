@@ -122,6 +122,7 @@ function isDayComplete(slots) {
 function capitalizeFirst(str) { if (!str) return str; return str.charAt(0).toUpperCase()+str.slice(1); }
 function stripLeadingNumbers(str) { if (!str) return str; return str.replace(/^\s*\d+\s*[.)\-]\s*/, "").replace(/^\s*\d+\s+(?=\D)/, ""); }
 function isLunchName(str) { return !!str && str.trim().toLowerCase()==="lunch"; }
+function isBlockName(str) { return !!str && str.trim().toLowerCase()==="block"; }
 function parseDateKey(key) { var parts = key.split("-").map(Number); return new Date(parts[0],parts[1]-1,parts[2]); }
 function formatDateKey(date) { return toDateKey(date); }
 function friendlyDate(dateKey) {
@@ -403,7 +404,7 @@ function MessageIcon(props) {
   var size = props.size || 17; var color = props.color || "#4a8a9a";
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{display:"block"}}>
-      <path d="M20 11.5a7.5 7.5 0 0 1-10.9 6.7L4 19.5l1.3-3.7A7.5 7.5 0 1 1 20 11.5z"/>
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
     </svg>
   );
 }
@@ -1285,7 +1286,8 @@ export default function TheList() {
     var rawName = stripLeadingNumbers((values.name||"").trim());
     var newPrice = (values.price||"").trim();
     var asLunch = isLunchName(rawName);
-    var newName = asLunch ? "" : capitalizeFirst(rawName);
+    var asBlock = isBlockName(rawName);
+    var newName = (asLunch||asBlock) ? "" : capitalizeFirst(rawName);
     // Removing the name removes the price along with it (a price never outlives
     // its person). Clearing only the price, though, leaves the name in place.
     if (!newName) newPrice = "";
@@ -1299,14 +1301,16 @@ export default function TheList() {
       setSeriesEditModal({field:"nameprice", dateKey:dateKey, idx:idx, oldName:prev.name, newName:newName, newPrice:newPrice, time:prev.time});
       return true;
     }
-    if (asLunch) {
-      // Typing "lunch" turns the slot into a Lunch block (fully a block, no client memory).
+    if (asLunch || asBlock) {
+      // Typing "lunch" / "block" turns the slot into a block (no client memory).
+      // "lunch" labels it Lunch; "block" labels it Blocked. Single slot either way here.
+      var blkLabel = asBlock ? "Blocked" : "Lunch";
       if (!prev.blocked) {
         var snapL = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
         pushUndo(snapL);
-        slots[idx] = {...prev,name:"",price:"",done:false,recurWeeks:null,isException:false,blocked:true,blockLabel:"Lunch"};
+        slots[idx] = {...prev,name:"",price:"",done:false,recurWeeks:null,isException:false,blocked:true,blockLabel:blkLabel};
         setSlots(dateKey,slots);
-        addHistoryEntry({type:"blocked",time:prev.time,name:"Lunch",dateKey});
+        addHistoryEntry({type:"blocked",time:prev.time,name:blkLabel,dateKey});
       }
       editingRef.current = null;
       setEditingCell(null);
@@ -1342,7 +1346,7 @@ export default function TheList() {
     var cv = editValuesRef.current;
     var rawName = stripLeadingNumbers((cv.name||"").trim());
     if (!rawName && prev.name) rawName = prev.name; // blur may have committed already
-    if (isLunchName(rawName) || !rawName) { doCommit(dateKey, idx, cv); return; }
+    if (isLunchName(rawName) || isBlockName(rawName) || !rawName) { doCommit(dateKey, idx, cv); return; }
     var newName = capitalizeFirst(rawName);
     var newPrice = (cv.price||"").trim() || prev.price || "";
     var snapshot = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
@@ -1516,6 +1520,18 @@ export default function TheList() {
         if (canPairL) slots[nextIdx] = {...slots[nextIdx],name:"",price:"",done:false,recurWeeks:null,isException:false,blocked:true,blockLabel:"Lunch",groupId:gidL};
         setSlots(dateKey,slots);
         addHistoryEntry({type:"blocked",time:curSlot.time,name:"Lunch",dateKey});
+        editingRef.current=null; setEditingCell(null); setEditingOccupied(false);
+        setPencilArmed(false); setEditChromeReady(true);
+        return;
+      }
+      // Typing "block" + Shift+Enter blocks just this one slot, labeled "Blocked"
+      // (unlike lunch, it does not pair the slot below).
+      if (isBlockName(newName)) {
+        var snapB = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
+        pushUndo(snapB);
+        slots[idx] = {...curSlot,name:"",price:"",done:false,recurWeeks:null,isException:false,blocked:true,blockLabel:"Blocked",groupId:curSlot.groupId||null};
+        setSlots(dateKey,slots);
+        addHistoryEntry({type:"blocked",time:curSlot.time,name:"Blocked",dateKey});
         editingRef.current=null; setEditingCell(null); setEditingOccupied(false);
         setPencilArmed(false); setEditChromeReady(true);
         return;
@@ -2740,7 +2756,9 @@ export default function TheList() {
       setReassignQueue(rest);
       setReassignMode({client:{name:first.name,price:first.price,recurWeeks:first.recurWeeks},currentDateKey:targetDateKey,remainingConflicts:[],originalDateKey:first.originalDateKey,originalIdx:first.originalIdx});
     } else {
-      showBanner({type:"added",name:placed+" appointment"+(placed!==1?"s":"")+" moved",time:null,dateKey:null});
+      var mvNames = clients.map(function(c){ return c.name; }).filter(function(n){ return !!n; });
+      var mvLabel = mvNames.length<=2 ? mvNames.join(" & ") : (mvNames.slice(0,-1).join(", ")+" & "+mvNames[mvNames.length-1]);
+      showBanner({type:"rescheduled",msg:(mvLabel||(placed+" appointment"+(placed!==1?"s":"")))+" rescheduled",time:null,dateKey:null});
     }
     return true;
   };
@@ -2791,7 +2809,9 @@ export default function TheList() {
       setReassignQueue(rest);
       setReassignMode({client:{name:first.name,price:first.price,recurWeeks:first.recurWeeks},currentDateKey:targetDateKey,remainingConflicts:[],originalDateKey:first.originalDateKey,originalIdx:first.originalIdx});
     } else {
-      showBanner({type:"added",name:placed+" appointment"+(placed!==1?"s":"")+" moved",time:null,dateKey:null});
+      var mvNames2 = clients.map(function(c){ return c.name; }).filter(function(n){ return !!n; });
+      var mvLabel2 = mvNames2.length<=2 ? mvNames2.join(" & ") : (mvNames2.slice(0,-1).join(", ")+" & "+mvNames2[mvNames2.length-1]);
+      showBanner({type:"rescheduled",msg:(mvLabel2||(placed+" appointment"+(placed!==1?"s":"")))+" rescheduled",time:null,dateKey:null});
     }
     return true;
   };
@@ -3166,7 +3186,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div onClick={function(){ setDbgOpen(function(p){ return !p; }); }} style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",cursor:"pointer",fontFamily:"Georgia,serif"}}>v19</div>
+      <div onClick={function(){ setDbgOpen(function(p){ return !p; }); }} style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",cursor:"pointer",fontFamily:"Georgia,serif"}}>v20</div>
 
       {/* ===== TEMP DEBUG readout (v16 measurement build) — remove after the gap fix. ===== */}
       {dbgOpen && dbgInfo && (
@@ -3668,7 +3688,7 @@ export default function TheList() {
           <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"24px",width:"min(360px,92vw)"}} onClick={function(e){ e.stopPropagation(); }}>
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#a07830",marginBottom:"8px"}}>{noteModal.isDay?"Day Note":"Note"}</div>
             <div style={{fontSize:"16px",color:"#1a1a1a",marginBottom:"14px"}}>{noteModal.name}</div>
-            <textarea autoFocus value={noteDraft} onChange={function(e){ setNoteDraft(e.target.value); }} placeholder={noteModal.isDay?"Write a note to yourself for this day...":"Add a note for this appointment..."} style={{width:"100%",boxSizing:"border-box",minHeight:"96px",resize:"vertical",background:"#efefed",border:"1px solid #d8d8d6",borderRadius:"6px",padding:"10px",fontSize:"14px",fontFamily:"Georgia,serif",color:"#1a1a1a",outline:"none",marginBottom:"14px"}}/>
+            <textarea autoFocus value={noteDraft} onChange={function(e){ setNoteDraft(e.target.value); }} onKeyDown={function(e){ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); var nm=noteModal; if(nm.isDay){ var t=noteDraft.trim(); setDayNotes(function(prev){ var n={...prev}; if(t) n[nm.dayKey]=t; else delete n[nm.dayKey]; return n; }); } else { var slots=[...getSlots(nm.dateKey)]; var s=slots[nm.idx]; slots[nm.idx]={...s,note:noteDraft.trim()}; setSlots(nm.dateKey,slots); } setNoteModal(null); setNoteDraft(""); } }} placeholder={noteModal.isDay?"Write a note to yourself for this day...":"Add a note for this appointment..."} style={{width:"100%",boxSizing:"border-box",minHeight:"96px",resize:"vertical",background:"#efefed",border:"1px solid #d8d8d6",borderRadius:"6px",padding:"10px",fontSize:"14px",fontFamily:"Georgia,serif",color:"#1a1a1a",outline:"none",marginBottom:"14px"}}/>
             <div style={{display:"flex",gap:"8px"}}>
               <button onClick={function(){
                 var nm=noteModal;
@@ -4115,7 +4135,7 @@ export default function TheList() {
                     );
                   })}
                 </div>
-                <div data-footer="1" style={{display:"flex",gap:"6px",padding:isPhone?"2px 10px 2px":"2px 12px 2px",paddingBottom:"10px",flexShrink:0}}>
+                <div data-footer="1" style={{display:"flex",gap:"6px",padding:isPhone?"2px 10px 2px":"2px 12px 2px",paddingBottom:"2px",flexShrink:0}}>
                   <button onClick={function(){ addSlotToBeginning(dateKey); }} style={{flex:1,padding:isPhone?"5px":"5px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ AM</button>
                   <button onClick={function(){ addSlotToEnd(dateKey); }} style={{flex:1,padding:isPhone?"5px":"5px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ PM</button>
                 </div>
