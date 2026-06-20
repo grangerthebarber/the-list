@@ -121,8 +121,8 @@ function isDayComplete(slots) {
 }
 function capitalizeFirst(str) { if (!str) return str; return str.charAt(0).toUpperCase()+str.slice(1); }
 function stripLeadingNumbers(str) { if (!str) return str; return str.replace(/^\s*\d+\s*[.)\-]\s*/, "").replace(/^\s*\d+\s+(?=\D)/, ""); }
-function isLunchName(str) { return !!str && str.trim().toLowerCase()==="lunch"; }
-function isBlockName(str) { return !!str && str.trim().toLowerCase()==="block"; }
+function isLunchName(str) { var v = str ? str.trim().toLowerCase() : ""; return v==="lunch" || v==="l"; }
+function isBlockName(str) { var v = str ? str.trim().toLowerCase() : ""; return v==="block" || v==="b"; }
 function parseDateKey(key) { var parts = key.split("-").map(Number); return new Date(parts[0],parts[1]-1,parts[2]); }
 function formatDateKey(date) { return toDateKey(date); }
 function friendlyDate(dateKey) {
@@ -401,11 +401,10 @@ function UnlockIcon(props) {
 // so its line weight matches the pencil/recurring glyphs. Color is passed in:
 // app-blue when a number is on file, gray when it isn't.
 function MessageIcon(props) {
-  var size = props.size || 17; var color = props.color || "#4a8a9a";
+  var size = props.size || 20; var color = props.color || "#4a8a9a";
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill={color} stroke="none" style={{display:"block"}}>
-      <ellipse cx="13.4" cy="10" rx="7.9" ry="6.3"/>
-      <path d="M2.6 15.4 L9.2 12.4 L9.2 15.8 Z"/>
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.9" strokeLinejoin="round" strokeLinecap="round" style={{display:"block"}}>
+      <path d="M10.5 4 H18 A3.5 3.5 0 0 1 21.5 7.5 V12.5 A3.5 3.5 0 0 1 18 16 H10.5 A3.5 3.5 0 0 1 7 12.5 L2.5 15 L7 10.5 V7.5 A3.5 3.5 0 0 1 10.5 4 Z"/>
     </svg>
   );
 }
@@ -546,11 +545,6 @@ export default function TheList() {
   // pushing the last rows out of view. Measuring window.innerHeight and pinning the
   // app root to it makes the flex column fill the real viewport exactly.
   const [vpH, setVpH] = useState(0);
-  // TEMP DEBUG (v16 measurement build — remove after the gap fix lands). Holds a snapshot
-  // of viewport/element measurements so we can see exactly where the top + bottom gaps come
-  // from on the real device. dbgOpen toggles the on-screen readout (tap the build stamp).
-  const [dbgInfo, setDbgInfo] = useState(null);
-  const [dbgOpen, setDbgOpen] = useState(true);
   // Measured Y of the top of the first list row, used to vertically center the change-log banner.
   const [listTopY, setListTopY] = useState(0);
   // Measured Y of the top of the day columns (the date header), so the banner can sit
@@ -809,138 +803,6 @@ export default function TheList() {
   // dependency we'd otherwise list), plus on resize/orientation and a couple of
   // post-layout timeouts to catch async font/layout settling.
   useEffect(function() { syncLayout(); });
-
-  // ===== TEMP DEBUG (v16 measurement build) — remove after the gap fix lands. =====
-  // Builds the labeled rows shown in the on-screen readout from a measurement snapshot.
-  function dbgRows(d) {
-    if (!d) return [];
-    if (d.err) return [{k:"error", v:d.err, hot:true}];
-    function rc(r) { return r ? (r.t + " / " + r.b + "  (h" + r.h + ")") : "—"; }
-    var topGap = d.root ? d.root.t : 0;
-    var botI = (d.foot && typeof d.innerH === "number") ? (d.innerH - d.foot.b) : "—";
-    var botV = (d.foot && d.vvH) ? (d.vvH - d.foot.b) : "—";
-    return [
-      {k:"view / phone", v:(view + " / " + (isPhone ? "yes" : "no"))},
-      {k:"innerHeight", v:String(d.innerH)},
-      {k:"docElem.clientH", v:String(d.docH)},
-      {k:"body.clientH", v:String(d.bodyH)},
-      {k:"100dvh resolves", v:String(d.dvh)},
-      {k:"visualViewport H", v:String(d.vvH)},
-      {k:"vv offsetTop", v:String(d.vvTop)},
-      {k:"safe-area top", v:String(d.saTop)},
-      {k:"safe-area bottom", v:String(d.saBot)},
-      {k:"root t/b", v:rc(d.root)},
-      {k:"header t/b", v:rc(d.hdr)},
-      {k:"grid t/b", v:rc(d.grid)},
-      {k:"scroller t/b", v:rc(d.scroll)},
-      {k:"footer t/b", v:rc(d.foot)},
-      {k:"screen.height", v:String(d.screenH)},
-      {k:"outerHeight", v:String(d.outerH)},
-      {k:"fixed bottom:0", v:String(d.fixBottom)},
-      {k:"screenH - innerH", v:String((d.screenH||0) - (d.innerH||0))},
-      {k:"TOP gap (root.t)", v:String(topGap), hot:true},
-      {k:"BOT gap vs innerH", v:String(botI), hot:true},
-      {k:"BOT gap vs vvH", v:String(botV), hot:true},
-      {k:"dvh - innerH", v:String(d.dvh - d.innerH)},
-      {k:"dvh - vvH", v:String(d.dvh - d.vvH)}
-    ];
-  }
-  // Measure the real viewport + key elements on the device, on mount / resize / orientation /
-  // visualViewport changes / view + day changes. Two delayed reads catch post-animation settle.
-  useEffect(function() {
-    function readDbg() {
-      try {
-        var out = {};
-        out.innerH = window.innerHeight;
-        out.docH = document.documentElement ? document.documentElement.clientHeight : 0;
-        out.bodyH = document.body ? document.body.clientHeight : 0;
-        var vv = window.visualViewport;
-        out.vvH = vv ? Math.round(vv.height) : 0;
-        out.vvTop = vv ? Math.round(vv.offsetTop) : 0;
-        var dvhProbe = document.createElement("div");
-        dvhProbe.style.position = "fixed";
-        dvhProbe.style.top = "0";
-        dvhProbe.style.left = "0";
-        dvhProbe.style.width = "1px";
-        dvhProbe.style.height = "100dvh";
-        dvhProbe.style.visibility = "hidden";
-        dvhProbe.style.pointerEvents = "none";
-        document.body.appendChild(dvhProbe);
-        out.dvh = Math.round(dvhProbe.getBoundingClientRect().height);
-        document.body.removeChild(dvhProbe);
-        var saProbe = document.createElement("div");
-        saProbe.style.position = "fixed";
-        saProbe.style.top = "0";
-        saProbe.style.left = "0";
-        saProbe.style.visibility = "hidden";
-        saProbe.style.pointerEvents = "none";
-        saProbe.style.paddingTop = "env(safe-area-inset-top,0px)";
-        saProbe.style.paddingBottom = "env(safe-area-inset-bottom,0px)";
-        document.body.appendChild(saProbe);
-        var cs = window.getComputedStyle(saProbe);
-        out.saTop = Math.round(parseFloat(cs.paddingTop) || 0);
-        out.saBot = Math.round(parseFloat(cs.paddingBottom) || 0);
-        document.body.removeChild(saProbe);
-        function rect(el) {
-          if (!el) return null;
-          var r = el.getBoundingClientRect();
-          return {t:Math.round(r.top), b:Math.round(r.bottom), h:Math.round(r.height)};
-        }
-        out.root = rect(appRootRef.current);
-        out.hdr = rect(document.querySelector("[data-apphdr]"));
-        out.grid = rect(document.querySelector("[data-gridtop]"));
-        out.scroll = rect(document.querySelector("[data-slotscroll]"));
-        out.foot = rect(document.querySelector("[data-footer]"));
-        // Physical-screen vs page-viewport: if screenH > innerH there is an OS band the
-        // page's height APIs cannot see (would point at index.html viewport-fit, not this file).
-        out.screenH = (window.screen && window.screen.height) ? window.screen.height : 0;
-        out.outerH = window.outerHeight || 0;
-        var botMark = document.createElement("div");
-        botMark.style.position = "fixed";
-        botMark.style.left = "0";
-        botMark.style.bottom = "0";
-        botMark.style.width = "1px";
-        botMark.style.height = "1px";
-        botMark.style.visibility = "hidden";
-        botMark.style.pointerEvents = "none";
-        document.body.appendChild(botMark);
-        out.fixBottom = Math.round(botMark.getBoundingClientRect().bottom);
-        document.body.removeChild(botMark);
-        return out;
-      } catch (e) {
-        return {err: String(e)};
-      }
-    }
-    var retryIv = null;
-    function go() {
-      var snap = readDbg();
-      setDbgInfo(snap);
-      // The app renders a "Loading…" screen first; on a cold load the calendar tree
-      // (and these elements) mount after our timers. Keep re-measuring until the root
-      // appears, then stop so we are not re-rendering forever.
-      if (snap && snap.root && retryIv) { clearInterval(retryIv); retryIv = null; }
-    }
-    var t1 = setTimeout(go, 60);
-    var t2 = setTimeout(go, 420);
-    retryIv = setInterval(go, 500);
-    window.addEventListener("resize", go);
-    window.addEventListener("orientationchange", go);
-    if (window.visualViewport) {
-      window.visualViewport.addEventListener("resize", go);
-      window.visualViewport.addEventListener("scroll", go);
-    }
-    return function() {
-      clearTimeout(t1); clearTimeout(t2);
-      if (retryIv) { clearInterval(retryIv); retryIv = null; }
-      window.removeEventListener("resize", go);
-      window.removeEventListener("orientationchange", go);
-      if (window.visualViewport) {
-        window.visualViewport.removeEventListener("resize", go);
-        window.visualViewport.removeEventListener("scroll", go);
-      }
-    };
-  }, [view, baseDate, isPhone]);
-  // ===== END TEMP DEBUG =====
 
   useEffect(function() {
     var t1 = setTimeout(syncLayout, 80);
@@ -1449,7 +1311,14 @@ export default function TheList() {
   const handleBlur = useCallback(function(e) {
     var related = e.relatedTarget;
     if (related && related.dataset && related.dataset.rowkey===((editingRef.current&&editingRef.current.dateKey)+"-"+(editingRef.current&&editingRef.current.idx))) return;
-    setTimeout(function(){ if (editingRef.current) doCommit(editingRef.current.dateKey,editingRef.current.idx,editValuesRef.current); },100);
+    setTimeout(function(){
+      if (!editingRef.current) return;
+      var er = editingRef.current;
+      // Tap-away commits exactly like Enter: if the pencil is armed and a name was
+      // typed, pencil them in; otherwise do the normal commit.
+      if (pencilArmedRef.current && stripLeadingNumbers((editValuesRef.current.name||"").trim())) { commitPenciled(er.dateKey,er.idx); }
+      else { doCommit(er.dateKey,er.idx,editValuesRef.current); }
+    },100);
   },[doCommit]);
 
   // Shift+Arrow while a slot's name field is focused nudges THAT slot's time by 5
@@ -3074,6 +2943,17 @@ export default function TheList() {
   const dates = getDates();
   const effectiveNextDate = nudgedDate||(checkoffModal&&checkoffModal.nextDateKey);
   const nudgeConflict = effectiveNextDate?isSlotTaken(effectiveNextDate,checkoffModal&&checkoffModal.slot&&placementTime(checkoffModal.slot),checkoffModal&&checkoffModal.slot&&checkoffModal.slot.name):false;
+  // #11: if this same person already has a (not-done) booking on the proposed next
+  // date, never tell Granger the slot "is open" — it isn't; they're in it. Report the
+  // exact day/time they're already on instead.
+  const bookedTimeOnNextDate = (function(){
+    if (!effectiveNextDate||!checkoffModal||!checkoffModal.slot||!checkoffModal.slot.name) return null;
+    var dsN = schedulesRef.current[effectiveNextDate]; if (!dsN) return null;
+    var lnN = checkoffModal.slot.name.toLowerCase(); var bi;
+    for (bi=0; bi<dsN.length; bi++) { if (dsN[bi].name && dsN[bi].name.toLowerCase()===lnN && !dsN[bi].done) return dsN[bi].time; }
+    return null;
+  })();
+  const alreadyBookedNextDate = bookedTimeOnNextDate!=null;
 
   const renderCheckoffCalendar = function() {
     if (!checkoffModal||!checkoffCalMonth) return null;
@@ -3088,6 +2968,12 @@ export default function TheList() {
     var monthLabel=checkoffCalMonth.toLocaleDateString("en-US",{month:"long",year:"numeric"});
     var canGoPrev=new Date(year,month-1,1)>=new Date(today.getFullYear(),today.getMonth(),1);
     var canGoNext=new Date(year,month+1,1)<=new Date(sixMo.getFullYear(),sixMo.getMonth(),1);
+    // #14: mark where 2/4/6/8 weeks land, counted from the appointment day being
+    // rebooked (checkoffModal.dateKey — usually today, but not always).
+    var weekMarks={};
+    if (checkoffModal&&checkoffModal.dateKey) {
+      [2,4,6,8].forEach(function(w){ weekMarks[toDateKey(addWeeks(parseDateKey(checkoffModal.dateKey),w))]=w; });
+    }
     return (
       <div style={{marginTop:"4px"}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:"10px"}}>
@@ -3108,7 +2994,8 @@ export default function TheList() {
             var range=getDayTimeRange(dk);
             return (
               <div key={dk} onClick={function(){ if(!disabled){ if(checkoffRecur) bookRecurringFromModal(dk,checkoffRecur); else if(checkoffModal.groupTimes&&checkoffModal.groupTimes.length>1) confirmNextBooking(dk); else jumpToDateForBooking(dk,slot); } }}
-                style={{height:"44px",background:disabled?"#f8f8f8":holiday?"#fffbf0":isT?"#fffbf0":"#ffffff",borderTop:isT?"2px solid #a07830":"2px solid transparent",padding:"4px 5px",cursor:disabled?"default":"pointer",borderRadius:"3px",opacity:disabled?0.35:1,boxSizing:"border-box"}}>
+                style={{position:"relative",height:"44px",background:disabled?"#f8f8f8":holiday?"#fffbf0":isT?"#fffbf0":"#ffffff",borderTop:isT?"2px solid #a07830":"2px solid transparent",padding:"4px 5px",cursor:disabled?"default":"pointer",borderRadius:"3px",opacity:disabled?0.35:1,boxSizing:"border-box"}}>
+                {!disabled&&weekMarks[dk]&&<div style={{position:"absolute",top:"2px",right:"2px",fontSize:"8px",fontWeight:"bold",color:"#a07830",background:"#fdf3df",borderRadius:"3px",padding:"1px 2px",lineHeight:1}}>{weekMarks[dk]+"w"}</div>}
                 <div style={{fontSize:"12px",color:isT?"#a07830":disabled?"#ccc":"#1a1a1a",fontWeight:isT?"bold":"normal",lineHeight:1}}>{day.getDate()}</div>
                 {!disabled&&(
                   <div style={{marginTop:"3px"}}>
@@ -3213,23 +3100,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div onClick={function(){ setDbgOpen(function(p){ return !p; }); }} style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",cursor:"pointer",fontFamily:"Georgia,serif"}}>v21</div>
-
-      {/* ===== TEMP DEBUG readout (v16 measurement build) — remove after the gap fix. ===== */}
-      {dbgOpen && dbgInfo && (
-        <div onClick={function(){ setDbgOpen(false); }} style={{position:"fixed",top:"50%",left:"50%",transform:"translate(-50%,-50%)",zIndex:2600,background:"rgba(18,18,22,0.95)",color:"#e8e8e8",padding:"10px 12px",borderRadius:"8px",fontFamily:"monospace",fontSize:"11px",lineHeight:"1.5",maxWidth:"88vw",boxShadow:"0 6px 30px rgba(0,0,0,0.45)"}}>
-          <div style={{color:"#ffd27f",fontWeight:"bold",marginBottom:"5px"}}>DEBUG v18 — tap to hide</div>
-          {dbgRows(dbgInfo).map(function(r){
-            return (
-              <div key={r.k} style={{display:"flex",justifyContent:"space-between",gap:"16px",color:r.hot?"#9be29b":"#e8e8e8"}}>
-                <span style={{opacity:0.8}}>{r.k}</span>
-                <span style={{fontWeight:r.hot?"bold":"normal"}}>{r.v}</span>
-              </div>
-            );
-          })}
-        </div>
-      )}
-      {/* ===== END TEMP DEBUG readout ===== */}
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v22</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -3650,7 +3521,8 @@ export default function TheList() {
             ) : (
               <div>
                 <div style={{fontSize:"12px",color:"#999",marginBottom:"16px"}}>Every {checkoffModal.slot.recurWeeks===1?"week":(checkoffModal.slot.recurWeeks+" weeks")} · {placementTime(checkoffModal.slot)} · {DAYS[dayOfWeek(checkoffModal.dateKey)]}s</div>
-                {effectiveNextDate&&!nudgeConflict&&<div style={{background:"#f0fff0",border:"1px solid #a0d0a0",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#2a7a2a"}}>{"✓"} {friendlyDateTime(placementTime(checkoffModal.slot),effectiveNextDate)} is open</div>}
+                {effectiveNextDate&&!nudgeConflict&&alreadyBookedNextDate&&<div style={{background:"#eef3f9",border:"1px solid #b8cce0",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#34434c"}}>{"✓"} Already booked — {friendlyDateTime(bookedTimeOnNextDate,effectiveNextDate)}</div>}
+                {effectiveNextDate&&!nudgeConflict&&!alreadyBookedNextDate&&<div style={{background:"#f0fff0",border:"1px solid #a0d0a0",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#2a7a2a"}}>{"✓"} {friendlyDateTime(placementTime(checkoffModal.slot),effectiveNextDate)} is open</div>}
                 {effectiveNextDate&&nudgeConflict&&<div style={{background:"#fff0ee",border:"1px solid #e0b0a8",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#1a1a1a"}}>{"⚠"} That slot is already taken on {friendlyDateTime(placementTime(checkoffModal.slot),effectiveNextDate)}</div>}
                 {nudgedDate&&nudgedDate!==checkoffModal.nextDateKey&&<div style={{fontSize:"11px",color:"#a07830",marginBottom:"10px"}}>Nudged — resumes every {checkoffModal.slot.recurWeeks===1?"week":(checkoffModal.slot.recurWeeks+" weeks")} after this</div>}
                 <div style={{display:"flex",gap:"8px",marginBottom:"20px"}}>
@@ -4028,7 +3900,7 @@ export default function TheList() {
                 >
                   {slots.map(function(slot,idx){
                     var isEditing=editingCell&&editingCell.dateKey===dateKey&&editingCell.idx===idx;
-                    var filled=!!slot.name; var wasRemoved=recentlyRemoved[dateKey+"-"+idx];
+                    var filled=!!slot.name; var wasRemoved=recentlyRemoved[dateKey+"-"+idx]&&!slot.name;
                     var isSwiped=swipedSlot===(dateKey+"-"+idx); var rowKey=dateKey+"-"+idx;
                     // On a phone, a plain open slot must be a *real* editable field so the
                     // very first tap (a true user gesture) raises the keyboard. Programmatic
@@ -4118,7 +3990,7 @@ export default function TheList() {
                             >
                               {isOccEdit&&<div style={{position:"absolute",top:"2px",left:"70px",fontSize:"9px",color:"#c0392b"}}>Editing {slot.name}</div>}
                               <input
-                                value={isEditing?editValues.name:(wasRemoved?"":(slot.name||((!filled&&slot.availStatus)?(slot.availStatus==="overtime"?"OVERTIME (COSTS TIME AND A HALF)":"AVAILABLE"):"")))}
+                                value={isEditing?editValues.name:(wasRemoved?"":(slot.name||((!filled&&slot.availStatus)?(slot.availStatus==="overtime"?"OVERTIME PREMIUM":"AVAILABLE"):"")))}
                                 readOnly={!isEditing && !phoneEmptyTypable}
                                 name="tlentry" inputMode="text" data-lpignore="true" data-1p-ignore="true" data-form-type="other" data-bwignore="true"
                                 autoComplete="off" autoCorrect="off" autoCapitalize="words" spellCheck={false}
@@ -4148,9 +4020,9 @@ export default function TheList() {
                                   {!compactIcons&&filled&&(function(){
                                     var digits=getClientPhone(slot.name).replace(/[^0-9+]/g,"");
                                     if (digits) {
-                                      return <button onClick={function(e){ e.stopPropagation(); window.location.href="sms:"+digits; }} title={"Message "+slot.name} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 4px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={17} color="#4a8a9a"/></button>;
+                                      return <button onClick={function(e){ e.stopPropagation(); window.location.href="sms:"+digits; }} title={"Message "+slot.name} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 4px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={20} color="#4a8a9a"/></button>;
                                     }
-                                    return <button onClick={function(e){ e.stopPropagation(); setPhoneModal({name:slot.name,phone:""}); }} title={"Add a number for "+slot.name} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 4px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={17} color="#c6c6c6"/></button>;
+                                    return <button onClick={function(e){ e.stopPropagation(); setPhoneModal({name:slot.name,phone:""}); }} title={"Add a number for "+slot.name} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 4px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={20} color="#c6c6c6"/></button>;
                                   })()}
                                   {!compactIcons&&filled&&<button onClick={function(e){ e.stopPropagation(); setNoteDraft(slot.note||""); setNoteModal({dateKey,idx,name:slot.name}); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 5px",color:slot.note?"#c9a96e":"#bbb",fontSize:"22px",fontWeight:"bold",lineHeight:1,WebkitTextStroke:"0.6px currentColor"}}>{"✎"}</button>}
                                 </div>
