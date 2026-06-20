@@ -403,8 +403,9 @@ function UnlockIcon(props) {
 function MessageIcon(props) {
   var size = props.size || 17; var color = props.color || "#4a8a9a";
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{display:"block"}}>
-      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+    <svg width={size} height={size} viewBox="0 0 24 24" fill={color} stroke="none" style={{display:"block"}}>
+      <ellipse cx="13.4" cy="10" rx="7.9" ry="6.3"/>
+      <path d="M2.6 15.4 L9.2 12.4 L9.2 15.8 Z"/>
     </svg>
   );
 }
@@ -535,9 +536,11 @@ export default function TheList() {
   // flight (so the [view,baseDate] effect doesn't re-push it); lastLocRef tracks
   // the location the effect last saw.
   const navStackRef = useRef([]);
+  const navFwdRef = useRef([]);
   const navSuppressRef = useRef(false);
   const lastLocRef = useRef(null);
   const [navCanBack, setNavCanBack] = useState(false);
+  const [navCanFwd, setNavCanFwd] = useState(false);
   // #11: iOS standalone PWAs resolve CSS height:100% against a box that can be
   // shorter than the visible area, leaving dead space below the +AM/+PM footer and
   // pushing the last rows out of view. Measuring window.innerHeight and pinning the
@@ -799,7 +802,7 @@ export default function TheList() {
   // Safety net: the phone header only exposes Day / Wknd / Month. If the stored view
   // is ever one of the iPad-only views while on a phone, snap to Day so nothing breaks.
   useEffect(function() {
-    if (isPhone && (view === "3-Day" || view === "Week")) setView("Day");
+    if (isPhone && (view === "3-Day" || view === "Week")) setView(isPhone?"Day":"3-Day");
   }, [isPhone, view]);
 
   // Re-run the scroll/banner sync after every render (content can change without a
@@ -1001,6 +1004,8 @@ export default function TheList() {
       navStackRef.current.push(prev);
       if (navStackRef.current.length>50) navStackRef.current.shift();
       if (!navCanBack) setNavCanBack(true);
+      // A fresh navigation (not a Back/Forward) clears the forward history.
+      if (navFwdRef.current.length) { navFwdRef.current = []; setNavCanFwd(false); }
     }
   }, [view, baseDate]);
 
@@ -1011,6 +1016,24 @@ export default function TheList() {
     var sameView = dest.view===view;
     var sameDate = (+dest.baseDate)===(+baseDate);
     if (sameView && sameDate) return;
+    // Remember where we are so Forward can return here.
+    navFwdRef.current.push({view:view, baseDate:new Date(baseDate)});
+    if (!navCanFwd) setNavCanFwd(true);
+    navSuppressRef.current = true;
+    if (!sameView) setView(dest.view);
+    if (!sameDate) setBaseDate(dest.baseDate);
+  };
+
+  const goFwd = function() {
+    if (navFwdRef.current.length===0) return;
+    var dest = navFwdRef.current.pop();
+    if (navFwdRef.current.length===0) setNavCanFwd(false);
+    var sameView = dest.view===view;
+    var sameDate = (+dest.baseDate)===(+baseDate);
+    if (sameView && sameDate) return;
+    // Pushing current onto the back stack so Back returns here.
+    navStackRef.current.push({view:view, baseDate:new Date(baseDate)});
+    if (!navCanBack) setNavCanBack(true);
     navSuppressRef.current = true;
     if (!sameView) setView(dest.view);
     if (!sameDate) setBaseDate(dest.baseDate);
@@ -1524,12 +1547,16 @@ export default function TheList() {
         setPencilArmed(false); setEditChromeReady(true);
         return;
       }
-      // Typing "block" + Shift+Enter blocks just this one slot, labeled "Blocked"
-      // (unlike lunch, it does not pair the slot below).
+      // Typing "block" + Shift+Enter blocks this slot AND the one directly below as a
+      // single linked Blocked pair (mirrors the lunch mechanic). If the slot below is
+      // occupied/blocked, just block this one.
       if (isBlockName(newName)) {
         var snapB = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
         pushUndo(snapB);
-        slots[idx] = {...curSlot,name:"",price:"",done:false,recurWeeks:null,isException:false,blocked:true,blockLabel:"Blocked",groupId:curSlot.groupId||null};
+        var canPairB = nextIdx<slots.length && !slots[nextIdx].name && !slots[nextIdx].blocked;
+        var gidB = canPairB ? (curSlot.groupId || newGroupId()) : (curSlot.groupId || null);
+        slots[idx] = {...curSlot,name:"",price:"",done:false,recurWeeks:null,isException:false,blocked:true,blockLabel:"Blocked",groupId:gidB};
+        if (canPairB) slots[nextIdx] = {...slots[nextIdx],name:"",price:"",done:false,recurWeeks:null,isException:false,blocked:true,blockLabel:"Blocked",groupId:gidB};
         setSlots(dateKey,slots);
         addHistoryEntry({type:"blocked",time:curSlot.time,name:"Blocked",dateKey});
         editingRef.current=null; setEditingCell(null); setEditingOccupied(false);
@@ -1635,7 +1662,7 @@ export default function TheList() {
     var nm = (slot.name||"").toLowerCase();
     var gi;
     for (gi=0; gi<slots.length; gi++) {
-      if (gid && slots[gi].groupId===gid && slots[gi].name) flip[gi] = true;
+      if (gid && slots[gi].groupId===gid && (slots[gi].name || slots[gi].blocked)) flip[gi] = true;
     }
     if (nm) {
       var up = idx; while (up>0 && (slots[up-1].name||"").toLowerCase()===nm) { flip[up-1]=true; up--; }
@@ -1796,7 +1823,7 @@ export default function TheList() {
     addHistoryEntry({type:"added",time:placementTime(slot),name:slot.name,price:slot.price,dateKey:targetDateKey});
     setCheckoffModal(null); setNudgedDate(null); setCheckoffCalMonth(null);
     // #1: after a quick-book, land on the date we just placed them on.
-    setBaseDate(parseDateKey(targetDateKey)); setView("Day");
+    setBaseDate(parseDateKey(targetDateKey)); setView(isPhone?"Day":"3-Day");
   };
 
   // Book the client at the chosen date AND every N weeks for six months, mark the
@@ -1853,7 +1880,7 @@ export default function TheList() {
     addHistoryEntry({type:"added",time:placementTime(slot),name:slot.name,price:slot.price,dateKey:targetDateKey});
     setCheckoffModal(null); setNudgedDate(null); setCheckoffCalMonth(null); setCheckoffRecur(null); setRecurPickerOpen(false);
     // #1: after a recurring quick-book, land on the date we just placed them on.
-    setBaseDate(parseDateKey(targetDateKey)); setView("Day");
+    setBaseDate(parseDateKey(targetDateKey)); setView(isPhone?"Day":"3-Day");
   };
 
   // Recurring, pick-the-slot flow: instead of asking for a start date in the
@@ -1875,7 +1902,7 @@ export default function TheList() {
       srcDateKey:srcDateKey, srcIdx:srcIdx,
       groupTimes:gTimes
     });
-    setBaseDate(targetDate); setView("Day");
+    setBaseDate(targetDate); setView(isPhone?"Day":"3-Day");
     setCheckoffModal(null); setNudgedDate(null); setCheckoffCalMonth(null); setCheckoffRecur(null); setRecurPickerOpen(false);
   };
 
@@ -1963,13 +1990,13 @@ export default function TheList() {
   };
 
   const jumpToDate = function(dateKey) {
-    setBaseDate(parseDateKey(dateKey)); setView("Day");
+    setBaseDate(parseDateKey(dateKey)); setView(isPhone?"Day":"3-Day");
     setCheckoffModal(null); setNudgedDate(null); setCheckoffCalMonth(null);
   };
 
   const jumpToDateForBooking = function(targetDateKey, slot) {
     setCheckoffModal(null); setNudgedDate(null); setCheckoffCalMonth(null);
-    setBaseDate(parseDateKey(targetDateKey)); setView("Day");
+    setBaseDate(parseDateKey(targetDateKey)); setView(isPhone?"Day":"3-Day");
     setReassignMode({client:{name:slot.name,price:slot.price,recurWeeks:slot.recurWeeks},currentDateKey:targetDateKey,remainingConflicts:[]});
   };
 
@@ -2516,7 +2543,7 @@ export default function TheList() {
     var a = document.createElement("a");
     a.href=url; a.download="the-list-backup-"+(new Date().toISOString().split("T")[0])+".json"; a.click();
     URL.revokeObjectURL(url);
-    showBanner({type:"added",name:"Backup exported",time:null,dateKey:null});
+    showBanner({type:"added",msg:"Backup exported",time:null,dateKey:null});
   };
 
   const importData = function(e) {
@@ -2752,7 +2779,7 @@ export default function TheList() {
     setSelectMode(false); setSelectedSlots({});
     if (conflicts.length > 0) {
       var first = conflicts[0]; var rest = conflicts.slice(1);
-      setBaseDate(parseDateKey(targetDateKey)); setView("Day");
+      setBaseDate(parseDateKey(targetDateKey)); setView(isPhone?"Day":"3-Day");
       setReassignQueue(rest);
       setReassignMode({client:{name:first.name,price:first.price,recurWeeks:first.recurWeeks},currentDateKey:targetDateKey,remainingConflicts:[],originalDateKey:first.originalDateKey,originalIdx:first.originalIdx});
     } else {
@@ -2805,7 +2832,7 @@ export default function TheList() {
     setSelectMode(false); setSelectedSlots({});
     if (conflicts.length > 0) {
       var first = conflicts[0]; var rest = conflicts.slice(1);
-      setBaseDate(parseDateKey(targetDateKey)); setView("Day");
+      setBaseDate(parseDateKey(targetDateKey)); setView(isPhone?"Day":"3-Day");
       setReassignQueue(rest);
       setReassignMode({client:{name:first.name,price:first.price,recurWeeks:first.recurWeeks},currentDateKey:targetDateKey,remainingConflicts:[],originalDateKey:first.originalDateKey,originalIdx:first.originalIdx});
     } else {
@@ -2910,7 +2937,7 @@ export default function TheList() {
         if (!landed && px!=null) {
           var mdk = findMonthDayKey(px, py);
           if (mdk) {
-            setBaseDate(parseDateKey(mdk)); setView("Day");
+            setBaseDate(parseDateKey(mdk)); setView(isPhone?"Day":"3-Day");
             if (ds && ds.clients && ds.clients[0]) setPlacingClient(ds.clients[0]);
             landed = true;
           }
@@ -2991,7 +3018,7 @@ export default function TheList() {
     var clients = dragState.clients;
     setDragCalOpen(false); setDragState(null); setDragCalHover(false);
     setSelectMode(false); setSelectedSlots({});
-    setBaseDate(parseDateKey(targetDateKey)); setView("Day");
+    setBaseDate(parseDateKey(targetDateKey)); setView(isPhone?"Day":"3-Day");
     var first = clients[0]; var rest = clients.slice(1);
     setReassignQueue(rest);
     setReassignMode({client:{name:first.name,price:first.price,recurWeeks:first.recurWeeks},currentDateKey:targetDateKey,remainingConflicts:[],originalDateKey:first.originalDateKey,originalIdx:first.originalIdx});
@@ -3186,7 +3213,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div onClick={function(){ setDbgOpen(function(p){ return !p; }); }} style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",cursor:"pointer",fontFamily:"Georgia,serif"}}>v20</div>
+      <div onClick={function(){ setDbgOpen(function(p){ return !p; }); }} style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",cursor:"pointer",fontFamily:"Georgia,serif"}}>v21</div>
 
       {/* ===== TEMP DEBUG readout (v16 measurement build) — remove after the gap fix. ===== */}
       {dbgOpen && dbgInfo && (
@@ -3282,7 +3309,7 @@ export default function TheList() {
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={function(){ setMonthLongPress(null); }}>
           <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"24px",width:"min(280px,90vw)"}} onClick={function(e){ e.stopPropagation(); }}>
             <div style={{fontSize:"13px",color:"#888",marginBottom:"16px",textAlign:"center"}}>{smartDate(monthLongPress.day)}</div>
-            <button onClick={function(){ setBaseDate(monthLongPress.day);setView("Day");setMonthLongPress(null); }} style={{display:"block",width:"100%",padding:"12px",background:"#1a1a1a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",marginBottom:"10px"}}>Add appointment</button>
+            <button onClick={function(){ setBaseDate(monthLongPress.day);setView(isPhone?"Day":"3-Day");setMonthLongPress(null); }} style={{display:"block",width:"100%",padding:"12px",background:"#1a1a1a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",marginBottom:"10px"}}>Add appointment</button>
             <button onClick={function(){ setHolidayModal({dateKey:monthLongPress.dateKey});setMonthLongPress(null); }} style={{display:"block",width:"100%",padding:"12px",background:"#fff",border:"1px solid #d8d8d6",borderRadius:"8px",color:"#666",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",marginBottom:"10px"}}>Mark as holiday</button>
             <button onClick={function(){ setMonthLongPress(null); }} style={{display:"block",width:"100%",padding:"8px",background:"none",border:"none",color:"#bbb",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>Cancel</button>
           </div>
@@ -3855,6 +3882,7 @@ export default function TheList() {
               <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()-1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,-7); }); }} style={{...navBtnSm,fontSize:"11px",letterSpacing:"-1px"}}>{"‹‹"}</button>
               <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()+1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,7); }); }} style={{...navBtnSm,fontSize:"11px",letterSpacing:"-1px"}}>{"››"}</button>
               <button onClick={function(){ if(navCanBack) goBack(); }} title="Back" style={{...navBtnSm,fontSize:"13px",width:"26px",padding:"0",opacity:navCanBack?1:0.35,cursor:navCanBack?"pointer":"default"}}>{"←"}</button>
+              <button onClick={function(){ if(navCanFwd) goFwd(); }} title="Forward" style={{...navBtnSm,fontSize:"13px",width:"26px",padding:"0",opacity:navCanFwd?1:0.35,cursor:navCanFwd?"pointer":"default"}}>{"→"}</button>
             </div>
             <div style={{display:"flex",gap:"2px",background:"#e8e8e6",padding:"2px",borderRadius:"5px"}}>
               {["Day","Wknd","Month"].map(function(v){ return (
@@ -3897,6 +3925,7 @@ export default function TheList() {
             <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()-1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,-7); }); }} style={{...navBtn,fontSize:"11px",letterSpacing:"-1px"}}>{"‹‹"}</button>
             <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()+1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,7); }); }} style={{...navBtn,fontSize:"11px",letterSpacing:"-1px"}}>{"››"}</button>
             <button onClick={function(){ if(navCanBack) goBack(); }} title="Back to previous view" style={{...navBtn,fontSize:"16px",width:"32px",padding:"0",opacity:navCanBack?1:0.35,cursor:navCanBack?"pointer":"default"}}>{"←"}</button>
+            <button onClick={function(){ if(navCanFwd) goFwd(); }} title="Forward to next view" style={{...navBtn,fontSize:"16px",width:"32px",padding:"0",opacity:navCanFwd?1:0.35,cursor:navCanFwd?"pointer":"default"}}>{"→"}</button>
             <div style={{width:"10px"}}/>
             <button onClick={handleUndo} title="Undo" style={{...navBtn,background:canUndo?"#f0f0ee":"#f8f8f6",border:"1px solid #d8d8d6",width:"32px",padding:"0"}}><UndoIcon size={17} color={canUndo?"#555":"#ccc"}/></button>
             <button onClick={handleRedo} title="Redo" style={{...navBtn,background:canRedo?"#f0f0ee":"#f8f8f6",border:"1px solid #d8d8d6",width:"32px",padding:"0"}}><RedoIcon size={17} color={canRedo?"#555":"#ccc"}/></button>
@@ -3920,7 +3949,7 @@ export default function TheList() {
                 var cellBg = outside ? "#f6f6f4" : (isT?"#fffbf0":"#ffffff");
                 return (
                   <div key={dk} data-monthday={dk}
-                    onClick={function(){ setBaseDate(day);setView("Day"); }}
+                    onClick={function(){ setBaseDate(day);setView(isPhone?"Day":"3-Day"); }}
                     onMouseDown={function(){ longPressTimer.current=setTimeout(function(){ setMonthLongPress({dateKey:dk,day}); },600); }}
                     onMouseUp={cancelLongPress} onMouseLeave={function(e){ cancelLongPress();e.currentTarget.style.background=cellBg; }}
                     onTouchStart={function(){ longPressTimer.current=setTimeout(function(){ setMonthLongPress({dateKey:dk,day}); },600); }}
@@ -4064,7 +4093,7 @@ export default function TheList() {
                           </button>
                           )}
                           <div
-                            onClick={function(e){ e.stopPropagation(); if(placingClient){ if(!filled) placeClientInSlot(dateKey,idx); return; } if(!isEditing&&!selectMode&&!isLiveDragging&&!(reassignMode&&reassignMode.currentDateKey===dateKey)) openTimeEdit(dateKey,idx); }}
+                            onClick={function(e){ e.stopPropagation(); if(placingClient){ if(!filled) placeClientInSlot(dateKey,idx); return; } if(filled&&slot.done){ handleDoneRowTap(dateKey,idx); return; } if(!isEditing&&!selectMode&&!isLiveDragging&&!(reassignMode&&reassignMode.currentDateKey===dateKey)) openTimeEdit(dateKey,idx); }}
                             onMouseDown={function(e){ e.stopPropagation(); }}
                             onTouchStart={function(e){ e.stopPropagation(); }}
                             style={{fontSize:"12px",color:defShift?ADJ_BLUE:slot.customTime?"#2f7d8a":(filled?"#c9a96e":"#2e2e2e"),fontWeight:(slot.customTime||defShift)?"bold":"normal",width:"40px",flexShrink:0,fontVariantNumeric:"tabular-nums",letterSpacing:"0.02em",userSelect:"none",WebkitUserSelect:"none",cursor:"pointer"}}>{slot.time}</div>
