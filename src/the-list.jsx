@@ -77,6 +77,9 @@ const WEEK_OPTIONS = [1,2,3,4,5,6,7,8];
 // the vertical bar that marks linked/grouped slots. Matched to the recurring-↺
 // arrow's blue so adjusted times, links, and recurring all read as one color.
 const ADJ_BLUE = "#4a8a9a";
+// Signature blue used to mark "today" (replaced the old today-gold, which read too
+// close to the regular booked-gold). Single tuning knob for the today highlight.
+const TODAY_BLUE = "#3a6ea5";
 
 // parseTime is used ONLY as a chronological sort comparator. The barber day runs
 // 7am→3pm, so 1:00–4:00 are afternoon and must sort AFTER 12:xx. Delegate to the
@@ -844,6 +847,15 @@ export default function TheList() {
         var back = e.key==="ArrowLeft";
         if (view==="Month") { var dm=new Date(baseDate); dm.setMonth(dm.getMonth()+(back?-1:1)); setBaseDate(dm); }
         else { var step = e.shiftKey ? 7 : 1; setBaseDate(function(prev){ return addDays(prev, back?-step:step); }); }
+      }
+      // Up arrow (outside any text field) jumps straight back to today, on whatever
+      // view is currently showing. Down arrow is intentionally left alone.
+      if (e.key==="ArrowUp" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+        if (editingRef.current) return;
+        var aeu = (typeof document!=="undefined") ? document.activeElement : null;
+        if (aeu && (aeu.tagName==="INPUT" || aeu.tagName==="TEXTAREA") && !aeu.readOnly && !aeu.disabled) return;
+        e.preventDefault();
+        setBaseDate(new Date());
       }
     };
     window.addEventListener("keydown", handler);
@@ -2107,90 +2119,6 @@ export default function TheList() {
     setGroupRecurModal(null);
   };
 
-  // TEMP (v23): one-time clean wipe of a single tangled client (James McGinness).
-  // His record won't cancel because some rows lost the recurring flag / were checked
-  // off / were saved under a slightly different spelling, so the normal cancel skips
-  // them. This matches him by a loose name pattern (covers McGinnis, McGinness, McGuinness),
-  // on EVERY date past and future, regardless of those flags. Default-time rows are
-  // emptied back to placeholders; custom-time rows that only existed to hold him
-  // (e.g. the stray 7:48) are dropped so no ghost rows remain. Undo-able. Remove the
-  // button and this helper once he's confirmed gone and re-booked clean.
-  const matchTangledClient = function(nm) {
-    if (!nm) return false;
-    var s = nm.toLowerCase().replace(/[^a-z]/g, "");
-    return s.indexOf("james") === 0 && (s.indexOf("mcginn") !== -1 || s.indexOf("mcguinn") !== -1);
-  };
-  const wipeTangledClient = function() {
-    var src = schedulesRef.current;
-    var removed = 0; var daysTouched = 0;
-    var clean = {};
-    Object.keys(src).forEach(function(dk) {
-      var ds = src[dk] || [];
-      var out = []; var touched = false;
-      ds.forEach(function(s) {
-        if (s && s.name && matchTangledClient(s.name)) {
-          removed++; touched = true;
-          if (DEFAULT_TIMES.indexOf(s.time) !== -1) out.push({time:s.time,name:"",price:"",done:false,recurWeeks:null});
-        } else {
-          out.push(s);
-        }
-      });
-      if (touched) daysTouched++;
-      clean[dk] = out;
-    });
-    if (removed === 0) { showBanner({type:"info", msg:"No James rows found — nothing to remove."}); return; }
-    var ok = (typeof window === "undefined") ? true : window.confirm("Remove " + removed + " James rows across " + daysTouched + " days? You can undo right after.");
-    if (!ok) return;
-    var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
-    pushUndo(snapshot);
-    setSchedules(clean);
-    showBanner({type:"info", msg:"Removed " + removed + " James rows across " + daysTouched + " days. Re-book him fresh."});
-  };
-
-  // TEMP (v25/v26): one-time cleanup of leftover phantom slots in OLD bookings. New bookings
-  // are clean, so this is stale data from a past version (James, David Owens, Jimmy all showed
-  // it). Three kinds of EMPTY row get removed, in priority order — content rows (named/blocked/
-  // noted) are ALWAYS kept first: (1) an empty CUSTOM-time row with no owner — James's
-  // leftover after he was wiped, e.g. a stray empty 7:48; (2) an empty default-time row whose
-  // anchor (placementTime) is already held by a real appointment displayed at a custom minute
-  // — the David/Jimmy phantom, e.g. empty 7:36 next to a customized 7:26 whose base is 7:36;
-  // (3) a duplicate empty default at a time already kept. Every real appointment and every
-  // genuinely-open default slot stays. Undo-able + counted. Remove next build once confirmed.
-  const fixPhantomSlots = function() {
-    var src = schedulesRef.current;
-    var removed = 0; var daysTouched = 0;
-    var clean = {};
-    Object.keys(src).forEach(function(dk) {
-      var ds = src[dk] || [];
-      var claimed = {};
-      ds.forEach(function(s) {
-        if (s && (s.name || s.blocked)) { var ptc = placementTime(s); if (ptc) claimed[ptc] = true; }
-      });
-      var out = []; var touched = false; var seenDefault = {};
-      ds.forEach(function(s) {
-        var hasContent = s && (s.name || s.blocked || s.note);
-        if (hasContent) { out.push(s); return; }
-        // s is an EMPTY row from here down.
-        var isDefault = s && DEFAULT_TIMES.indexOf(s.time) !== -1;
-        var pt = s ? placementTime(s) : "";
-        if (!isDefault) { removed++; touched = true; return; }          // orphaned empty custom-time row (e.g. James's leftover 7:48)
-        if (claimed[pt]) { removed++; touched = true; return; }         // empty default duplicating a real appointment's anchor
-        if (seenDefault[s.time]) { removed++; touched = true; return; } // duplicate empty default at the same time
-        seenDefault[s.time] = true;
-        out.push(s);
-      });
-      if (touched) daysTouched++;
-      clean[dk] = out;
-    });
-    if (removed === 0) { showBanner({type:"info", msg:"No extra slots found to clean."}); return; }
-    var ok = (typeof window === "undefined") ? true : window.confirm("Remove " + removed + " leftover empty slots across " + daysTouched + " days? You can undo right after.");
-    if (!ok) return;
-    var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
-    pushUndo(snapshot);
-    setSchedules(clean);
-    showBanner({type:"info", msg:"Cleaned " + removed + " extra slots across " + daysTouched + " days."});
-  };
-
   // ---- 6C/6D series-edit + conflict-resolution helpers ----
   // 6C name/price: apply a rename/price change to just this occurrence or to the
   // whole future series.
@@ -2497,6 +2425,7 @@ export default function TheList() {
     a.href=url; a.download="the-list-backup-"+(new Date().toISOString().split("T")[0])+".json"; a.click();
     URL.revokeObjectURL(url);
     showBanner({type:"added",msg:"Backup exported",time:null,dateKey:null});
+    setHistory(function(prev){ return [{type:"backup",name:"Backup exported",timestamp:new Date().toLocaleTimeString(),id:Date.now()+Math.random()},...prev].slice(0,200); });
   };
 
   const importData = function(e) {
@@ -3078,9 +3007,9 @@ export default function TheList() {
             var range=getDayTimeRange(dk);
             return (
               <div key={dk} onClick={function(){ if(!disabled){ if(checkoffRecur) bookRecurringFromModal(dk,checkoffRecur); else if(checkoffModal.groupTimes&&checkoffModal.groupTimes.length>1) confirmNextBooking(dk); else jumpToDateForBooking(dk,slot); } }}
-                style={{position:"relative",height:"44px",background:disabled?"#f8f8f8":holiday?"#fffbf0":isT?"#fffbf0":"#ffffff",borderTop:isT?"2px solid #a07830":"2px solid transparent",padding:"4px 5px",cursor:disabled?"default":"pointer",borderRadius:"3px",opacity:disabled?0.35:1,boxSizing:"border-box"}}>
+                style={{position:"relative",height:"44px",background:disabled?"#f8f8f8":holiday?"#fffbf0":isT?"#fffbf0":"#ffffff",borderTop:isT?("2px solid "+TODAY_BLUE):"2px solid transparent",padding:"4px 5px",cursor:disabled?"default":"pointer",borderRadius:"3px",opacity:disabled?0.35:1,boxSizing:"border-box"}}>
                 {!disabled&&weekMarks[dk]&&<div style={{position:"absolute",top:"2px",right:"2px",fontSize:"8px",fontWeight:"bold",color:"#a07830",background:"#fdf3df",borderRadius:"3px",padding:"1px 2px",lineHeight:1}}>{weekMarks[dk]+"w"}</div>}
-                <div style={{fontSize:"12px",color:isT?"#a07830":disabled?"#ccc":"#1a1a1a",fontWeight:isT?"bold":"normal",lineHeight:1}}>{day.getDate()}</div>
+                <div style={{fontSize:"12px",color:isT?TODAY_BLUE:disabled?"#ccc":"#1a1a1a",fontWeight:isT?"bold":"normal",lineHeight:1}}>{day.getDate()}</div>
                 {!disabled&&(
                   <div style={{marginTop:"3px"}}>
                     <div style={{display:"flex",flexWrap:"wrap",gap:"2px",marginBottom:"1px"}}>
@@ -3184,11 +3113,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v26</div>
-
-      {/* TEMP (v23): one-time wipe for the tangled James record. Tap once, confirm,
-          verify he's gone everywhere, then this button is removed next build. */}
-      <button onClick={function(){ fixPhantomSlots(); }} style={{position:"fixed",left:"40px",bottom:"calc(env(safe-area-inset-bottom,0px) + 1px)",zIndex:2700,background:"#b03a3a",color:"#fff",border:"none",borderRadius:"6px",padding:"4px 9px",fontSize:"10px",fontFamily:"inherit",letterSpacing:"0.04em",boxShadow:"0 2px 8px rgba(0,0,0,0.3)"}}>Fix extra slots (1×)</button>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v27</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -3249,7 +3174,7 @@ export default function TheList() {
                       return (
                         <div key={dk}
                           onClick={function(){ handleDragDrop(dk); }}
-                          style={{textAlign:"center",fontSize:"14px",color:isT?"#a07830":"#1a1a1a",fontWeight:isT?"bold":"normal",padding:"10px 2px",borderRadius:"6px",cursor:"pointer",background:isT?"#fffbf0":"#f8f8f6",border:"1px solid #efefed"}}
+                          style={{textAlign:"center",fontSize:"14px",color:isT?TODAY_BLUE:"#1a1a1a",fontWeight:isT?"bold":"normal",padding:"10px 2px",borderRadius:"6px",cursor:"pointer",background:isT?"#fffbf0":"#f8f8f6",border:"1px solid #efefed"}}
                           onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }}
                           onMouseLeave={function(e){ e.currentTarget.style.background=isT?"#fffbf0":"#f8f8f6"; }}
                         >{day.getDate()}</div>
@@ -3498,7 +3423,6 @@ export default function TheList() {
                 <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#aaa",marginBottom:"4px"}}>Client Profile</div>
                 <div style={{fontSize:"20px",color:"#1a1a1a"}}>{clientProfile.name}</div>
               </div>
-              <button onClick={function(){ setClientProfile(null); }} style={{background:"none",border:"none",color:"#aaa",fontSize:"20px",cursor:"pointer",padding:"0 4px"}}>×</button>
             </div>
             {clientProfile.recurWeeks && <div style={{fontSize:"12px",color:"#6a8aaa",marginBottom:"12px"}}>{"↺"} Every {clientProfile.recurWeeks===1?"week":(clientProfile.recurWeeks+" weeks")} · usual time {clientProfile.usualTime}</div>}
             <button onClick={function(){ jumpToDateForBooking(toDateKey(addWeeks(new Date(),2)), clientProfile); setClientProfile(null); }} style={{padding:"10px",background:"#c9a96e",border:"none",borderRadius:"8px",color:"#0f0f0f",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",marginBottom:"14px"}}>Book next appointment</button>
@@ -3564,7 +3488,6 @@ export default function TheList() {
       {checkoffModal && (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px",boxSizing:"border-box"}} onClick={function(){ setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null);setCheckoffRecur(null);setRecurPickerOpen(false); }}>
           <div style={{background:"#f8f8f6",border:"1px solid #d8d8d6",borderRadius:"16px",padding:"24px 28px 28px",width:"100%",maxWidth:"700px",maxHeight:"92vh",overflowY:"auto",boxSizing:"border-box",position:"relative"}} onClick={function(e){ e.stopPropagation(); }}>
-            <button onClick={function(){ setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null);setCheckoffRecur(null);setRecurPickerOpen(false); }} style={{position:"absolute",top:"16px",right:"16px",background:"none",border:"none",color:"#aaa",fontSize:"22px",cursor:"pointer",lineHeight:1,padding:"0 4px"}}>×</button>
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#4a8a5a",marginBottom:"4px"}}>Done</div>
             <div onClick={function(){ var nm=checkoffModal.slot.name; setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null);setCheckoffRecur(null);setRecurPickerOpen(false); openClientProfile(nm); }} title="View profile" style={{fontSize:"22px",marginBottom:"2px",paddingRight:"32px",cursor:"pointer",textDecoration:"underline",textDecorationColor:"#dcd2bd",textUnderlineOffset:"3px"}}>{checkoffModal.slot.name}</div>
             <div style={{fontSize:"12px",color:"#999",marginBottom:"18px"}}>{checkoffModal.slot.time} · {friendlyDate(checkoffModal.dateKey)}</div>
@@ -3773,7 +3696,7 @@ export default function TheList() {
           <div style={{width:"min(360px,90vw)",height:"100%",background:"#fafaf8",borderLeft:"1px solid #e4e4e2",overflowY:"auto",padding:"24px 20px",paddingTop:"calc(env(safe-area-inset-top,0px) + 24px)",boxShadow:"-4px 0 20px rgba(0,0,0,0.08)"}} onClick={function(e){ e.stopPropagation(); }}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"16px"}}>
               <div style={{fontSize:"11px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#888"}}>Change History</div>
-              <button onClick={function(){ setShowHistory(false); }} style={{background:"none",border:"none",color:"#999",fontSize:"18px",cursor:"pointer"}}>×</button>
+              <span style={{fontSize:"10px",letterSpacing:"0.04em",color:"#bbb",fontFamily:"Georgia,serif"}}>{(function(){ var n=0; var sk=Object.keys(schedules); for(var ii=0;ii<sk.length;ii++){ var arr=schedules[sk[ii]]||[]; for(var jj=0;jj<arr.length;jj++){ var ss=arr[jj]; if(ss&&ss.name&&!ss.blocked) n++; } } return n+" on the list"; })()}</span>
             </div>
             <div style={{display:"flex",gap:"8px",marginBottom:"8px"}}>
               <button onClick={exportData} style={{flex:1,padding:"8px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#666",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.05em"}}>Export backup</button>
@@ -3814,8 +3737,8 @@ export default function TheList() {
               return (
               <div key={entry.id||i} style={{padding:"10px 12px",marginBottom:"6px",borderRadius:"6px",background:(entry.type==="removed"||entry.type==="slot_removed")?"#fff0ee":"#fafaf8",border:(entry.type==="removed"||entry.type==="slot_removed")?"1px solid #e0b0a8":"1px solid #e4e4e2"}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"3px"}}>
-                  <span style={{fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",color:entry.type==="added"?"#4a8a5a":(entry.type==="removed"||entry.type==="slot_removed")?"#8a3a2a":entry.type==="recurring_set"?"#c9a96e":entry.type==="slot_added"?"#6a8aaa":entry.type==="checkoff"?"#4a8a5a":"#666"}}>
-                    {entry.type==="added"?"Added":entry.type==="removed"?"Removed":entry.type==="slot_removed"?"Slot Removed":entry.type==="slot_added"?"Slot Added":entry.type==="recurring_set"?("Recurring ("+entry.weeks+"w)"):entry.type==="blocked"?"Blocked":entry.type==="unblocked"?"Unblocked":entry.type==="checkoff"?"Checked Off":"Edited"}
+                  <span style={{fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",color:entry.type==="added"?"#4a8a5a":(entry.type==="removed"||entry.type==="slot_removed")?"#8a3a2a":entry.type==="recurring_set"?"#c9a96e":entry.type==="slot_added"?"#6a8aaa":entry.type==="checkoff"?"#4a8a5a":entry.type==="backup"?"#999":"#666"}}>
+                    {entry.type==="added"?"Added":entry.type==="removed"?"Removed":entry.type==="slot_removed"?"Slot Removed":entry.type==="slot_added"?"Slot Added":entry.type==="recurring_set"?("Recurring ("+entry.weeks+"w)"):entry.type==="blocked"?"Blocked":entry.type==="unblocked"?"Unblocked":entry.type==="checkoff"?"Checked Off":entry.type==="backup"?"Backup":"Edited"}
                   </span>
                   <span style={{fontSize:"10px",color:"#bbb"}}>{entry.timestamp}</span>
                 </div>
@@ -3914,11 +3837,11 @@ export default function TheList() {
                     onMouseUp={cancelLongPress} onMouseLeave={function(e){ cancelLongPress();e.currentTarget.style.background=cellBg; }}
                     onTouchStart={function(){ longPressTimer.current=setTimeout(function(){ setMonthLongPress({dateKey:dk,day}); },600); }}
                     onTouchEnd={cancelLongPress} onTouchMove={cancelLongPress}
-                    style={{position:"relative",background:cellBg,minHeight:isPhone?"50px":"64px",padding:isPhone?"4px 4px":"7px 8px",cursor:"pointer",borderTop:isT?"2px solid #a07830":"2px solid transparent",transition:"background 0.1s",userSelect:"none",boxSizing:"border-box",overflow:"hidden",opacity:outside?0.85:1}}
+                    style={{position:"relative",background:cellBg,minHeight:isPhone?"50px":"64px",padding:isPhone?"4px 4px":"7px 8px",cursor:"pointer",borderTop:isT?("2px solid "+TODAY_BLUE):"2px solid transparent",transition:"background 0.1s",userSelect:"none",boxSizing:"border-box",overflow:"hidden",opacity:outside?0.85:1}}
                     onMouseEnter={function(e){ e.currentTarget.style.background=outside?"#efefec":(isT?"#fff8e8":"#f4f4f2"); }}
                   >
                     <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:"6px",marginBottom:"3px"}}>
-                      <div style={{fontSize:"14px",color:isT?"#a07830":(outside?"#bdbdbb":"#1a1a1a"),fontWeight:isT?"bold":"normal",flexShrink:0}}>{day.getDate()}</div>
+                      <div style={{fontSize:"14px",color:isT?TODAY_BLUE:(outside?"#bdbdbb":"#1a1a1a"),fontWeight:isT?"bold":"normal",flexShrink:0}}>{day.getDate()}</div>
                       {holiday&&<div style={{fontSize:"11px",color:outside?"#cbb98e":"#a07830",textAlign:"right",lineHeight:1.2,letterSpacing:"0.08em",textTransform:"uppercase",marginTop:"4px",minWidth:0,overflow:"hidden"}}>{holiday}</div>}
                     </div>
                     {booked.length>0&&(
@@ -3926,7 +3849,7 @@ export default function TheList() {
                         <div style={{display:"flex",flexWrap:"wrap",gap:"3px",marginBottom:"3px"}}>
                           {booked.map(function(s,j){ return <div key={j} style={{width:"8px",height:"8px",borderRadius:"50%",background:s.recurWeeks?"#6a8aaa":"#c9a96e"}}/>; })}
                         </div>
-                        {range&&<div style={{fontSize:"9px",color:"#aaa"}}>{range}</div>}
+                        {range&&<div style={{fontSize:"10px",color:"#777",fontWeight:"500"}}>{range}</div>}
                       </div>
                     )}
                   </div>
@@ -3956,7 +3879,7 @@ export default function TheList() {
                       return (
                         <div style={{minWidth:0,overflow:"hidden",flex:1}}>
                           <div style={{display:"flex",alignItems:"baseline",gap:"6px",minWidth:0,marginBottom:"3px"}}>
-                            <span style={{fontSize:sz,color:isToday(date)?"#c9893a":"#b89a5a",lineHeight:1.1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",flexShrink:1,textTransform:"uppercase",letterSpacing:"0.06em"}}>{wdStr}</span>
+                            <span style={{fontSize:sz,color:isToday(date)?TODAY_BLUE:"#b89a5a",lineHeight:1.1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",flexShrink:1,textTransform:"uppercase",letterSpacing:"0.06em"}}>{wdStr}</span>
                             {hol&&<span style={{fontSize:sz,color:"#a07830",letterSpacing:"0.08em",textTransform:"uppercase",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:1}}>{hol}</span>}
                           </div>
                           <div style={{fontSize:sz,color:"#1a1a1a",lineHeight:1.1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",textTransform:"uppercase",letterSpacing:"0.06em"}}>{monthStr}</div>
@@ -3966,7 +3889,7 @@ export default function TheList() {
                     // Day / 3-Day / Wknd: weekday and date sit side by side on one line.
                     return (
                       <div style={{minWidth:0,overflow:"hidden",flex:1,display:"flex",alignItems:"baseline",gap:"9px"}}>
-                        <span style={{fontSize:sz,color:isToday(date)?"#c9893a":"#b89a5a",lineHeight:1.1,whiteSpace:"nowrap",flexShrink:0,textTransform:"uppercase",letterSpacing:"0.06em"}}>{wdStr+","}</span>
+                        <span style={{fontSize:sz,color:isToday(date)?TODAY_BLUE:"#b89a5a",lineHeight:1.1,whiteSpace:"nowrap",flexShrink:0,textTransform:"uppercase",letterSpacing:"0.06em"}}>{wdStr+","}</span>
                         <span style={{fontSize:sz,color:"#1a1a1a",lineHeight:1.1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:1,textTransform:"uppercase",letterSpacing:"0.06em"}}>{monthStr}</span>
                         {hol&&<span style={{fontSize:sz,color:"#a07830",letterSpacing:"0.08em",textTransform:"uppercase",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:2,alignSelf:"center"}}>{hol}</span>}
                       </div>
@@ -4108,15 +4031,15 @@ export default function TheList() {
                                   {!compactIcons&&filled&&(function(){
                                     var digits=getClientPhone(slot.name).replace(/[^0-9+]/g,"");
                                     if (digits) {
-                                      return <button onClick={function(e){ e.stopPropagation(); window.location.href="sms:"+digits; }} title={"Message "+slot.name} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 1px 2px 4px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={20} color="#4a8a9a"/></button>;
+                                      return <button onClick={function(e){ e.stopPropagation(); window.location.href="sms:"+digits; }} title={"Message "+slot.name} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 1px 2px 4px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={20} color="#c9a96e"/></button>;
                                     }
                                     return <button onClick={function(e){ e.stopPropagation(); setPhoneModal({name:slot.name,phone:""}); }} title={"Add a number for "+slot.name} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 1px 2px 4px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={20} color="#c6c6c6"/></button>;
                                   })()}
                                   {!compactIcons&&filled&&<button onClick={function(e){ e.stopPropagation(); setNoteDraft(slot.note||""); setNoteModal({dateKey,idx,name:slot.name}); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 5px",color:slot.note?"#c9a96e":"#bbb",fontSize:"24px",fontWeight:"bold",lineHeight:1,WebkitTextStroke:"0.6px currentColor"}}>{"✎"}</button>}
                                 </div>
                               )}
-                              {isEditing&&editChromeReady&&<input value={editValues.price} onChange={function(e){ setEditValues(function(v){ return {...v,price:e.target.value}; }); }} onKeyDown={function(e){ handleKeyDown(e,dateKey,idx); }} onBlur={handleBlur} data-rowkey={rowKey} placeholder="$" style={{width:"52px",fontSize:isPhone?"16px":"13px",color:"#1a1a1a",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"4px",outline:"none",padding:"2px 5px",fontFamily:"Georgia,serif",WebkitAppearance:"none",appearance:"none"}}/>}
-                              {isEditing&&editChromeReady&&<button data-rowkey={rowKey} onMouseDown={function(e){ e.preventDefault(); }} onClick={function(e){ e.preventDefault(); var nm=stripLeadingNumbers(((editValuesRef.current&&editValuesRef.current.name)||"").trim()); if(nm){ commitPenciled(dateKey,idx); } else { setPencilArmed(function(p){ return !p; }); } }} title={pencilArmed?"Pencil mode on — type a name, then Enter to pencil them in":"Penciled in — offered, waiting to hear back"} style={{flexShrink:0,marginLeft:"4px",display:"flex",alignItems:"center",gap:"3px",background:pencilArmed?"#c9a96e":"#fff",border:pencilArmed?"1px solid #c9a96e":"1px solid #d8c08a",borderRadius:"6px",cursor:"pointer",padding:"3px 7px",fontFamily:"Georgia,serif",fontSize:"11px",color:pencilArmed?"#2a2009":"#9a7a30",lineHeight:1,whiteSpace:"nowrap"}}>{"✎ Pencil"}</button>}
+                              {isEditing&&editChromeReady&&<input value={editValues.price} onChange={function(e){ setEditValues(function(v){ return {...v,price:e.target.value}; }); }} onKeyDown={function(e){ if(e.key==="Tab"&&!e.shiftKey){ var nmT=stripLeadingNumbers(((editValuesRef.current&&editValuesRef.current.name)||"").trim()); if(nmT){ e.preventDefault(); commitPenciled(dateKey,idx); return; } } handleKeyDown(e,dateKey,idx); }} onBlur={handleBlur} data-rowkey={rowKey} placeholder="$" style={{width:view==="Week"?"26px":"52px",fontSize:isPhone?"16px":"13px",color:"#1a1a1a",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"4px",outline:"none",padding:view==="Week"?"2px 3px":"2px 5px",fontFamily:"Georgia,serif",WebkitAppearance:"none",appearance:"none"}}/>}
+                              {isEditing&&editChromeReady&&<button data-rowkey={rowKey} onMouseDown={function(e){ e.preventDefault(); }} onClick={function(e){ e.preventDefault(); var nm=stripLeadingNumbers(((editValuesRef.current&&editValuesRef.current.name)||"").trim()); if(nm){ commitPenciled(dateKey,idx); } else { setPencilArmed(function(p){ return !p; }); } }} title={pencilArmed?"Pencil mode on — type a name, then Enter to pencil them in":"Penciled in — offered, waiting to hear back"} style={{flexShrink:0,marginLeft:view==="Week"?"2px":"4px",display:"flex",alignItems:"center",gap:"3px",background:pencilArmed?"#c9a96e":"#fff",border:pencilArmed?"1px solid #c9a96e":"1px solid #d8c08a",borderRadius:"6px",cursor:"pointer",padding:view==="Week"?"3px 4px":"3px 7px",fontFamily:"Georgia,serif",fontSize:"11px",color:pencilArmed?"#2a2009":"#9a7a30",lineHeight:1,whiteSpace:"nowrap"}}>{view==="Week"?"✎":"✎ Pencil"}</button>}
                             </div>
                           )}
                         </div>
