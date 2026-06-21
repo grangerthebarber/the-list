@@ -403,7 +403,7 @@ function UnlockIcon(props) {
 function MessageIcon(props) {
   var size = props.size || 20; var color = props.color || "#4a8a9a";
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill={color} style={{display:"block"}}>
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinejoin="round" strokeLinecap="round" style={{display:"block"}}>
       <path d="M12 4 C6.48 4 2 7.58 2 12 C2 14.05 2.94 15.9 4.5 17.3 C4.32 18.95 3.62 20.42 2.5 21.5 C4.56 21.4 6.42 20.74 7.96 19.64 C9.2 20.08 10.56 20.3 12 20.3 C17.52 20.3 22 16.42 22 12 C22 7.58 17.52 4 12 4 Z"/>
     </svg>
   );
@@ -2110,7 +2110,7 @@ export default function TheList() {
   // TEMP (v23): one-time clean wipe of a single tangled client (James McGinness).
   // His record won't cancel because some rows lost the recurring flag / were checked
   // off / were saved under a slightly different spelling, so the normal cancel skips
-  // them. This matches him by a loose name pattern (covers McGinness AND McGuinness),
+  // them. This matches him by a loose name pattern (covers McGinnis, McGinness, McGuinness),
   // on EVERY date past and future, regardless of those flags. Default-time rows are
   // emptied back to placeholders; custom-time rows that only existed to hold him
   // (e.g. the stray 7:48) are dropped so no ghost rows remain. Undo-able. Remove the
@@ -2118,7 +2118,7 @@ export default function TheList() {
   const matchTangledClient = function(nm) {
     if (!nm) return false;
     var s = nm.toLowerCase().replace(/[^a-z]/g, "");
-    return s.indexOf("james") === 0 && s.indexOf("mcg") !== -1 && s.indexOf("ness") !== -1;
+    return s.indexOf("james") === 0 && (s.indexOf("mcginn") !== -1 || s.indexOf("mcguinn") !== -1);
   };
   const wipeTangledClient = function() {
     var src = schedulesRef.current;
@@ -3140,7 +3140,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v23</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v24</div>
 
       {/* TEMP (v23): one-time wipe for the tangled James record. Tap once, confirm,
           verify he's gone everywhere, then this button is removed next build. */}
@@ -4064,9 +4064,9 @@ export default function TheList() {
                                   {!compactIcons&&filled&&(function(){
                                     var digits=getClientPhone(slot.name).replace(/[^0-9+]/g,"");
                                     if (digits) {
-                                      return <button onClick={function(e){ e.stopPropagation(); window.location.href="sms:"+digits; }} title={"Message "+slot.name} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 4px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={20} color="#4a8a9a"/></button>;
+                                      return <button onClick={function(e){ e.stopPropagation(); window.location.href="sms:"+digits; }} title={"Message "+slot.name} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 1px 2px 4px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={20} color="#4a8a9a"/></button>;
                                     }
-                                    return <button onClick={function(e){ e.stopPropagation(); setPhoneModal({name:slot.name,phone:""}); }} title={"Add a number for "+slot.name} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 4px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={20} color="#c6c6c6"/></button>;
+                                    return <button onClick={function(e){ e.stopPropagation(); setPhoneModal({name:slot.name,phone:""}); }} title={"Add a number for "+slot.name} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 1px 2px 4px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={20} color="#c6c6c6"/></button>;
                                   })()}
                                   {!compactIcons&&filled&&<button onClick={function(e){ e.stopPropagation(); setNoteDraft(slot.note||""); setNoteModal({dateKey,idx,name:slot.name}); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 5px",color:slot.note?"#c9a96e":"#bbb",fontSize:"22px",fontWeight:"bold",lineHeight:1,WebkitTextStroke:"0.6px currentColor"}}>{"✎"}</button>}
                                 </div>
