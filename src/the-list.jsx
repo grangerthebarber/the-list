@@ -437,6 +437,10 @@ export default function TheList() {
   });
   const [editingCell, setEditingCell] = useState(null);
   const [editValues, setEditValues] = useState({name:"", price:""});
+  // #4 type-ahead: which saved-client suggestion is highlighted (-1 = none), and a
+  // flag to keep the dropdown closed after a pick/Escape until the next keystroke.
+  const [suggestIdx, setSuggestIdx] = useState(-1);
+  const [suggestHide, setSuggestHide] = useState(false);
   const [history, setHistory] = useState(function() { return loadFromStorage("tl_history", []); });
   const [undoStack, setUndoStack] = useState([]);
   const [redoStack, setRedoStack] = useState([]);
@@ -507,6 +511,10 @@ export default function TheList() {
   const editingRef = useRef(null);
   const editValuesRef = useRef(editValues);
   editValuesRef.current = editValues;
+  const suggestIdxRef = useRef(suggestIdx);
+  suggestIdxRef.current = suggestIdx;
+  const suggestHideRef = useRef(suggestHide);
+  suggestHideRef.current = suggestHide;
   const touchStart = useRef(null);
   const swipeNavStart = useRef(null);
   const dragTouchStart = useRef(null);
@@ -1160,6 +1168,7 @@ export default function TheList() {
     editingRef.current = {dateKey,idx};
     setEditingCell({dateKey,idx});
     setEditValues({name:slot.name||"",price:slot.price||""});
+    setSuggestIdx(-1); setSuggestHide(false);
     setEditingOccupied(occupied);
     setSwipedSlot(null);
     setPencilArmed(false);
@@ -1374,8 +1383,44 @@ export default function TheList() {
     }
   };
 
+  // #4 type-ahead: saved clients whose name matches what's typed so far. Kicks in at
+  // 3+ characters; names that START with the text come first, then names that contain
+  // it; an exact full match is dropped (nothing to suggest). Capped at 6.
+  const computeSuggestions = function(typed) {
+    var t = stripLeadingNumbers((typed||"").trim()).toLowerCase();
+    if (t.length < 3) return [];
+    var mem = clientMemoryRef.current || [];
+    var seen = {}; var starts = []; var contains = [];
+    mem.forEach(function(c){
+      if (!c || !c.name) return;
+      var ln = c.name.toLowerCase();
+      if (seen[ln] || ln===t) return;
+      var pos = ln.indexOf(t);
+      if (pos===0) { starts.push(c); seen[ln]=true; }
+      else if (pos>0) { contains.push(c); seen[ln]=true; }
+    });
+    return starts.concat(contains).slice(0,6);
+  };
+
   const handleKeyDown = function(e, dateKey, idx) {
     if (e.key==="Tab") return;
+    // #4 type-ahead: while client suggestions are showing, plain Down/Up move the
+    // highlight and Enter picks the highlighted client (name + their saved price),
+    // instead of hopping rows or committing the typed text. Shift combos pass through.
+    if (!e.shiftKey && (e.key==="ArrowDown"||e.key==="ArrowUp"||e.key==="Enter")) {
+      var sugs = suggestHideRef.current ? [] : computeSuggestions(editValuesRef.current.name);
+      if (sugs.length>0) {
+        if (e.key==="ArrowDown") { e.preventDefault(); setSuggestIdx(function(p){ return Math.min(p+1, sugs.length-1); }); return; }
+        if (e.key==="ArrowUp") { e.preventDefault(); if (suggestIdxRef.current<=0) { setSuggestIdx(-1); setSuggestHide(true); } else { setSuggestIdx(suggestIdxRef.current-1); } return; }
+        if (e.key==="Enter" && suggestIdxRef.current>=0 && suggestIdxRef.current<sugs.length) {
+          e.preventDefault();
+          var pick = sugs[suggestIdxRef.current];
+          setSuggestHide(true); setSuggestIdx(-1);
+          doCommit(dateKey, idx, {name:pick.name, price:(pick.price||editValuesRef.current.price||"")});
+          return;
+        }
+      }
+    }
     if (e.key==="Enter" && e.shiftKey) {
       e.preventDefault();
       var cv = editValuesRef.current;
@@ -2043,7 +2088,10 @@ export default function TheList() {
         else ds.splice(occIdx,1);
       } else {
         ds[occIdx]={...occ,time:newTime,isException:true,customTime:wasCustom&&!isStillDefault,defaultBaseTime:(!wasCustom?baseTime:occ.defaultBaseTime)};
-        if (DEFAULT_TIMES.indexOf(occ.time)>=0 && !ds.some(function(s){ return s.time===occ.time; })) ds.push({time:occ.time,name:"",price:"",done:false,recurWeeks:null});
+        // Only re-open the vacated default slot when the series is moving to ANOTHER
+        // default time. When it moves to a custom time, leaving the old default behind
+        // produced a phantom empty slot on every recurrence (the 7:48/7:58 bug).
+        if (isStillDefault && DEFAULT_TIMES.indexOf(occ.time)>=0 && !ds.some(function(s){ return s.time===occ.time; })) ds.push({time:occ.time,name:"",price:"",done:false,recurWeeks:null});
       }
       ds.sort(function(a,b){ return timeToAbsMinutes(a.time)-timeToAbsMinutes(b.time); });
       newSch[dk]=ds;
@@ -3113,7 +3161,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v27</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v28</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -3849,7 +3897,7 @@ export default function TheList() {
                         <div style={{display:"flex",flexWrap:"wrap",gap:"3px",marginBottom:"3px"}}>
                           {booked.map(function(s,j){ return <div key={j} style={{width:"8px",height:"8px",borderRadius:"50%",background:s.recurWeeks?"#6a8aaa":"#c9a96e"}}/>; })}
                         </div>
-                        {range&&<div style={{fontSize:"10px",color:"#777",fontWeight:"500"}}>{range}</div>}
+                        {range&&<div style={{fontSize:"11px",color:"#777",fontWeight:"500"}}>{range}</div>}
                       </div>
                     )}
                   </div>
@@ -3872,7 +3920,7 @@ export default function TheList() {
                     var sz=view==="Day"?"17px":"16px"; if(isPhone) sz=view==="Day"?"15px":"13px";
                     var mo=date.getMonth();
                     var monthStr=[3,4,5,6].includes(mo)?date.toLocaleDateString("en-US",{month:"long",day:"numeric"}):date.toLocaleDateString("en-US",{month:"short",day:"numeric"});
-                    var wdStr=date.toLocaleDateString("en-US",{weekday:"long"})+(isToday(date)?" (Today)":"");
+                    var wdStr=isToday(date)?"Today":date.toLocaleDateString("en-US",{weekday:"long"});
                     var hol=getHolidayForDate(dateKey);
                     if (view==="Week") {
                       // Week view columns are narrow, so the weekday and date stay stacked.
@@ -3925,8 +3973,13 @@ export default function TheList() {
                     var isCustomSlot=slot.isCustom===true||(slot.isCustom===undefined&&!slot.defaultBaseTime&&!DEFAULT_TIMES.includes(slot.time));
                     var defShift=(!isCustomSlot&&slot.defaultBaseTime&&slot.time!==slot.defaultBaseTime)?(timeToAbsMinutes(slot.time)<timeToAbsMinutes(slot.defaultBaseTime)?"earlier":"later"):null;
                     var compactIcons=(view==="Week")||(isPhone&&view==="Wknd");
-                    var isDropTarget=isLiveDragging&&dragOverKey===rowKey&&!filled&&!slot.blocked;
-                    var showDropHint=(isLiveDragging||placingClient)&&!filled&&!slot.blocked&&!isEditing&&!(dragState&&dragState.sourceKey===rowKey);
+                    // #11: while dragging a GROUP, a slot already held by one of that
+                    // group's members is still an eligible landing spot, so let it
+                    // highlight like an empty slot does.
+                    var groupMemberHere=filled&&dragState&&dragState.multi&&dragState.clients&&slot.name&&dragState.clients.some(function(c){ return (c.name||"").toLowerCase()===slot.name.toLowerCase(); });
+                    var dropEligible=(!filled||groupMemberHere)&&!slot.blocked;
+                    var isDropTarget=isLiveDragging&&dragOverKey===rowKey&&dropEligible;
+                    var showDropHint=(isLiveDragging||placingClient)&&dropEligible&&!isEditing&&!(dragState&&dragState.sourceKey===rowKey);
                     if (isDropTarget) slotBg="#e3f3e3";
                     else if (placingClient&&!filled&&!slot.blocked&&!isEditing) slotBg="#f4faf4";
                     else if (!filled&&!slot.blocked&&slot.availStatus&&!isEditing) slotBg="#e7f6e7";
@@ -3989,7 +4042,7 @@ export default function TheList() {
                           ):placingClient&&!filled?(
                             <div onClick={function(){ placeClientInSlot(dateKey,idx); }} style={{flex:1,fontSize:"13px",color:"#2a7a2a",cursor:"pointer",padding:"0 2px"}}>tap to place</div>
                           ):(
-                            <div style={{flex:1,minWidth:0,display:"flex",alignItems:"center",gap:"4px"}}
+                            <div style={{flex:1,minWidth:0,display:"flex",alignItems:"center",gap:"4px",position:"relative"}}
                               onClick={function(){ if(filled&&slot.done) handleDoneRowTap(dateKey,idx); else if(!filled&&!slot.blocked){ if(slot.availStatus) startEdit(dateKey,idx,false); else handleOpenSlotTap(dateKey,idx); } }}
                               onPointerDown={function(e){ dragPointerId.current=e.pointerId; }}
                               onMouseDown={function(){ if(filled&&!slot.done&&!isEditing&&(!selectMode||selectedSlots[rowKey])) startDragLongPress(dateKey,idx,0,0); }}
@@ -4006,7 +4059,7 @@ export default function TheList() {
                                 name="tlentry" inputMode="text" data-lpignore="true" data-1p-ignore="true" data-form-type="other" data-bwignore="true"
                                 autoComplete="off" autoCorrect="off" autoCapitalize="words" spellCheck={false}
                                 onFocus={function(){ if(!isEditing&&!selectMode&&!isLiveDragging&&!dragState&&!slot.done) startEdit(dateKey,idx,(!filled&&!slot.availStatus)); }}
-                                onChange={function(e){ if(!isEditing){ if(!selectMode&&!isLiveDragging&&!dragState&&!slot.done) startEdit(dateKey,idx,(!filled&&!slot.availStatus)); } setEditValues(function(v){ return {...v,name:e.target.value}; }); if(!editChromeReady) setEditChromeReady(true); }}
+                                onChange={function(e){ if(!isEditing){ if(!selectMode&&!isLiveDragging&&!dragState&&!slot.done) startEdit(dateKey,idx,(!filled&&!slot.availStatus)); } setEditValues(function(v){ return {...v,name:e.target.value}; }); setSuggestIdx(-1); setSuggestHide(false); if(!editChromeReady) setEditChromeReady(true); }}
                                 onKeyDown={function(e){ if(isEditing) handleKeyDown(e,dateKey,idx); }}
                                 onBlur={function(e){ if(isEditing) handleBlur(e); }}
                                 onMouseDown={function(){ if(filled&&!slot.done&&!isEditing&&!selectMode) startDragLongPress(dateKey,idx,0,0); }}
@@ -4040,6 +4093,25 @@ export default function TheList() {
                               )}
                               {isEditing&&editChromeReady&&<input value={editValues.price} onChange={function(e){ setEditValues(function(v){ return {...v,price:e.target.value}; }); }} onKeyDown={function(e){ if(e.key==="Tab"&&!e.shiftKey){ var nmT=stripLeadingNumbers(((editValuesRef.current&&editValuesRef.current.name)||"").trim()); if(nmT){ e.preventDefault(); commitPenciled(dateKey,idx); return; } } handleKeyDown(e,dateKey,idx); }} onBlur={handleBlur} data-rowkey={rowKey} placeholder="$" style={{width:view==="Week"?"26px":"52px",fontSize:isPhone?"16px":"13px",color:"#1a1a1a",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"4px",outline:"none",padding:view==="Week"?"2px 3px":"2px 5px",fontFamily:"Georgia,serif",WebkitAppearance:"none",appearance:"none"}}/>}
                               {isEditing&&editChromeReady&&<button data-rowkey={rowKey} onMouseDown={function(e){ e.preventDefault(); }} onClick={function(e){ e.preventDefault(); var nm=stripLeadingNumbers(((editValuesRef.current&&editValuesRef.current.name)||"").trim()); if(nm){ commitPenciled(dateKey,idx); } else { setPencilArmed(function(p){ return !p; }); } }} title={pencilArmed?"Pencil mode on — type a name, then Enter to pencil them in":"Penciled in — offered, waiting to hear back"} style={{flexShrink:0,marginLeft:view==="Week"?"2px":"4px",display:"flex",alignItems:"center",gap:"3px",background:pencilArmed?"#c9a96e":"#fff",border:pencilArmed?"1px solid #c9a96e":"1px solid #d8c08a",borderRadius:"6px",cursor:"pointer",padding:view==="Week"?"3px 4px":"3px 7px",fontFamily:"Georgia,serif",fontSize:"11px",color:pencilArmed?"#2a2009":"#9a7a30",lineHeight:1,whiteSpace:"nowrap"}}>{view==="Week"?"✎":"✎ Pencil"}</button>}
+                              {isEditing&&editChromeReady&&!suggestHide&&(function(){
+                                var sugs=computeSuggestions(editValues.name);
+                                if (sugs.length===0) return null;
+                                return (
+                                  <div onClick={function(e){ e.stopPropagation(); }} style={{position:"absolute",top:"100%",left:"0",marginTop:"2px",minWidth:"150px",maxWidth:"240px",maxHeight:"176px",overflowY:"auto",background:"#ffffff",border:"1px solid #d8d8d6",borderRadius:"8px",boxShadow:"0 6px 18px rgba(0,0,0,0.16)",zIndex:60,padding:"3px",WebkitOverflowScrolling:"touch"}}>
+                                    {sugs.map(function(sug,si){
+                                      var hot=si===suggestIdx;
+                                      return (
+                                        <div key={si}
+                                          onPointerDown={function(e){ e.preventDefault(); e.stopPropagation(); setSuggestHide(true); setSuggestIdx(-1); doCommit(dateKey,idx,{name:sug.name,price:(sug.price||editValues.price||"")}); }}
+                                          style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:"8px",padding:"7px 9px",borderRadius:"6px",cursor:"pointer",background:hot?"#f0ebdd":"transparent"}}>
+                                          <span style={{fontSize:"13px",color:"#1a1a1a",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",fontFamily:"Georgia,serif"}}>{sug.name}</span>
+                                          {sug.price?<span style={{fontSize:"11px",color:"#a07830",flexShrink:0}}>{sug.price}</span>:null}
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                );
+                              })()}
                             </div>
                           )}
                         </div>
