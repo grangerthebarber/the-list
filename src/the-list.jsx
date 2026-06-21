@@ -2147,6 +2147,44 @@ export default function TheList() {
     showBanner({type:"info", msg:"Removed " + removed + " James rows across " + daysTouched + " days. Re-book him fresh."});
   };
 
+  // TEMP (v25): one-time cleanup of leftover phantom slots in OLD bookings. New bookings are
+  // clean, so this is stale data from a past version (James was one; David Owens and Jimmy
+  // show the same). The phantom is an EMPTY default-time row sitting beside a real
+  // appointment that's anchored to that same default time but displayed at a custom minute
+  // (e.g. an empty 7:36 next to a customized 7:26 whose base is 7:36). We only drop the empty
+  // duplicate: a row that is empty, sits at a default time, and whose anchor (placementTime)
+  // is already held by a named/blocked appointment on the same day. Every real appointment
+  // and every genuinely-open slot is left untouched. Undo-able. Remove next build once
+  // confirmed on David + Jimmy.
+  const fixPhantomSlots = function() {
+    var src = schedulesRef.current;
+    var removed = 0; var daysTouched = 0;
+    var clean = {};
+    Object.keys(src).forEach(function(dk) {
+      var ds = src[dk] || [];
+      var claimed = {};
+      ds.forEach(function(s) {
+        if (s && (s.name || s.blocked)) { var ptc = placementTime(s); if (ptc) claimed[ptc] = true; }
+      });
+      var out = []; var touched = false;
+      ds.forEach(function(s) {
+        var isEmpty = s && !s.name && !s.blocked && !s.note;
+        var pt = s ? placementTime(s) : "";
+        if (isEmpty && DEFAULT_TIMES.indexOf(s.time) !== -1 && claimed[pt]) { removed++; touched = true; return; }
+        out.push(s);
+      });
+      if (touched) daysTouched++;
+      clean[dk] = out;
+    });
+    if (removed === 0) { showBanner({type:"info", msg:"No extra slots found to clean."}); return; }
+    var ok = (typeof window === "undefined") ? true : window.confirm("Remove " + removed + " leftover empty slots across " + daysTouched + " days? You can undo right after.");
+    if (!ok) return;
+    var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
+    pushUndo(snapshot);
+    setSchedules(clean);
+    showBanner({type:"info", msg:"Cleaned " + removed + " extra slots across " + daysTouched + " days."});
+  };
+
   // ---- 6C/6D series-edit + conflict-resolution helpers ----
   // 6C name/price: apply a rename/price change to just this occurrence or to the
   // whole future series.
@@ -3140,11 +3178,11 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v24</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v25</div>
 
       {/* TEMP (v23): one-time wipe for the tangled James record. Tap once, confirm,
           verify he's gone everywhere, then this button is removed next build. */}
-      <button onClick={function(){ wipeTangledClient(); }} style={{position:"fixed",left:"40px",bottom:"calc(env(safe-area-inset-bottom,0px) + 1px)",zIndex:2700,background:"#b03a3a",color:"#fff",border:"none",borderRadius:"6px",padding:"4px 9px",fontSize:"10px",fontFamily:"inherit",letterSpacing:"0.04em",boxShadow:"0 2px 8px rgba(0,0,0,0.3)"}}>Wipe James (1×)</button>
+      <button onClick={function(){ fixPhantomSlots(); }} style={{position:"fixed",left:"40px",bottom:"calc(env(safe-area-inset-bottom,0px) + 1px)",zIndex:2700,background:"#b03a3a",color:"#fff",border:"none",borderRadius:"6px",padding:"4px 9px",fontSize:"10px",fontFamily:"inherit",letterSpacing:"0.04em",boxShadow:"0 2px 8px rgba(0,0,0,0.3)"}}>Fix extra slots (1×)</button>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -4068,7 +4106,7 @@ export default function TheList() {
                                     }
                                     return <button onClick={function(e){ e.stopPropagation(); setPhoneModal({name:slot.name,phone:""}); }} title={"Add a number for "+slot.name} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 1px 2px 4px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={20} color="#c6c6c6"/></button>;
                                   })()}
-                                  {!compactIcons&&filled&&<button onClick={function(e){ e.stopPropagation(); setNoteDraft(slot.note||""); setNoteModal({dateKey,idx,name:slot.name}); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 5px",color:slot.note?"#c9a96e":"#bbb",fontSize:"22px",fontWeight:"bold",lineHeight:1,WebkitTextStroke:"0.6px currentColor"}}>{"✎"}</button>}
+                                  {!compactIcons&&filled&&<button onClick={function(e){ e.stopPropagation(); setNoteDraft(slot.note||""); setNoteModal({dateKey,idx,name:slot.name}); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 5px",color:slot.note?"#c9a96e":"#bbb",fontSize:"24px",fontWeight:"bold",lineHeight:1,WebkitTextStroke:"0.6px currentColor",transform:"translateY(1.5px)"}}>{"✎"}</button>}
                                 </div>
                               )}
                               {isEditing&&editChromeReady&&<input value={editValues.price} onChange={function(e){ setEditValues(function(v){ return {...v,price:e.target.value}; }); }} onKeyDown={function(e){ handleKeyDown(e,dateKey,idx); }} onBlur={handleBlur} data-rowkey={rowKey} placeholder="$" style={{width:"52px",fontSize:isPhone?"16px":"13px",color:"#1a1a1a",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"4px",outline:"none",padding:"2px 5px",fontFamily:"Georgia,serif",WebkitAppearance:"none",appearance:"none"}}/>}
