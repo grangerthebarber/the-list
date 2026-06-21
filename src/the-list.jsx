@@ -403,8 +403,8 @@ function UnlockIcon(props) {
 function MessageIcon(props) {
   var size = props.size || 20; var color = props.color || "#4a8a9a";
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.9" strokeLinejoin="round" strokeLinecap="round" style={{display:"block"}}>
-      <path d="M10.5 4 H18 A3.5 3.5 0 0 1 21.5 7.5 V12.5 A3.5 3.5 0 0 1 18 16 H10.5 A3.5 3.5 0 0 1 7 12.5 L2.5 15 L7 10.5 V7.5 A3.5 3.5 0 0 1 10.5 4 Z"/>
+    <svg width={size} height={size} viewBox="0 0 24 24" fill={color} style={{display:"block"}}>
+      <path d="M12 4 C6.48 4 2 7.58 2 12 C2 14.05 2.94 15.9 4.5 17.3 C4.32 18.95 3.62 20.42 2.5 21.5 C4.56 21.4 6.42 20.74 7.96 19.64 C9.2 20.08 10.56 20.3 12 20.3 C17.52 20.3 22 16.42 22 12 C22 7.58 17.52 4 12 4 Z"/>
     </svg>
   );
 }
@@ -2107,6 +2107,46 @@ export default function TheList() {
     setGroupRecurModal(null);
   };
 
+  // TEMP (v23): one-time clean wipe of a single tangled client (James McGinness).
+  // His record won't cancel because some rows lost the recurring flag / were checked
+  // off / were saved under a slightly different spelling, so the normal cancel skips
+  // them. This matches him by a loose name pattern (covers McGinness AND McGuinness),
+  // on EVERY date past and future, regardless of those flags. Default-time rows are
+  // emptied back to placeholders; custom-time rows that only existed to hold him
+  // (e.g. the stray 7:48) are dropped so no ghost rows remain. Undo-able. Remove the
+  // button and this helper once he's confirmed gone and re-booked clean.
+  const matchTangledClient = function(nm) {
+    if (!nm) return false;
+    var s = nm.toLowerCase().replace(/[^a-z]/g, "");
+    return s.indexOf("james") === 0 && s.indexOf("mcg") !== -1 && s.indexOf("ness") !== -1;
+  };
+  const wipeTangledClient = function() {
+    var src = schedulesRef.current;
+    var removed = 0; var daysTouched = 0;
+    var clean = {};
+    Object.keys(src).forEach(function(dk) {
+      var ds = src[dk] || [];
+      var out = []; var touched = false;
+      ds.forEach(function(s) {
+        if (s && s.name && matchTangledClient(s.name)) {
+          removed++; touched = true;
+          if (DEFAULT_TIMES.indexOf(s.time) !== -1) out.push({time:s.time,name:"",price:"",done:false,recurWeeks:null});
+        } else {
+          out.push(s);
+        }
+      });
+      if (touched) daysTouched++;
+      clean[dk] = out;
+    });
+    if (removed === 0) { showBanner({type:"info", msg:"No James rows found — nothing to remove."}); return; }
+    var ok = (typeof window === "undefined") ? true : window.confirm("Remove " + removed + " James rows across " + daysTouched + " days? You can undo right after.");
+    if (!ok) return;
+    var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
+    pushUndo(snapshot);
+    setSchedules(clean);
+    showBanner({type:"info", msg:"Removed " + removed + " James rows across " + daysTouched + " days. Re-book him fresh."});
+  };
+
   // ---- 6C/6D series-edit + conflict-resolution helpers ----
   // 6C name/price: apply a rename/price change to just this occurrence or to the
   // whole future series.
@@ -3100,7 +3140,11 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v22</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v23</div>
+
+      {/* TEMP (v23): one-time wipe for the tangled James record. Tap once, confirm,
+          verify he's gone everywhere, then this button is removed next build. */}
+      <button onClick={function(){ wipeTangledClient(); }} style={{position:"fixed",left:"40px",bottom:"calc(env(safe-area-inset-bottom,0px) + 1px)",zIndex:2700,background:"#b03a3a",color:"#fff",border:"none",borderRadius:"6px",padding:"4px 9px",fontSize:"10px",fontFamily:"inherit",letterSpacing:"0.04em",boxShadow:"0 2px 8px rgba(0,0,0,0.3)"}}>Wipe James (1×)</button>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
