@@ -1220,7 +1220,15 @@ export default function TheList() {
     }, 50);
   };
 
-  const doCommit = useCallback(function(dateKey, idx, values) {
+  const doCommit = useCallback(function(dateKey, idx, values, keepActive) {
+    // #1 tap-away saves: when committing a snapshot from a cell we already left
+    // (the live edit has moved to a different cell), keepActive is true so we write
+    // the data WITHOUT tearing down the edit chrome of the cell now being typed in.
+    var finishEdit = function(){
+      if (keepActive) return;
+      editingRef.current = null; setEditingCell(null); setEditingOccupied(false);
+      setPencilArmed(false); setEditChromeReady(true);
+    };
     var slots = [...getSlots(dateKey)];
     var prev = slots[idx];
     var rawName = stripLeadingNumbers((values.name||"").trim());
@@ -1236,8 +1244,7 @@ export default function TheList() {
     // the name entirely is treated as a normal one-off removal, not a series edit;
     // use "Remove recurring" to clear an entire series.)
     if (prev.recurWeeks && prev.name && newName && (newName!==prev.name || newPrice!==prev.price)) {
-      editingRef.current = null; setEditingCell(null); setEditingOccupied(false);
-      setPencilArmed(false); setEditChromeReady(true);
+      finishEdit();
       setSeriesEditModal({field:"nameprice", dateKey:dateKey, idx:idx, oldName:prev.name, newName:newName, newPrice:newPrice, time:prev.time});
       return true;
     }
@@ -1252,10 +1259,7 @@ export default function TheList() {
         setSlots(dateKey,slots);
         addHistoryEntry({type:"blocked",time:prev.time,name:blkLabel,dateKey});
       }
-      editingRef.current = null;
-      setEditingCell(null);
-      setEditingOccupied(false);
-      setPencilArmed(false); setEditChromeReady(true);
+      finishEdit();
       return;
     }
     if (newName!==prev.name || newPrice!==prev.price || prev.availStatus) {
@@ -1273,20 +1277,22 @@ export default function TheList() {
         });
       } else if (prev.name&&newName) addHistoryEntry({type:"edited",time:slots[idx].time,name:newName,prevName:prev.name,dateKey});
     }
-    editingRef.current = null;
-    setEditingCell(null);
-    setEditingOccupied(false);
-    setPencilArmed(false); setEditChromeReady(true);
+    finishEdit();
   },[getSlots]);
 
   // Save a name as "penciled in" (tentative) — offered but not yet confirmed.
-  const commitPenciled = function(dateKey, idx) {
+  const commitPenciled = function(dateKey, idx, valsArg, keepActive) {
+    var finishEdit = function(){
+      if (keepActive) return;
+      editingRef.current = null; setEditingCell(null); setEditingOccupied(false);
+      setPencilArmed(false); setEditChromeReady(true);
+    };
     var slots = [...getSlots(dateKey)];
     var prev = slots[idx];
-    var cv = editValuesRef.current;
+    var cv = valsArg || editValuesRef.current;
     var rawName = stripLeadingNumbers((cv.name||"").trim());
     if (!rawName && prev.name) rawName = prev.name; // blur may have committed already
-    if (isLunchName(rawName) || isBlockName(rawName) || !rawName) { doCommit(dateKey, idx, cv); return; }
+    if (isLunchName(rawName) || isBlockName(rawName) || !rawName) { doCommit(dateKey, idx, cv, keepActive); return; }
     var newName = capitalizeFirst(rawName);
     var newPrice = (cv.price||"").trim() || prev.price || "";
     var snapshot = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
@@ -1301,10 +1307,7 @@ export default function TheList() {
       });
     }
     addHistoryEntry({type:"added",time:prev.time,name:newName,price:newPrice,dateKey,bannerType:"penciled"});
-    editingRef.current = null;
-    setEditingCell(null);
-    setEditingOccupied(false);
-    setPencilArmed(false); setEditChromeReady(true);
+    finishEdit();
   };
 
   // One-tap confirm: turn a penciled-in slot into a locked-in appointment.
@@ -1366,13 +1369,20 @@ export default function TheList() {
   const handleBlur = useCallback(function(e) {
     var related = e.relatedTarget;
     if (related && related.dataset && related.dataset.rowkey===((editingRef.current&&editingRef.current.dateKey)+"-"+(editingRef.current&&editingRef.current.idx))) return;
+    // #1 tap-away saves: capture WHICH cell and WHAT text right now, synchronously, so
+    // tapping straight from this cell into another one still commits this cell's typed
+    // name to THIS cell — instead of losing it once the live refs repoint to the new
+    // cell. If by commit time a different cell is being edited, movedOn keeps that
+    // newer edit untouched.
+    var snapEr = editingRef.current;
+    if (!snapEr) return;
+    var snapVals = {name:editValuesRef.current.name, price:editValuesRef.current.price};
+    var snapArmed = pencilArmedRef.current;
     setTimeout(function(){
-      if (!editingRef.current) return;
-      var er = editingRef.current;
-      // Tap-away commits exactly like Enter: if the pencil is armed and a name was
-      // typed, pencil them in; otherwise do the normal commit.
-      if (pencilArmedRef.current && stripLeadingNumbers((editValuesRef.current.name||"").trim())) { commitPenciled(er.dateKey,er.idx); }
-      else { doCommit(er.dateKey,er.idx,editValuesRef.current); }
+      var liveEr = editingRef.current;
+      var movedOn = !!(liveEr && (liveEr.dateKey!==snapEr.dateKey || liveEr.idx!==snapEr.idx));
+      if (snapArmed && stripLeadingNumbers((snapVals.name||"").trim())) { commitPenciled(snapEr.dateKey,snapEr.idx,snapVals,movedOn); }
+      else { doCommit(snapEr.dateKey,snapEr.idx,snapVals,movedOn); }
     },100);
   },[doCommit]);
 
@@ -3325,7 +3335,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v35</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v36</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -3832,7 +3842,7 @@ export default function TheList() {
         var dk=acctModal.dateKey;
         var rec=acctFor(dk);
         var th=acctTakehome(rec);
-        var methods=[["cash","Cash"],["venmo","Venmo"],["applepay","Apple Pay"],["square","Square"]];
+        var methods=[["cash","Cash"],["square","Square"],["venmo","Venmo"],["applepay","Apple Pay"]];
         var draftVal=function(key){ return acctAdd[key]!==undefined?acctAdd[key]:(rec[key]?String(rec[key]):""); };
         var liveAmt=function(key){ return acctAdd[key]!==undefined?acctNum(acctAdd[key]):acctNum(rec[key]); };
         var liveTh=liveAmt("cash")+liveAmt("venmo")+liveAmt("applepay")+liveAmt("square");
@@ -3844,9 +3854,22 @@ export default function TheList() {
         var onFieldBlur=function(key){ return function(){ acctSetField(dk,key,acctAdd[key]!==undefined?acctAdd[key]:rec[key]); }; };
         var commitAll=function(){ var r={...acctFor(dk)}; ["cash","venmo","applepay","square","services","hours"].forEach(function(k){ if(acctAdd[k]!==undefined) r[k]=acctNum(acctAdd[k]); }); acctCommit(dk,r); };
         var closeAcct=function(){ commitAll(); setAcctModal(null); setAcctAdd({}); };
+        var onFieldKey=function(e){
+          if (e.key==="Enter"){ e.preventDefault(); closeAcct(); return; }
+          if (e.key==="ArrowDown"){
+            e.preventDefault();
+            var box=e.target.closest("[data-acctbox='1']");
+            if (box){
+              var list=box.querySelectorAll("input"); var i; var found=-1;
+              for (i=0;i<list.length;i++){ if(list[i]===e.target){ found=i; break; } }
+              if (found>=0 && found+1<list.length) list[found+1].focus();
+            }
+            return;
+          }
+        };
         return (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px"}} onClick={closeAcct}>
-          <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"14px",padding:"22px 24px 20px",width:"min(420px,94vw)",maxHeight:"88vh",overflowY:"auto",boxSizing:"border-box"}} onClick={function(e){ e.stopPropagation(); }}>
+          <div data-acctbox="1" style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"14px",padding:"22px 24px 20px",width:"min(420px,94vw)",maxHeight:"88vh",overflowY:"auto",boxSizing:"border-box"}} onClick={function(e){ e.stopPropagation(); }}>
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#a07830",marginBottom:"4px"}}>Accounting</div>
             <div style={{fontSize:"18px",color:"#1a1a1a",marginBottom:"18px"}}>{friendlyDateLong(dk)}</div>
             {methods.map(function(m){
@@ -3854,21 +3877,21 @@ export default function TheList() {
               return (
                 <div key={key} style={rowWrap}>
                   <div style={rowLabel}>{label}</div>
-                  <input type="text" inputMode="decimal" value={draftVal(key)} onChange={onFieldChange(key)} onBlur={onFieldBlur(key)} placeholder="0" style={fieldInp}/>
+                  <input type="text" inputMode="decimal" value={draftVal(key)} onChange={onFieldChange(key)} onBlur={onFieldBlur(key)} onKeyDown={onFieldKey} placeholder="0" style={fieldInp}/>
                 </div>
               );
             })}
             <div style={{display:"flex",alignItems:"center",gap:"12px",padding:"12px 0",marginTop:"4px",marginBottom:"10px",borderTop:"1px solid #ece4d4",borderBottom:"1px solid #ece4d4"}}>
-              <span style={{width:"96px",flexShrink:0,fontSize:"13px",letterSpacing:"0.08em",textTransform:"uppercase",color:"#888"}}>Total</span>
-              <span style={{flex:1,textAlign:"right",fontSize:"24px",color:"#a07830",fontFamily:"Georgia,serif"}}>{"$"+liveTh}</span>
+              <span style={{width:"96px",flexShrink:0,fontSize:"18px",color:"#a07830",fontFamily:"Georgia,serif"}}>{"$"}</span>
+              <span style={{flex:1,textAlign:"right",fontSize:"24px",color:"#a07830",fontFamily:"Georgia,serif"}}>{liveTh}</span>
             </div>
             <div style={rowWrap}>
               <div style={symLabel}>{"#"}</div>
-              <input type="text" inputMode="decimal" value={acctAdd.services!==undefined?acctAdd.services:(rec.services?String(rec.services):"")} onChange={onFieldChange("services")} onBlur={onFieldBlur("services")} placeholder="services" style={fieldInp}/>
+              <input type="text" inputMode="decimal" value={acctAdd.services!==undefined?acctAdd.services:(rec.services?String(rec.services):"")} onChange={onFieldChange("services")} onBlur={onFieldBlur("services")} onKeyDown={onFieldKey} placeholder="services" style={fieldInp}/>
             </div>
             <div style={{...rowWrap,marginBottom:"18px"}}>
               <div style={symLabel}>{":"}</div>
-              <input type="text" inputMode="decimal" value={acctAdd.hours!==undefined?acctAdd.hours:(rec.hours?String(rec.hours):"")} onChange={onFieldChange("hours")} onBlur={onFieldBlur("hours")} placeholder="hours" style={fieldInp}/>
+              <input type="text" inputMode="decimal" value={acctAdd.hours!==undefined?acctAdd.hours:(rec.hours?String(rec.hours):"")} onChange={onFieldChange("hours")} onBlur={onFieldBlur("hours")} onKeyDown={onFieldKey} placeholder="hours" style={fieldInp}/>
             </div>
             <button onClick={closeAcct} style={{display:"block",width:"100%",padding:"11px",background:"#1a1a1a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Done</button>
           </div>
@@ -3881,17 +3904,15 @@ export default function TheList() {
           <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"24px",width:"min(360px,92vw)"}} onClick={function(e){ e.stopPropagation(); }}>
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#a07830",marginBottom:"8px"}}>{noteModal.isDay?"Day Note":"Note"}</div>
             <div style={{fontSize:"16px",color:"#1a1a1a",marginBottom:"14px"}}>{noteModal.name}</div>
-            <textarea autoFocus value={noteDraft} onChange={function(e){ setNoteDraft(e.target.value); }} onKeyDown={function(e){ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); var nm=noteModal; if(nm.isDay){ setDayNoteRecord(nm.dayKey,noteDraft,noteKind); } else { var slots=[...getSlots(nm.dateKey)]; var s=slots[nm.idx]; slots[nm.idx]={...s,note:noteDraft.trim(),noteKind:noteDraft.trim()?noteKind:null}; setSlots(nm.dateKey,slots); } setNoteModal(null); setNoteDraft(""); setNoteKind(null); } }} placeholder={noteModal.isDay?"Write a note to yourself for this day...":"Add a note for this appointment..."} style={{width:"100%",boxSizing:"border-box",minHeight:"96px",resize:"vertical",background:"#efefed",border:"1px solid #d8d8d6",borderRadius:"6px",padding:"10px",fontSize:"14px",fontFamily:"Georgia,serif",color:noteColorFor(noteKind),outline:"none",marginBottom:"12px"}}/>
+            <textarea autoFocus value={noteDraft} onChange={function(e){ setNoteDraft(e.target.value); }} onKeyDown={function(e){ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); var nm=noteModal; if(nm.isDay){ setDayNoteRecord(nm.dayKey,noteDraft,noteKind); } else { var slots=[...getSlots(nm.dateKey)]; var s=slots[nm.idx]; slots[nm.idx]={...s,note:noteDraft.trim(),noteKind:noteDraft.trim()?noteKind:null}; setSlots(nm.dateKey,slots); } setNoteModal(null); setNoteDraft(""); setNoteKind(null); } }} placeholder={noteModal.isDay?"":"Add a note for this appointment..."} style={{width:"100%",boxSizing:"border-box",minHeight:"96px",resize:"vertical",background:"#efefed",border:"1px solid #d8d8d6",borderRadius:"6px",padding:"10px",fontSize:"14px",fontFamily:"Georgia,serif",color:noteColorFor(noteKind),outline:"none",marginBottom:"12px"}}/>
             <div style={{display:"flex",alignItems:"center",gap:"8px",marginBottom:"14px"}}>
-              <span style={{fontSize:"11px",letterSpacing:"0.08em",textTransform:"uppercase",color:"#999",flexShrink:0}}>Tag</span>
               <button onClick={function(){ setNoteKind(noteKind==="personal"?null:"personal"); }} style={{flex:1,padding:"8px",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",letterSpacing:"0.06em",border:"1px solid "+TODAY_BLUE,background:noteKind==="personal"?TODAY_BLUE:"transparent",color:noteKind==="personal"?"#fff":TODAY_BLUE}}>Personal</button>
               <button onClick={function(){ setNoteKind(noteKind==="business"?null:"business"); }} style={{flex:1,padding:"8px",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",letterSpacing:"0.06em",border:"1px solid #a07830",background:noteKind==="business"?"#a07830":"transparent",color:noteKind==="business"?"#fff":"#a07830"}}>Business</button>
             </div>
             {noteModal.isDay && (
-              <div style={{display:"flex",alignItems:"center",gap:"8px",marginBottom:"14px"}}>
-                <span style={{fontSize:"11px",letterSpacing:"0.08em",textTransform:"uppercase",color:"#999",flexShrink:0}}>Add slot</span>
-                <button onClick={function(){ addSlotToBeginning(noteModal.dayKey); }} style={{flex:1,padding:"7px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ AM</button>
-                <button onClick={function(){ addSlotToEnd(noteModal.dayKey); }} style={{flex:1,padding:"7px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ PM</button>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:"8px",marginBottom:"14px"}}>
+                <button onClick={function(){ addSlotToBeginning(noteModal.dayKey); }} style={{padding:"4px 10px",background:"transparent",border:"1px solid #e6e6e4",borderRadius:"6px",color:"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.04em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#f4f4f2"; }} onMouseLeave={function(e){ e.currentTarget.style.background="transparent"; }}>+AM</button>
+                <button onClick={function(){ addSlotToEnd(noteModal.dayKey); }} style={{padding:"4px 10px",background:"transparent",border:"1px solid #e6e6e4",borderRadius:"6px",color:"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.04em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#f4f4f2"; }} onMouseLeave={function(e){ e.currentTarget.style.background="transparent"; }}>+PM</button>
               </div>
             )}
             <div style={{display:"flex",gap:"8px"}}>
@@ -4118,7 +4139,7 @@ export default function TheList() {
           <div style={{width:"100vw",position:"relative",left:"50%",right:"50%",marginLeft:"-50vw",marginRight:"-50vw",boxSizing:"border-box",textAlign:"left",flex:"1 1 auto",display:"flex",flexDirection:"column",minHeight:0}}>
             {(mTot.takehome>0||mTot.services>0||mTot.hours>0)&&(
               <div style={{display:"flex",justifyContent:"center",alignItems:"baseline",flexWrap:"wrap",gap:isPhone?"14px":"24px",padding:isPhone?"6px 8px":"8px 12px",background:"#faf7f0",borderBottom:"1px solid #ece4d4",flexShrink:0,fontFamily:"Georgia,serif"}}>
-                <span style={{fontSize:isPhone?"15px":"17px",color:"#a07830",fontWeight:"600"}}>{"$"+mTot.takehome}</span>
+                <span style={{fontSize:isPhone?"12px":"14px",color:"#777"}}>{"$"+mTot.takehome}</span>
                 {mTot.services>0&&<span style={{fontSize:isPhone?"12px":"14px",color:"#777"}}>{"# "+mTot.services}</span>}
                 {mTot.hours>0&&<span style={{fontSize:isPhone?"12px":"14px",color:"#777"}}>{": "+mTot.hours}</span>}
               </div>
@@ -4156,9 +4177,9 @@ export default function TheList() {
                     )}
                     {acctHasData(dk)&&(function(){ var r=acctFor(dk); var sv=acctNum(r.services); var hr=acctNum(r.hours); return (
                       <div style={{marginTop:"3px",fontSize:isPhone?"9px":"11px",lineHeight:1.3,fontFamily:"Georgia,serif"}}>
-                        <div style={{fontWeight:"600",color:outside?"#cbb98e":"#a07830"}}>{"$"+acctTakehome(r)}</div>
-                        {sv>0&&<div style={{color:outside?"#c2c2c0":"#888"}}>{"#"+sv}</div>}
-                        {hr>0&&<div style={{color:outside?"#c2c2c0":"#888"}}>{":"+hr}</div>}
+                        <div style={{color:outside?"#c2c2c0":"#888"}}>{"$"+acctTakehome(r)}</div>
+                        <div style={{color:outside?"#c2c2c0":"#888"}}>{"#"+sv}</div>
+                        <div style={{color:outside?"#c2c2c0":"#888"}}>{":"+hr}</div>
                       </div>
                     ); })()}
                     {(function(){ var hasN=!!dayNoteText(dk); var k=dayNoteKind(dk); var col=!hasN?"#cfcccc":(k==="personal"?TODAY_BLUE:"#c9a96e"); return (
