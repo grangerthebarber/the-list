@@ -497,6 +497,7 @@ export default function TheList() {
   const [historySearch, setHistorySearch] = useState("");
   const [noteModal, setNoteModal] = useState(null);
   const [noteDraft, setNoteDraft] = useState("");
+  const [noteKind, setNoteKind] = useState(null); // null | "personal" | "business" — colors the note (blue / gold)
   const [dayNotes, setDayNotes] = useState(function() { return loadFromStorage("tl_daynotes", {}); });
   // #13 accounting: per-day takings keyed by dateKey -> {cash,venmo,applepay,square,services,hours}.
   // Rides the same Firebase sync as the other data fields (added as the LAST key in the
@@ -1636,6 +1637,71 @@ export default function TheList() {
     }
   };
 
+  // Shared slot (Model B): one checkoff marks BOTH people who share a time. Flip
+  // each person plus their own linked group / back-to-back run, in one undo step.
+  const handleCheckoffPair = function(dateKey, idxList) {
+    var slots = getSlots(dateKey);
+    var actionable = idxList.some(function(i){ return slots[i] && (slots[i].name || slots[i].blocked); });
+    if (!actionable) return;
+    var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
+    pushUndo(snapshot);
+    var newDone = idxList.some(function(i){ return slots[i] && slots[i].name && !slots[i].done; });
+    var flip = {};
+    idxList.forEach(function(idx){
+      var slot = slots[idx]; if (!slot) return;
+      flip[idx] = true;
+      var gid = slot.groupId; var nm = (slot.name||"").toLowerCase(); var gi;
+      for (gi=0; gi<slots.length; gi++) { if (gid && slots[gi].groupId===gid && (slots[gi].name || slots[gi].blocked)) flip[gi] = true; }
+      if (nm) {
+        var up = idx; while (up>0 && (slots[up-1].name||"").toLowerCase()===nm) { flip[up-1]=true; up--; }
+        var dn = idx; while (dn<slots.length-1 && (slots[dn+1].name||"").toLowerCase()===nm) { flip[dn+1]=true; dn++; }
+      }
+    });
+    var updated = slots.map(function(s, i){ return flip[i] ? {...s,done:newDone} : s; });
+    setSlots(dateKey,updated);
+    playSound(newDone ? "lock" : "tap");
+  };
+
+  // Shared slot (Model B): draw two same-time people as ONE row — two side-by-side
+  // cells split by a divider, with a SINGLE checkoff (left) that marks both. Each
+  // cell keeps the real handlers: tap a name to open the profile, tap the recurring
+  // badge to manage it, tap the pencil for that person's note, long-press to drag.
+  const renderSharedPair = function(dateKey, leftSlot, leftIdx, rightSlot, rightIdx) {
+    var rowKey = dateKey+"-"+leftIdx+"-pair";
+    var bothDone = !!leftSlot.done && !!rightSlot.done;
+    var pad = getDayCount()>3 ? "0 7px" : "0 14px";
+    var renderHalf = function(s, i) {
+      return (
+        <div data-droprow={dateKey+"-"+i} data-dropfilled="1"
+          style={{flex:"1 1 0px",minWidth:0,display:"flex",alignItems:"center",gap:"6px",padding:"0 6px",background:s.done?"#f4faf4":"transparent",cursor:"pointer",userSelect:"none",WebkitUserSelect:"none"}}
+          onClick={function(){ if(s.done) handleDoneRowTap(dateKey,i); else openClientProfile(s.name); }}
+          onMouseDown={function(){ if(!s.done) startDragLongPress(dateKey,i,0,0); }}
+          onMouseUp={function(){ cancelDragLongPress(); }}
+          onMouseLeave={cancelDragLongPress}
+          onTouchStart={function(e){ if(!s.done&&e.touches[0]){ startDragLongPress(dateKey,i,e.touches[0].clientX,e.touches[0].clientY,true); } }}
+          onTouchMove={function(e){ if(e.touches[0]) cancelDragLongPressIfMoved(e.touches[0].clientX,e.touches[0].clientY); }}
+          onTouchEnd={function(e){ var wasTap=!!dragLongPress.current; cancelDragLongPress(); handleTouchEnd(e,dateKey,i); if(wasTap){ if(s.done) handleDoneRowTap(dateKey,i); else openClientProfile(s.name); } }}
+        >
+          <span style={{fontSize:"12px",color:s.done?"#3a5a3a":"#c9a96e",flexShrink:0,fontVariantNumeric:"tabular-nums",letterSpacing:"0.02em"}}>{s.time}</span>
+          <span style={{flex:1,minWidth:0,fontSize:isPhone?"15px":"13px",color:s.done?"#2a6a2a":"#1a1a1a",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",fontFamily:"Georgia,serif"}}>{s.name}</span>
+          {s.price?<span style={{fontSize:"11px",color:s.done?"#3a5a3a":"#a07830",flexShrink:0}}>{s.price}</span>:null}
+          {s.recurWeeks?<button onClick={function(e){ e.stopPropagation(); if(s.done){ handleDoneRowTap(dateKey,i); return; } if(s.groupId){ var aS=getSlots(dateKey); var gS=aS.map(function(x,xi){ return {...x,i:xi}; }).filter(function(x){ return x.groupId===s.groupId&&x.name; }); if(gS.length>1){ setGroupRecurModal({dateKey:dateKey,idx:i,slot:s,groupSlots:gS,weeks:null}); return; } } setRecurringModal({dateKey:dateKey,idx:i,slot:s}); }} title="Recurring — tap to manage" style={{background:"none",border:"none",cursor:"pointer",padding:"0 1px",color:"#4a8a9a",fontSize:"12px",fontWeight:"500",lineHeight:1,flexShrink:0}}>{(s.recurWeeks===1?"1w":(s.recurWeeks+"w"))+(s.isException?"*":"")}</button>:null}
+          <button onClick={function(e){ e.stopPropagation(); setNoteDraft(s.note||""); setNoteKind(s.noteKind||null); setNoteModal({dateKey:dateKey,idx:i,name:s.name}); }} title="Note" style={{background:"none",border:"none",cursor:"pointer",padding:"2px 3px",color:s.note?(s.noteKind==="personal"?TODAY_BLUE:"#c9a96e"):"#cfcfcf",fontSize:"18px",lineHeight:1,flexShrink:0,WebkitTextStroke:"0.5px currentColor"}}>{"✎"}</button>
+        </div>
+      );
+    };
+    return (
+      <div key={rowKey} style={{position:"relative",overflow:"hidden",borderBottom:"1px solid #efefed",flex:"1 1 0px",minHeight:"26px",display:"flex",flexDirection:"column"}}>
+        <div style={{display:"flex",alignItems:"center",flex:"1 1 auto",minHeight:0,padding:pad,background:"#fcfcfa"}}>
+          <button onClick={function(){ handleCheckoffPair(dateKey,[leftIdx,rightIdx]); }} title="Check off both" style={{width:"18px",height:"18px",borderRadius:"50%",border:bothDone?"1.5px solid #2a7a2a":"1.5px solid #aaaaaa",background:bothDone?"#2a7a2a":"transparent",cursor:"pointer",flexShrink:0,marginRight:"10px",display:"flex",alignItems:"center",justifyContent:"center",transition:"all 0.15s"}}>{bothDone?<span style={{color:"#fff",fontSize:"10px",lineHeight:1}}>{"✓"}</span>:null}</button>
+          {renderHalf(leftSlot,leftIdx)}
+          <div style={{width:"1px",alignSelf:"stretch",background:"#d8d2c4",margin:"4px 2px"}}/>
+          {renderHalf(rightSlot,rightIdx)}
+        </div>
+      </div>
+    );
+  };
+
   // Mark an empty slot as AVAILABLE / OVERTIME (or clear it). Never touches a
   // slot that already has someone or is blocked.
   const cycleSlotMark = function(dateKey, idx, mark) {
@@ -2055,6 +2121,22 @@ export default function TheList() {
     });
     return {takehome:th, services:sv, hours:hr};
   };
+
+  // Day notes can be a legacy plain string OR a {text,kind} object (kind: "personal"
+  // | "business", for blue/gold coloring). These accessors read both shapes so no
+  // data migration is needed; the writer always stores the new object shape.
+  var dayNoteText = function(dk){ var v=dayNotes[dk]; if(!v) return ""; return (typeof v==="string")?v:(v.text||""); };
+  var dayNoteKind = function(dk){ var v=dayNotes[dk]; if(!v||typeof v==="string") return null; return v.kind||null; };
+  var setDayNoteRecord = function(dk, text, kind){
+    setDayNotes(function(prev){
+      var n={...prev}; var t=(text||"").trim();
+      if(t){ n[dk] = kind ? {text:t,kind:kind} : {text:t}; } else { delete n[dk]; }
+      return n;
+    });
+  };
+  // Note color by kind: personal -> signature blue, business -> gold, otherwise dark.
+  var noteColorFor = function(kind){ return kind==="personal"?TODAY_BLUE:(kind==="business"?"#a07830":"#1a1a1a"); };
+  var notePencilColor = function(kind, hasNote){ if(!hasNote) return null; return kind==="personal"?TODAY_BLUE:"#c9a96e"; };
 
   const startLongPress = function(name) { longPressTimer.current=setTimeout(function(){ openClientProfile(name); },600); };
   const cancelLongPress = function() { if(longPressTimer.current){ clearTimeout(longPressTimer.current); longPressTimer.current=null; } };
@@ -3243,7 +3325,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v33</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v35</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -3751,53 +3833,60 @@ export default function TheList() {
         var rec=acctFor(dk);
         var th=acctTakehome(rec);
         var methods=[["cash","Cash"],["venmo","Venmo"],["applepay","Apple Pay"],["square","Square"]];
-        var addInp={width:"68px",padding:"7px 8px",border:"1px solid #cfe0cf",borderRadius:"8px",fontFamily:"Georgia,serif",fontSize:"14px",color:"#2a6a2a",background:"#f6fbf6",textAlign:"right",WebkitAppearance:"none",appearance:"none"};
-        var miniBtn={width:"30px",padding:"7px 0",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"15px",lineHeight:1,flexShrink:0};
-        var countInp={width:"100%",boxSizing:"border-box",padding:"8px 10px",border:"1px solid #d8d8d6",borderRadius:"8px",fontFamily:"Georgia,serif",fontSize:"15px",color:"#1a1a1a",background:"#fcfcfb",WebkitAppearance:"none",appearance:"none"};
-        var clearAdd=function(key){ setAcctAdd(function(p){ var n={...p}; n[key]=""; return n; }); };
+        var draftVal=function(key){ return acctAdd[key]!==undefined?acctAdd[key]:(rec[key]?String(rec[key]):""); };
+        var liveAmt=function(key){ return acctAdd[key]!==undefined?acctNum(acctAdd[key]):acctNum(rec[key]); };
+        var liveTh=liveAmt("cash")+liveAmt("venmo")+liveAmt("applepay")+liveAmt("square");
+        var rowWrap={display:"flex",alignItems:"center",gap:"12px",marginBottom:"9px"};
+        var rowLabel={width:"96px",flexShrink:0,fontSize:"15px",color:"#1a1a1a"};
+        var symLabel={width:"96px",flexShrink:0,fontSize:"18px",color:"#a07830",fontFamily:"Georgia,serif"};
+        var fieldInp={flex:1,minWidth:0,boxSizing:"border-box",padding:"9px 11px",border:"1px solid #ddd8cc",borderRadius:"8px",fontFamily:"Georgia,serif",fontSize:"16px",color:"#1a1a1a",background:"#fcfbf7",textAlign:"right",WebkitAppearance:"none",appearance:"none"};
+        var onFieldChange=function(key){ return function(e){ var v=e.target.value; setAcctAdd(function(p){ var n={...p}; n[key]=v; return n; }); }; };
+        var onFieldBlur=function(key){ return function(){ acctSetField(dk,key,acctAdd[key]!==undefined?acctAdd[key]:rec[key]); }; };
+        var commitAll=function(){ var r={...acctFor(dk)}; ["cash","venmo","applepay","square","services","hours"].forEach(function(k){ if(acctAdd[k]!==undefined) r[k]=acctNum(acctAdd[k]); }); acctCommit(dk,r); };
+        var closeAcct=function(){ commitAll(); setAcctModal(null); setAcctAdd({}); };
         return (
-        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px"}} onClick={function(){ setAcctModal(null); setAcctAdd({}); }}>
-          <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"14px",padding:"22px 24px 20px",width:"min(440px,94vw)",maxHeight:"88vh",overflowY:"auto",boxSizing:"border-box"}} onClick={function(e){ e.stopPropagation(); }}>
-            <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#2a6a2a",marginBottom:"4px"}}>Accounting</div>
-            <div style={{fontSize:"18px",color:"#1a1a1a",marginBottom:"16px"}}>{friendlyDateLong(dk)}</div>
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px"}} onClick={closeAcct}>
+          <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"14px",padding:"22px 24px 20px",width:"min(420px,94vw)",maxHeight:"88vh",overflowY:"auto",boxSizing:"border-box"}} onClick={function(e){ e.stopPropagation(); }}>
+            <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#a07830",marginBottom:"4px"}}>Accounting</div>
+            <div style={{fontSize:"18px",color:"#1a1a1a",marginBottom:"18px"}}>{friendlyDateLong(dk)}</div>
             {methods.map(function(m){
               var key=m[0]; var label=m[1];
               return (
-                <div key={key} style={{display:"flex",alignItems:"center",gap:"7px",marginBottom:"10px"}}>
-                  <div style={{width:"74px",flexShrink:0,fontSize:"14px",color:"#1a1a1a"}}>{label}</div>
-                  <div style={{flex:1,minWidth:0,fontSize:"17px",color:rec[key]?"#1a1a1a":"#bbb"}}>{"$"+(rec[key]||0)}</div>
-                  <input type="text" inputMode="decimal" value={acctAdd[key]!==undefined?acctAdd[key]:""} onChange={function(e){ var v=e.target.value; setAcctAdd(function(p){ var n={...p}; n[key]=v; return n; }); }} onKeyDown={function(e){ if(e.key==="Enter"){ e.preventDefault(); acctAddTo(dk,key,acctAdd[key]); clearAdd(key); } }} placeholder="amt" style={addInp}/>
-                  <button onClick={function(){ acctAddTo(dk,key,acctAdd[key]); clearAdd(key); }} title="Add" style={{...miniBtn,background:"#2a6a2a"}}>{"+"}</button>
-                  <button onClick={function(){ acctAddTo(dk,key,-acctNum(acctAdd[key])); clearAdd(key); }} title="Subtract" style={{...miniBtn,background:"#b08a78"}}>{"\u2212"}</button>
+                <div key={key} style={rowWrap}>
+                  <div style={rowLabel}>{label}</div>
+                  <input type="text" inputMode="decimal" value={draftVal(key)} onChange={onFieldChange(key)} onBlur={onFieldBlur(key)} placeholder="0" style={fieldInp}/>
                 </div>
               );
             })}
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"12px 0",marginTop:"6px",marginBottom:"14px",borderTop:"1px solid #ececea",borderBottom:"1px solid #ececea"}}>
-              <span style={{fontSize:"13px",letterSpacing:"0.08em",textTransform:"uppercase",color:"#888"}}>Take-home</span>
-              <span style={{fontSize:"23px",color:"#2a6a2a"}}>{"$"+th}</span>
+            <div style={{display:"flex",alignItems:"center",gap:"12px",padding:"12px 0",marginTop:"4px",marginBottom:"10px",borderTop:"1px solid #ece4d4",borderBottom:"1px solid #ece4d4"}}>
+              <span style={{width:"96px",flexShrink:0,fontSize:"13px",letterSpacing:"0.08em",textTransform:"uppercase",color:"#888"}}>Total</span>
+              <span style={{flex:1,textAlign:"right",fontSize:"24px",color:"#a07830",fontFamily:"Georgia,serif"}}>{"$"+liveTh}</span>
             </div>
-            <div style={{display:"flex",gap:"12px",marginBottom:"18px"}}>
-              <div style={{flex:1}}>
-                <div style={{fontSize:"11px",letterSpacing:"0.06em",textTransform:"uppercase",color:"#aaa",marginBottom:"6px"}}>{"# Services"}</div>
-                <input type="text" inputMode="numeric" value={acctAdd.services!==undefined?acctAdd.services:(rec.services?String(rec.services):"")} onChange={function(e){ var v=e.target.value; setAcctAdd(function(p){ var n={...p}; n.services=v; return n; }); }} onBlur={function(){ acctSetField(dk,"services",acctAdd.services!==undefined?acctAdd.services:rec.services); }} placeholder="0" style={countInp}/>
-              </div>
-              <div style={{flex:1}}>
-                <div style={{fontSize:"11px",letterSpacing:"0.06em",textTransform:"uppercase",color:"#aaa",marginBottom:"6px"}}>{"# Hours"}</div>
-                <input type="text" inputMode="decimal" value={acctAdd.hours!==undefined?acctAdd.hours:(rec.hours?String(rec.hours):"")} onChange={function(e){ var v=e.target.value; setAcctAdd(function(p){ var n={...p}; n.hours=v; return n; }); }} onBlur={function(){ acctSetField(dk,"hours",acctAdd.hours!==undefined?acctAdd.hours:rec.hours); }} placeholder="0" style={countInp}/>
-              </div>
+            <div style={rowWrap}>
+              <div style={symLabel}>{"#"}</div>
+              <input type="text" inputMode="decimal" value={acctAdd.services!==undefined?acctAdd.services:(rec.services?String(rec.services):"")} onChange={onFieldChange("services")} onBlur={onFieldBlur("services")} placeholder="services" style={fieldInp}/>
             </div>
-            <button onClick={function(){ setAcctModal(null); setAcctAdd({}); }} style={{display:"block",width:"100%",padding:"11px",background:"#1a1a1a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Done</button>
+            <div style={{...rowWrap,marginBottom:"18px"}}>
+              <div style={symLabel}>{":"}</div>
+              <input type="text" inputMode="decimal" value={acctAdd.hours!==undefined?acctAdd.hours:(rec.hours?String(rec.hours):"")} onChange={onFieldChange("hours")} onBlur={onFieldBlur("hours")} placeholder="hours" style={fieldInp}/>
+            </div>
+            <button onClick={closeAcct} style={{display:"block",width:"100%",padding:"11px",background:"#1a1a1a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Done</button>
           </div>
         </div>
         );
       })()}
 
       {noteModal && (
-        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px"}} onClick={function(){ setNoteModal(null); }}>
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px"}} onClick={function(){ setNoteModal(null); setNoteKind(null); }}>
           <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"24px",width:"min(360px,92vw)"}} onClick={function(e){ e.stopPropagation(); }}>
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#a07830",marginBottom:"8px"}}>{noteModal.isDay?"Day Note":"Note"}</div>
             <div style={{fontSize:"16px",color:"#1a1a1a",marginBottom:"14px"}}>{noteModal.name}</div>
-            <textarea autoFocus value={noteDraft} onChange={function(e){ setNoteDraft(e.target.value); }} onKeyDown={function(e){ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); var nm=noteModal; if(nm.isDay){ var t=noteDraft.trim(); setDayNotes(function(prev){ var n={...prev}; if(t) n[nm.dayKey]=t; else delete n[nm.dayKey]; return n; }); } else { var slots=[...getSlots(nm.dateKey)]; var s=slots[nm.idx]; slots[nm.idx]={...s,note:noteDraft.trim()}; setSlots(nm.dateKey,slots); } setNoteModal(null); setNoteDraft(""); } }} placeholder={noteModal.isDay?"Write a note to yourself for this day...":"Add a note for this appointment..."} style={{width:"100%",boxSizing:"border-box",minHeight:"96px",resize:"vertical",background:"#efefed",border:"1px solid #d8d8d6",borderRadius:"6px",padding:"10px",fontSize:"14px",fontFamily:"Georgia,serif",color:"#1a1a1a",outline:"none",marginBottom:"14px"}}/>
+            <textarea autoFocus value={noteDraft} onChange={function(e){ setNoteDraft(e.target.value); }} onKeyDown={function(e){ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); var nm=noteModal; if(nm.isDay){ setDayNoteRecord(nm.dayKey,noteDraft,noteKind); } else { var slots=[...getSlots(nm.dateKey)]; var s=slots[nm.idx]; slots[nm.idx]={...s,note:noteDraft.trim(),noteKind:noteDraft.trim()?noteKind:null}; setSlots(nm.dateKey,slots); } setNoteModal(null); setNoteDraft(""); setNoteKind(null); } }} placeholder={noteModal.isDay?"Write a note to yourself for this day...":"Add a note for this appointment..."} style={{width:"100%",boxSizing:"border-box",minHeight:"96px",resize:"vertical",background:"#efefed",border:"1px solid #d8d8d6",borderRadius:"6px",padding:"10px",fontSize:"14px",fontFamily:"Georgia,serif",color:noteColorFor(noteKind),outline:"none",marginBottom:"12px"}}/>
+            <div style={{display:"flex",alignItems:"center",gap:"8px",marginBottom:"14px"}}>
+              <span style={{fontSize:"11px",letterSpacing:"0.08em",textTransform:"uppercase",color:"#999",flexShrink:0}}>Tag</span>
+              <button onClick={function(){ setNoteKind(noteKind==="personal"?null:"personal"); }} style={{flex:1,padding:"8px",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",letterSpacing:"0.06em",border:"1px solid "+TODAY_BLUE,background:noteKind==="personal"?TODAY_BLUE:"transparent",color:noteKind==="personal"?"#fff":TODAY_BLUE}}>Personal</button>
+              <button onClick={function(){ setNoteKind(noteKind==="business"?null:"business"); }} style={{flex:1,padding:"8px",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",letterSpacing:"0.06em",border:"1px solid #a07830",background:noteKind==="business"?"#a07830":"transparent",color:noteKind==="business"?"#fff":"#a07830"}}>Business</button>
+            </div>
             {noteModal.isDay && (
               <div style={{display:"flex",alignItems:"center",gap:"8px",marginBottom:"14px"}}>
                 <span style={{fontSize:"11px",letterSpacing:"0.08em",textTransform:"uppercase",color:"#999",flexShrink:0}}>Add slot</span>
@@ -3809,29 +3898,28 @@ export default function TheList() {
               <button onClick={function(){
                 var nm=noteModal;
                 if (nm.isDay) {
-                  var t=noteDraft.trim();
-                  setDayNotes(function(prev){ var n={...prev}; if(t) n[nm.dayKey]=t; else delete n[nm.dayKey]; return n; });
+                  setDayNoteRecord(nm.dayKey,noteDraft,noteKind);
                 } else {
                   var slots=[...getSlots(nm.dateKey)]; var s=slots[nm.idx];
-                  slots[nm.idx]={...s,note:noteDraft.trim()};
+                  slots[nm.idx]={...s,note:noteDraft.trim(),noteKind:noteDraft.trim()?noteKind:null};
                   setSlots(nm.dateKey,slots);
                 }
-                setNoteModal(null); setNoteDraft("");
+                setNoteModal(null); setNoteDraft(""); setNoteKind(null);
               }} style={{flex:1,padding:"10px",background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Save note</button>
-              {noteModal && (function(){ if(noteModal.isDay) return !!dayNotes[noteModal.dayKey]; var s=getSlots(noteModal.dateKey)[noteModal.idx]; return s&&s.note; })() && (
+              {noteModal && (function(){ if(noteModal.isDay) return !!dayNoteText(noteModal.dayKey); var s=getSlots(noteModal.dateKey)[noteModal.idx]; return s&&s.note; })() && (
                 <button onClick={function(){
                   var nm=noteModal;
                   if (nm.isDay) {
-                    setDayNotes(function(prev){ var n={...prev}; delete n[nm.dayKey]; return n; });
+                    setDayNoteRecord(nm.dayKey,"",null);
                   } else {
                     var slots=[...getSlots(nm.dateKey)]; var s=slots[nm.idx];
-                    slots[nm.idx]={...s,note:""};
+                    slots[nm.idx]={...s,note:"",noteKind:null};
                     setSlots(nm.dateKey,slots);
                   }
-                  setNoteModal(null); setNoteDraft("");
+                  setNoteModal(null); setNoteDraft(""); setNoteKind(null);
                 }} style={{padding:"10px 14px",background:"none",border:"1px solid #e0b0a8",borderRadius:"6px",color:"#c0392b",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Clear</button>
               )}
-              <button onClick={function(){ setNoteModal(null); setNoteDraft(""); }} style={{padding:"10px 14px",background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Cancel</button>
+              <button onClick={function(){ setNoteModal(null); setNoteDraft(""); setNoteKind(null); }} style={{padding:"10px 14px",background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Cancel</button>
             </div>
           </div>
         </div>
@@ -4029,11 +4117,10 @@ export default function TheList() {
         return (
           <div style={{width:"100vw",position:"relative",left:"50%",right:"50%",marginLeft:"-50vw",marginRight:"-50vw",boxSizing:"border-box",textAlign:"left",flex:"1 1 auto",display:"flex",flexDirection:"column",minHeight:0}}>
             {(mTot.takehome>0||mTot.services>0||mTot.hours>0)&&(
-              <div style={{display:"flex",justifyContent:"center",alignItems:"baseline",flexWrap:"wrap",gap:isPhone?"12px":"22px",padding:isPhone?"5px 8px":"7px 12px",background:"#f4faf4",borderBottom:"1px solid #dcebdc",flexShrink:0,fontFamily:"Georgia,serif"}}>
-                <span style={{fontSize:"10px",letterSpacing:"0.12em",textTransform:"uppercase",color:"#7aa07a"}}>Month</span>
-                <span style={{fontSize:isPhone?"14px":"16px",color:"#2a6a2a",fontWeight:"600"}}>{"$"+mTot.takehome}</span>
-                <span style={{fontSize:isPhone?"11px":"13px",color:"#888"}}>{mTot.services+" services"}</span>
-                <span style={{fontSize:isPhone?"11px":"13px",color:"#888"}}>{mTot.hours+" hours"}</span>
+              <div style={{display:"flex",justifyContent:"center",alignItems:"baseline",flexWrap:"wrap",gap:isPhone?"14px":"24px",padding:isPhone?"6px 8px":"8px 12px",background:"#faf7f0",borderBottom:"1px solid #ece4d4",flexShrink:0,fontFamily:"Georgia,serif"}}>
+                <span style={{fontSize:isPhone?"15px":"17px",color:"#a07830",fontWeight:"600"}}>{"$"+mTot.takehome}</span>
+                {mTot.services>0&&<span style={{fontSize:isPhone?"12px":"14px",color:"#777"}}>{"# "+mTot.services}</span>}
+                {mTot.hours>0&&<span style={{fontSize:isPhone?"12px":"14px",color:"#777"}}>{": "+mTot.hours}</span>}
               </div>
             )}
             <div style={{display:"grid",gridTemplateColumns:"repeat(7,minmax(0,1fr))",background:"#e8e8e6",gap:"1px",borderBottom:"1px solid #e8e8e6",flexShrink:0}}>
@@ -4068,10 +4155,14 @@ export default function TheList() {
                       </div>
                     )}
                     {acctHasData(dk)&&(function(){ var r=acctFor(dk); var sv=acctNum(r.services); var hr=acctNum(r.hours); return (
-                      <div style={{marginTop:"3px",fontSize:isPhone?"9px":"11px",lineHeight:1.25,color:outside?"#8aa88a":"#2a6a2a"}}>
-                        <div style={{fontWeight:"600"}}>{"$"+acctTakehome(r)}</div>
-                        {(sv>0||hr>0)&&<div style={{color:outside?"#b3b3b1":"#888"}}>{(sv>0?(sv+" svc"):"")+((sv>0&&hr>0)?" · ":"")+(hr>0?(hr+"h"):"")}</div>}
+                      <div style={{marginTop:"3px",fontSize:isPhone?"9px":"11px",lineHeight:1.3,fontFamily:"Georgia,serif"}}>
+                        <div style={{fontWeight:"600",color:outside?"#cbb98e":"#a07830"}}>{"$"+acctTakehome(r)}</div>
+                        {sv>0&&<div style={{color:outside?"#c2c2c0":"#888"}}>{"#"+sv}</div>}
+                        {hr>0&&<div style={{color:outside?"#c2c2c0":"#888"}}>{":"+hr}</div>}
                       </div>
+                    ); })()}
+                    {(function(){ var hasN=!!dayNoteText(dk); var k=dayNoteKind(dk); var col=!hasN?"#cfcccc":(k==="personal"?TODAY_BLUE:"#c9a96e"); return (
+                      <button onClick={function(e){ e.stopPropagation(); setNoteDraft(dayNoteText(dk)); setNoteKind(dayNoteKind(dk)); setNoteModal({dayKey:dk,isDay:true,name:friendlyDateLong(dk)}); }} onMouseDown={function(e){ e.stopPropagation(); }} onTouchStart={function(e){ e.stopPropagation(); }} title={hasN?"Day note":"Add a day note"} style={{position:"absolute",bottom:"2px",right:"3px",background:"none",border:"none",cursor:"pointer",padding:"2px 3px",color:col,fontSize:isPhone?"13px":"15px",lineHeight:1,opacity:outside?0.6:1,WebkitTextStroke:"0.4px currentColor"}}>{"✎"}</button>
                     ); })()}
                   </div>
                 );
@@ -4116,8 +4207,8 @@ export default function TheList() {
                       </div>
                     );
                   })()}
-                  <button onClick={function(e){ e.stopPropagation(); setAcctAdd({}); setAcctModal({dateKey:dateKey}); }} title="Accounting for the day" style={{background:"none",border:"none",cursor:"pointer",padding:(getDayCount()>3?"0 2px":"0 4px 0 2px"),color:acctHasData(dateKey)?"#2a6a2a":"#bbb",fontSize:"19px",fontWeight:"bold",lineHeight:1,flexShrink:0,fontFamily:"Georgia,serif"}}>{"$"}</button>
-                  <button onClick={function(e){ e.stopPropagation(); setNoteDraft(dayNotes[dateKey]||""); setNoteModal({dayKey:dateKey,isDay:true,name:friendlyDateLong(dateKey)}); }} title="Note for the day" style={{background:"none",border:"none",cursor:"pointer",padding:(getDayCount()>3?"0 2px":"0 9px 0 2px"),color:dayNotes[dateKey]?"#c9a96e":"#bbb",fontSize:"22px",lineHeight:1,flexShrink:0,WebkitTextStroke:"0.5px currentColor"}}>{"✎"}</button>
+                  <button onClick={function(e){ e.stopPropagation(); setAcctAdd({}); setAcctModal({dateKey:dateKey}); }} title="Accounting for the day" style={{background:"none",border:"none",cursor:"pointer",padding:(getDayCount()>3?"0 2px":"0 4px 0 2px"),color:acctHasData(dateKey)?"#c9a96e":"#bbb",fontSize:"19px",fontWeight:"bold",lineHeight:1,flexShrink:0,fontFamily:"Georgia,serif"}}>{"$"}</button>
+                  <button onClick={function(e){ e.stopPropagation(); setNoteDraft(dayNoteText(dateKey)); setNoteKind(dayNoteKind(dateKey)); setNoteModal({dayKey:dateKey,isDay:true,name:friendlyDateLong(dateKey)}); }} title="Note for the day" style={{background:"none",border:"none",cursor:"pointer",padding:(getDayCount()>3?"0 2px":"0 9px 0 2px"),color:dayNoteText(dateKey)?(dayNoteKind(dateKey)==="personal"?TODAY_BLUE:"#c9a96e"):"#bbb",fontSize:"22px",lineHeight:1,flexShrink:0,WebkitTextStroke:"0.5px currentColor"}}>{"✎"}</button>
                 </div>
                 <div data-slotscroll="1" style={{flex:(slots.length+" 1 0px"),minHeight:0,paddingBottom:"0px",overflowX:"hidden",overscrollBehavior:"contain",display:"flex",flexDirection:"column"}}
                   onTouchMove={function(e){
@@ -4132,6 +4223,15 @@ export default function TheList() {
                   }}
                 >
                   {slots.map(function(slot,idx){
+                    // Shared slot (Model B): pair two same-time, both-named rows into one
+                    // shared row (the leader draws both; the follower is skipped). A 3+
+                    // pile-up at one time falls back to normal stacked rows so nobody hides.
+                    var __sameP = idx>0 && slots[idx-1].time===slot.time;
+                    var __sameN = idx<slots.length-1 && slots[idx+1].time===slot.time;
+                    var __isLeader = __sameN && !!slot.name && !!slots[idx+1].name && !__sameP && !(idx<slots.length-2 && slots[idx+2].time===slot.time);
+                    var __isFollower = __sameP && !!slot.name && !!slots[idx-1].name && !(idx>1 && slots[idx-2].time===slots[idx-1].time) && !__sameN;
+                    if (__isFollower) return null;
+                    if (__isLeader) return renderSharedPair(dateKey, slot, idx, slots[idx+1], idx+1);
                     var isEditing=editingCell&&editingCell.dateKey===dateKey&&editingCell.idx===idx;
                     var filled=!!slot.name; var wasRemoved=recentlyRemoved[dateKey+"-"+idx]&&!slot.name;
                     var isSwiped=swipedSlot===(dateKey+"-"+idx); var rowKey=dateKey+"-"+idx;
@@ -4262,7 +4362,7 @@ export default function TheList() {
                                     }
                                     return <button onClick={function(e){ e.stopPropagation(); setPhoneModal({name:slot.name,phone:""}); }} title={"Add a number for "+slot.name} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 1px 2px 4px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={20} color="#c6c6c6"/></button>;
                                   })()}
-                                  {!compactIcons&&filled&&<button onClick={function(e){ e.stopPropagation(); setNoteDraft(slot.note||""); setNoteModal({dateKey,idx,name:slot.name}); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 5px",color:slot.note?"#c9a96e":"#bbb",fontSize:"24px",fontWeight:"bold",lineHeight:1,WebkitTextStroke:"0.6px currentColor"}}>{"✎"}</button>}
+                                  {!compactIcons&&filled&&<button onClick={function(e){ e.stopPropagation(); setNoteDraft(slot.note||""); setNoteKind(slot.noteKind||null); setNoteModal({dateKey,idx,name:slot.name}); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 5px",color:slot.note?(slot.noteKind==="personal"?TODAY_BLUE:"#c9a96e"):"#bbb",fontSize:"24px",fontWeight:"bold",lineHeight:1,WebkitTextStroke:"0.6px currentColor"}}>{"✎"}</button>}
                                 </div>
                               )}
                               {isEditing&&editChromeReady&&<input value={editValues.price} onChange={function(e){ setEditValues(function(v){ return {...v,price:e.target.value}; }); }} onKeyDown={function(e){ if(e.key==="Tab"&&!e.shiftKey){ var nmT=stripLeadingNumbers(((editValuesRef.current&&editValuesRef.current.name)||"").trim()); if(nmT){ e.preventDefault(); commitPenciled(dateKey,idx); return; } } handleKeyDown(e,dateKey,idx); }} onBlur={handleBlur} data-rowkey={rowKey} placeholder="$" style={{width:view==="Week"?"26px":"52px",fontSize:isPhone?"16px":"13px",color:"#1a1a1a",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"4px",outline:"none",padding:view==="Week"?"2px 3px":"2px 5px",fontFamily:"Georgia,serif",WebkitAppearance:"none",appearance:"none"}}/>}
