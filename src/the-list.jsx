@@ -475,6 +475,12 @@ export default function TheList() {
   const [noteModal, setNoteModal] = useState(null);
   const [noteDraft, setNoteDraft] = useState("");
   const [dayNotes, setDayNotes] = useState(function() { return loadFromStorage("tl_daynotes", {}); });
+  // #13 accounting: per-day takings keyed by dateKey -> {cash,venmo,applepay,square,services,hours}.
+  // Rides the same Firebase sync as the other data fields (added as the LAST key in the
+  // seed / snapshot / push objects so the echo-guard JSON strings still line up).
+  const [accounting, setAccounting] = useState(function() { return loadFromStorage("tl_accounting", {}); });
+  const [acctModal, setAcctModal] = useState(null);
+  const [acctAdd, setAcctAdd] = useState({});
   const [groupScheduleModal, setGroupScheduleModal] = useState(null);
   const [entryUndoConflict, setEntryUndoConflict] = useState(null);
   const [selectMode, setSelectMode] = useState(false);
@@ -583,6 +589,8 @@ export default function TheList() {
   historyRef.current = history;
   const dayNotesRef = useRef(dayNotes);
   dayNotesRef.current = dayNotes;
+  const accountingRef = useRef(accounting);
+  accountingRef.current = accounting;
   const lastSyncRef = useRef(null);
   const saveTimer = useRef(null);
 
@@ -640,6 +648,7 @@ export default function TheList() {
   useEffect(function() { try { localStorage.setItem("tl_holidays", JSON.stringify(customHolidays)); } catch(e) {} }, [customHolidays]);
   useEffect(function() { try { localStorage.setItem("tl_history", JSON.stringify(history)); } catch(e) {} }, [history]);
   useEffect(function() { try { localStorage.setItem("tl_daynotes", JSON.stringify(dayNotes)); } catch(e) {} }, [dayNotes]);
+  useEffect(function() { try { localStorage.setItem("tl_accounting", JSON.stringify(accounting)); } catch(e) {} }, [accounting]);
 
   useEffect(function() {
     var unsub = onAuthStateChanged(fbAuth, function(u) {
@@ -659,17 +668,17 @@ export default function TheList() {
         if (first) {
           first = false;
           var seedSch = migrateSchedules(schedulesRef.current || {});
-          var seeded = {schedules:seedSch, clients:clientMemoryRef.current, holidays:customHolidaysRef.current, history:historyRef.current, dayNotes:dayNotesRef.current};
+          var seeded = {schedules:seedSch, clients:clientMemoryRef.current, holidays:customHolidaysRef.current, history:historyRef.current, dayNotes:dayNotesRef.current, accounting:accountingRef.current};
           lastSyncRef.current = JSON.stringify(seeded);
           recentWritesRef.current.push(lastSyncRef.current);
-          try { setDoc(userDoc, {schedules:seedSch, clients:seeded.clients, holidays:seeded.holidays, history:seeded.history, dayNotes:seeded.dayNotes, updatedAt:serverTimestamp()}, {merge:true}); } catch(e) {}
+          try { setDoc(userDoc, {schedules:seedSch, clients:seeded.clients, holidays:seeded.holidays, history:seeded.history, dayNotes:seeded.dayNotes, accounting:seeded.accounting, updatedAt:serverTimestamp()}, {merge:true}); } catch(e) {}
           setHydrated(true);
         }
         return;
       }
       var data = snap.data() || {};
       var migrated = migrateSchedules(data.schedules || {});
-      var applied = {schedules:migrated, clients:data.clients||[], holidays:data.holidays||[], history:data.history||[], dayNotes:data.dayNotes||{}};
+      var applied = {schedules:migrated, clients:data.clients||[], holidays:data.holidays||[], history:data.history||[], dayNotes:data.dayNotes||{}, accounting:data.accounting||{}};
       var json = JSON.stringify(applied);
       if (recentWritesRef.current.indexOf(json) >= 0) { lastSyncRef.current = json; return; }
       if (!first && json === lastSyncRef.current) return;
@@ -680,6 +689,7 @@ export default function TheList() {
       setCustomHolidays(applied.holidays);
       setHistory(applied.history);
       setDayNotes(applied.dayNotes);
+      setAccounting(applied.accounting);
       setHydrated(true);
     }, function(err) { setHydrated(true); });
     return function() { try { unsub(); } catch(e) {} };
@@ -687,7 +697,7 @@ export default function TheList() {
 
   useEffect(function() {
     if (!hydrated || !authUser) return;
-    var payload = {schedules:schedules, clients:clientMemory, holidays:customHolidays, history:history, dayNotes:dayNotes};
+    var payload = {schedules:schedules, clients:clientMemory, holidays:customHolidays, history:history, dayNotes:dayNotes, accounting:accounting};
     var json = JSON.stringify(payload);
     if (json === lastSyncRef.current) return;
     lastSyncRef.current = json;
@@ -696,9 +706,9 @@ export default function TheList() {
     if (saveTimer.current) clearTimeout(saveTimer.current);
     var uid = authUser.uid;
     saveTimer.current = setTimeout(function() {
-      try { setDoc(doc(fbDb, "users", uid), {schedules:payload.schedules, clients:payload.clients, holidays:payload.holidays, history:payload.history, dayNotes:payload.dayNotes, updatedAt:serverTimestamp()}, {merge:true}); } catch(e) {}
+      try { setDoc(doc(fbDb, "users", uid), {schedules:payload.schedules, clients:payload.clients, holidays:payload.holidays, history:payload.history, dayNotes:payload.dayNotes, accounting:payload.accounting, updatedAt:serverTimestamp()}, {merge:true}); } catch(e) {}
     }, 600);
-  }, [schedules, clientMemory, customHolidays, history, dayNotes, hydrated, authUser]);
+  }, [schedules, clientMemory, customHolidays, history, dayNotes, accounting, hydrated, authUser]);
 
   // Stop the whole page from bouncing/scrolling when there is nothing under the
   // list. iOS standalone PWAs ignore CSS overscroll-behavior, so the only thing
@@ -1974,6 +1984,34 @@ export default function TheList() {
     setClientProfile(function(prev){ return prev?{...prev,bookings:prev.bookings.filter(function(b){ return b.dateKey!==dateKey; })}:null; });
   };
 
+  // #13 accounting helpers. A day's record is {cash,venmo,applepay,square,services,hours},
+  // all plain numbers (default 0). Take-home auto-sums the four payment methods. Empty
+  // records are dropped from the map so month view only flags days with real data.
+  var acctNum = function(v){ var n=parseFloat(v); return isNaN(n)?0:n; };
+  var acctFor = function(dateKey){ var r=accounting[dateKey]; return r?r:{cash:0,venmo:0,applepay:0,square:0,services:0,hours:0}; };
+  var acctTakehome = function(r){ return acctNum(r.cash)+acctNum(r.venmo)+acctNum(r.applepay)+acctNum(r.square); };
+  var acctHasData = function(dateKey){ var r=accounting[dateKey]; if(!r) return false; return acctTakehome(r)>0||acctNum(r.services)>0||acctNum(r.hours)>0; };
+  var acctCommit = function(dateKey, rec){
+    setAccounting(function(prev){
+      var empty = !acctNum(rec.cash)&&!acctNum(rec.venmo)&&!acctNum(rec.applepay)&&!acctNum(rec.square)&&!acctNum(rec.services)&&!acctNum(rec.hours);
+      var out = {...prev};
+      if (empty) { delete out[dateKey]; } else { out[dateKey] = {cash:acctNum(rec.cash),venmo:acctNum(rec.venmo),applepay:acctNum(rec.applepay),square:acctNum(rec.square),services:acctNum(rec.services),hours:acctNum(rec.hours)}; }
+      return out;
+    });
+  };
+  var acctSetField = function(dateKey, field, value){ var r={...acctFor(dateKey)}; r[field]=acctNum(value); acctCommit(dateKey,r); };
+  var acctAddTo = function(dateKey, method, amount){ var amt=acctNum(amount); if(!amt) return; var r={...acctFor(dateKey)}; r[method]=acctNum(r[method])+amt; acctCommit(dateKey,r); };
+  // Sum take-home / services / hours across every day of a given month (Date object).
+  var acctMonthTotals = function(monthDate){
+    var y=monthDate.getFullYear(); var m=monthDate.getMonth();
+    var th=0, sv=0, hr=0;
+    Object.keys(accounting).forEach(function(dk){
+      var d=parseDateKey(dk); if(!d) return;
+      if(d.getFullYear()===y && d.getMonth()===m){ var r=accounting[dk]; th+=acctTakehome(r); sv+=acctNum(r.services); hr+=acctNum(r.hours); }
+    });
+    return {takehome:th, services:sv, hours:hr};
+  };
+
   const startLongPress = function(name) { longPressTimer.current=setTimeout(function(){ openClientProfile(name); },600); };
   const cancelLongPress = function() { if(longPressTimer.current){ clearTimeout(longPressTimer.current); longPressTimer.current=null; } };
 
@@ -3161,7 +3199,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v29</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v31</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -3473,6 +3511,21 @@ export default function TheList() {
               </div>
             </div>
             {clientProfile.recurWeeks && <div style={{fontSize:"12px",color:"#6a8aaa",marginBottom:"12px"}}>{"↺"} Every {clientProfile.recurWeeks===1?"week":(clientProfile.recurWeeks+" weeks")} · usual time {clientProfile.usualTime}</div>}
+            {clientProfile.recurWeeks && <button onClick={function(){
+              var nm=clientProfile.name;
+              var rb=clientProfile.bookings.find(function(b){ return b.recurWeeks&&!b.done; })||clientProfile.bookings.find(function(b){ return b.recurWeeks; });
+              if(!rb) return;
+              var dk=rb.dateKey; var ds=getSlots(dk);
+              var ix=ds.findIndex(function(s){ return s.name===nm&&s.recurWeeks; });
+              if(ix<0) ix=ds.findIndex(function(s){ return s.name===nm; });
+              if(ix<0) return;
+              var sl=ds[ix];
+              setClientProfile(null);
+              setTimeout(function(){
+                if(sl.groupId){ var aS=getSlots(dk); var gS=aS.map(function(s,i){ return {...s,i}; }).filter(function(s){ return s.groupId===sl.groupId&&s.name; }); if(gS.length>1){ setGroupRecurModal({dateKey:dk,idx:ix,slot:sl,groupSlots:gS,weeks:null}); return; } }
+                setRecurringModal({dateKey:dk,idx:ix,slot:sl});
+              },40);
+            }} style={{padding:"9px",background:"none",border:"1px solid #b8cce0",borderRadius:"8px",color:"#34657d",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",marginBottom:"14px"}}>{"↺"} Edit or cancel recurring</button>}
             <button onClick={function(){ jumpToDateForBooking(toDateKey(addWeeks(new Date(),2)), clientProfile); setClientProfile(null); }} style={{padding:"10px",background:"#c9a96e",border:"none",borderRadius:"8px",color:"#0f0f0f",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",marginBottom:"14px"}}>Book next appointment</button>
             <div style={{display:"flex",gap:"6px",alignItems:"center",marginBottom:"14px"}}>
               <input type="tel" inputMode="tel" autoComplete="off" value={clientProfile.phone||""} placeholder="Phone number"
@@ -3494,11 +3547,11 @@ export default function TheList() {
                   </div>
                   {!b.isPast&&!b.done&&(
                     <div style={{display:"flex",gap:"6px",marginLeft:"10px",flexShrink:0}}>
-                      <button onClick={function(){ setClientProfile(null); setReassignMode({client:{name:clientProfile.name,price:b.price,recurWeeks:b.recurWeeks},currentDateKey:b.dateKey,remainingConflicts:[]}); jumpToDate(b.dateKey); }}
+                      <button onClick={function(){ var dk=b.dateKey; setClientProfile(null); jumpToDate(dk); }}
                         style={{background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",padding:"5px 10px",fontFamily:"inherit",fontSize:"11px"}}
                         onMouseEnter={function(e){ e.currentTarget.style.borderColor="#1a1a1a";e.currentTarget.style.color="#1a1a1a"; }}
                         onMouseLeave={function(e){ e.currentTarget.style.borderColor="#d8d8d6";e.currentTarget.style.color="#888"; }}
-                      >Edit</button>
+                      >Jump to day</button>
                       <button onClick={function(){ removeClientBooking(b.dateKey,clientProfile.name); }}
                         style={{background:"none",border:"1px solid #e8e8e6",borderRadius:"6px",color:"#ccc",cursor:"pointer",padding:"5px 10px",fontFamily:"inherit",fontSize:"11px"}}
                         onMouseEnter={function(e){ e.currentTarget.style.borderColor="#c0392b";e.currentTarget.style.color="#c0392b"; }}
@@ -3539,7 +3592,7 @@ export default function TheList() {
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#4a8a5a",marginBottom:"4px"}}>Done</div>
             <div onClick={function(){ var nm=checkoffModal.slot.name; setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null);setCheckoffRecur(null);setRecurPickerOpen(false); openClientProfile(nm); }} title="View profile" style={{fontSize:"22px",marginBottom:"2px",paddingRight:"32px",cursor:"pointer",textDecoration:"underline",textDecorationColor:"#dcd2bd",textUnderlineOffset:"3px"}}>{checkoffModal.slot.name}</div>
             <div style={{fontSize:"12px",color:"#999",marginBottom:"18px"}}>{checkoffModal.slot.time} · {friendlyDate(checkoffModal.dateKey)}</div>
-            {checkoffModal.alreadyBookedKey&&(
+            {checkoffModal.alreadyBookedKey&&checkoffModal.notRecurring&&(
               <div style={{background:"#eef3f9",border:"1px solid #b8cce0",borderRadius:"8px",padding:"10px 14px",marginBottom:"16px",fontSize:"13px",color:"#34434c",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px"}}>
                 <span>Already booked for {friendlyDateLong(checkoffModal.alreadyBookedKey)}</span>
                 <button onClick={function(){ var k=checkoffModal.alreadyBookedKey; setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null); jumpToDate(k); }} style={{flexShrink:0,background:"#34434c",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",padding:"5px 11px",fontFamily:"inherit",fontSize:"12px"}}>Go there</button>
@@ -3580,13 +3633,21 @@ export default function TheList() {
             ) : (
               <div>
                 <div style={{fontSize:"12px",color:"#999",marginBottom:"16px"}}>Every {checkoffModal.slot.recurWeeks===1?"week":(checkoffModal.slot.recurWeeks+" weeks")} · {placementTime(checkoffModal.slot)} · {DAYS[dayOfWeek(checkoffModal.dateKey)]}s</div>
-                {effectiveNextDate&&!nudgeConflict&&alreadyBookedNextDate&&<div style={{background:"#eef3f9",border:"1px solid #b8cce0",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#34434c"}}>{"✓"} Already booked — {friendlyDateTime(bookedTimeOnNextDate,effectiveNextDate)}</div>}
-                {effectiveNextDate&&!nudgeConflict&&!alreadyBookedNextDate&&<div style={{background:"#f0fff0",border:"1px solid #a0d0a0",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#2a7a2a"}}>{"✓"} {friendlyDateTime(placementTime(checkoffModal.slot),effectiveNextDate)} is open</div>}
-                {effectiveNextDate&&nudgeConflict&&<div style={{background:"#fff0ee",border:"1px solid #e0b0a8",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#1a1a1a"}}>{"⚠"} That slot is already taken on {friendlyDateTime(placementTime(checkoffModal.slot),effectiveNextDate)}</div>}
+                {effectiveNextDate&&!nudgeConflict&&alreadyBookedNextDate&&<div onClick={function(){ var k=effectiveNextDate; setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null);setCheckoffRecur(null);setRecurPickerOpen(false); jumpToDate(k); }} style={{background:"#eef3f9",border:"1px solid #b8cce0",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#34434c",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px"}}><span>{"✓"} Already booked — {friendlyDateTime(bookedTimeOnNextDate,effectiveNextDate)}</span><span style={{fontSize:"12px",color:"#5a7590",flexShrink:0}}>{"Tap to go ›"}</span></div>}
+                {effectiveNextDate&&!nudgeConflict&&!alreadyBookedNextDate&&<div onClick={function(){ confirmNextBooking(effectiveNextDate); }} style={{background:"#f0fff0",border:"1px solid #a0d0a0",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#2a7a2a",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px"}}><span>{friendlyDateTime(placementTime(checkoffModal.slot),effectiveNextDate)} is open</span><span style={{fontSize:"12px",color:"#2a7a2a",flexShrink:0}}>{"Tap to book ›"}</span></div>}
+                {effectiveNextDate&&nudgeConflict&&<div onClick={function(){ var k=effectiveNextDate; setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null);setCheckoffRecur(null);setRecurPickerOpen(false); jumpToDate(k); }} style={{background:"#fff0ee",border:"1px solid #e0b0a8",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#1a1a1a",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px"}}><span>{"⚠"} That slot is taken on {friendlyDateTime(placementTime(checkoffModal.slot),effectiveNextDate)}</span><span style={{fontSize:"12px",color:"#8a4a3a",flexShrink:0}}>{"Tap to view ›"}</span></div>}
                 {nudgedDate&&nudgedDate!==checkoffModal.nextDateKey&&<div style={{fontSize:"11px",color:"#a07830",marginBottom:"10px"}}>Nudged — resumes every {checkoffModal.slot.recurWeeks===1?"week":(checkoffModal.slot.recurWeeks+" weeks")} after this</div>}
-                <div style={{display:"flex",gap:"8px",marginBottom:"20px"}}>
-                  <button onClick={function(){ confirmNextBooking(effectiveNextDate); }} style={{flex:1,padding:"12px",background:nudgeConflict?"#5a2a1a":"#c9a96e",border:"none",borderRadius:"8px",color:nudgeConflict?"#e8b84b":"#0f0f0f",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>{nudgeConflict?"Book anyway":("Book "+friendlyDateTime(placementTime(checkoffModal.slot),effectiveNextDate))}</button>
-                  <button onClick={function(){ jumpToDate(effectiveNextDate); }} style={{padding:"12px 18px",background:"#efefed",border:"1px solid #d8d8d6",borderRadius:"8px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>Jump</button>
+                <div style={{fontSize:"11px",letterSpacing:"0.1em",textTransform:"uppercase",color:"#aaa",marginBottom:"8px"}}>Recurs every — change</div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:"6px",marginBottom:"20px"}}>
+                  {WEEK_OPTIONS.map(function(w){ var cur=checkoffModal.slot.recurWeeks===w; return <button key={w} onClick={function(){
+                    if(cur) return;
+                    var dk=checkoffModal.dateKey; var ix=checkoffModal.idx; var sl=checkoffModal.slot;
+                    setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null);setCheckoffRecur(null);setRecurPickerOpen(false);
+                    setTimeout(function(){
+                      if(sl.groupId){ var aS=getSlots(dk); var gS=aS.map(function(s,i){ return {...s,i}; }).filter(function(s){ return s.groupId===sl.groupId&&s.name; }); if(gS.length>1){ setGroupRecurModal({dateKey:dk,idx:ix,slot:sl,groupSlots:gS,weeks:null}); return; } }
+                      setRecurring(dk,ix,w);
+                    },40);
+                  }} style={{padding:"7px 12px",borderRadius:"6px",border:"1px solid",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",background:cur?"#1a1a1a":"#f4f4f2",borderColor:cur?"#1a1a1a":"#d8d8d6",color:cur?"#fff":"#666"}}>{w===1?"Weekly":(w+"w")}</button>; })}
                 </div>
                 <div style={{fontSize:"11px",letterSpacing:"0.1em",textTransform:"uppercase",color:"#aaa",marginBottom:"12px"}}>Change date</div>
                 {renderCheckoffCalendar()}
@@ -3640,6 +3701,52 @@ export default function TheList() {
           </div>
         </div>
       )}
+
+      {acctModal && (function(){
+        var dk=acctModal.dateKey;
+        var rec=acctFor(dk);
+        var th=acctTakehome(rec);
+        var methods=[["cash","Cash"],["venmo","Venmo"],["applepay","Apple Pay"],["square","Square"]];
+        var addInp={width:"68px",padding:"7px 8px",border:"1px solid #cfe0cf",borderRadius:"8px",fontFamily:"Georgia,serif",fontSize:"14px",color:"#2a6a2a",background:"#f6fbf6",textAlign:"right",WebkitAppearance:"none",appearance:"none"};
+        var miniBtn={width:"30px",padding:"7px 0",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"15px",lineHeight:1,flexShrink:0};
+        var countInp={width:"100%",boxSizing:"border-box",padding:"8px 10px",border:"1px solid #d8d8d6",borderRadius:"8px",fontFamily:"Georgia,serif",fontSize:"15px",color:"#1a1a1a",background:"#fcfcfb",WebkitAppearance:"none",appearance:"none"};
+        var clearAdd=function(key){ setAcctAdd(function(p){ var n={...p}; n[key]=""; return n; }); };
+        return (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px"}} onClick={function(){ setAcctModal(null); setAcctAdd({}); }}>
+          <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"14px",padding:"22px 24px 20px",width:"min(440px,94vw)",maxHeight:"88vh",overflowY:"auto",boxSizing:"border-box"}} onClick={function(e){ e.stopPropagation(); }}>
+            <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#2a6a2a",marginBottom:"4px"}}>Accounting</div>
+            <div style={{fontSize:"18px",color:"#1a1a1a",marginBottom:"16px"}}>{friendlyDateLong(dk)}</div>
+            {methods.map(function(m){
+              var key=m[0]; var label=m[1];
+              return (
+                <div key={key} style={{display:"flex",alignItems:"center",gap:"7px",marginBottom:"10px"}}>
+                  <div style={{width:"74px",flexShrink:0,fontSize:"14px",color:"#1a1a1a"}}>{label}</div>
+                  <div style={{flex:1,minWidth:0,fontSize:"17px",color:rec[key]?"#1a1a1a":"#bbb"}}>{"$"+(rec[key]||0)}</div>
+                  <input type="text" inputMode="decimal" value={acctAdd[key]!==undefined?acctAdd[key]:""} onChange={function(e){ var v=e.target.value; setAcctAdd(function(p){ var n={...p}; n[key]=v; return n; }); }} onKeyDown={function(e){ if(e.key==="Enter"){ e.preventDefault(); acctAddTo(dk,key,acctAdd[key]); clearAdd(key); } }} placeholder="amt" style={addInp}/>
+                  <button onClick={function(){ acctAddTo(dk,key,acctAdd[key]); clearAdd(key); }} title="Add" style={{...miniBtn,background:"#2a6a2a"}}>{"+"}</button>
+                  <button onClick={function(){ acctAddTo(dk,key,-acctNum(acctAdd[key])); clearAdd(key); }} title="Subtract" style={{...miniBtn,background:"#b08a78"}}>{"\u2212"}</button>
+                </div>
+              );
+            })}
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"12px 0",marginTop:"6px",marginBottom:"14px",borderTop:"1px solid #ececea",borderBottom:"1px solid #ececea"}}>
+              <span style={{fontSize:"13px",letterSpacing:"0.08em",textTransform:"uppercase",color:"#888"}}>Take-home</span>
+              <span style={{fontSize:"23px",color:"#2a6a2a"}}>{"$"+th}</span>
+            </div>
+            <div style={{display:"flex",gap:"12px",marginBottom:"18px"}}>
+              <div style={{flex:1}}>
+                <div style={{fontSize:"11px",letterSpacing:"0.06em",textTransform:"uppercase",color:"#aaa",marginBottom:"6px"}}>{"# Services"}</div>
+                <input type="text" inputMode="numeric" value={acctAdd.services!==undefined?acctAdd.services:(rec.services?String(rec.services):"")} onChange={function(e){ var v=e.target.value; setAcctAdd(function(p){ var n={...p}; n.services=v; return n; }); }} onBlur={function(){ acctSetField(dk,"services",acctAdd.services!==undefined?acctAdd.services:rec.services); }} placeholder="0" style={countInp}/>
+              </div>
+              <div style={{flex:1}}>
+                <div style={{fontSize:"11px",letterSpacing:"0.06em",textTransform:"uppercase",color:"#aaa",marginBottom:"6px"}}>{"# Hours"}</div>
+                <input type="text" inputMode="decimal" value={acctAdd.hours!==undefined?acctAdd.hours:(rec.hours?String(rec.hours):"")} onChange={function(e){ var v=e.target.value; setAcctAdd(function(p){ var n={...p}; n.hours=v; return n; }); }} onBlur={function(){ acctSetField(dk,"hours",acctAdd.hours!==undefined?acctAdd.hours:rec.hours); }} placeholder="0" style={countInp}/>
+              </div>
+            </div>
+            <button onClick={function(){ setAcctModal(null); setAcctAdd({}); }} style={{display:"block",width:"100%",padding:"11px",background:"#1a1a1a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Done</button>
+          </div>
+        </div>
+        );
+      })()}
 
       {noteModal && (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px"}} onClick={function(){ setNoteModal(null); }}>
@@ -3867,8 +3974,17 @@ export default function TheList() {
 
       {view==="Month"&&(function(){
         var monthDays=getMonthDays();
+        var mTot=acctMonthTotals(baseDate);
         return (
           <div style={{width:"100vw",position:"relative",left:"50%",right:"50%",marginLeft:"-50vw",marginRight:"-50vw",boxSizing:"border-box",textAlign:"left",flex:"1 1 auto",display:"flex",flexDirection:"column",minHeight:0}}>
+            {(mTot.takehome>0||mTot.services>0||mTot.hours>0)&&(
+              <div style={{display:"flex",justifyContent:"center",alignItems:"baseline",flexWrap:"wrap",gap:isPhone?"12px":"22px",padding:isPhone?"5px 8px":"7px 12px",background:"#f4faf4",borderBottom:"1px solid #dcebdc",flexShrink:0,fontFamily:"Georgia,serif"}}>
+                <span style={{fontSize:"10px",letterSpacing:"0.12em",textTransform:"uppercase",color:"#7aa07a"}}>Month</span>
+                <span style={{fontSize:isPhone?"14px":"16px",color:"#2a6a2a",fontWeight:"600"}}>{"$"+mTot.takehome}</span>
+                <span style={{fontSize:isPhone?"11px":"13px",color:"#888"}}>{mTot.services+" services"}</span>
+                <span style={{fontSize:isPhone?"11px":"13px",color:"#888"}}>{mTot.hours+" hours"}</span>
+              </div>
+            )}
             <div style={{display:"grid",gridTemplateColumns:"repeat(7,minmax(0,1fr))",background:"#e8e8e6",gap:"1px",borderBottom:"1px solid #e8e8e6",flexShrink:0}}>
               {(isPhone?["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]:["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]).map(function(d){ return <div key={d} style={{padding:"8px 0",textAlign:"center",fontSize:isPhone?"9px":"10px",letterSpacing:"0.1em",textTransform:"uppercase",color:"#aaa",background:"#fafaf8",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d}</div>; })}
             </div>
@@ -3900,6 +4016,12 @@ export default function TheList() {
                         {range&&<div style={{fontSize:"11px",color:"#777",fontWeight:"500"}}>{range}</div>}
                       </div>
                     )}
+                    {acctHasData(dk)&&(function(){ var r=acctFor(dk); var sv=acctNum(r.services); var hr=acctNum(r.hours); return (
+                      <div style={{marginTop:"3px",fontSize:isPhone?"9px":"11px",lineHeight:1.25,color:outside?"#8aa88a":"#2a6a2a"}}>
+                        <div style={{fontWeight:"600"}}>{"$"+acctTakehome(r)}</div>
+                        {(sv>0||hr>0)&&<div style={{color:outside?"#b3b3b1":"#888"}}>{(sv>0?(sv+" svc"):"")+((sv>0&&hr>0)?" · ":"")+(hr>0?(hr+"h"):"")}</div>}
+                      </div>
+                    ); })()}
                   </div>
                 );
               })}
@@ -3943,6 +4065,7 @@ export default function TheList() {
                       </div>
                     );
                   })()}
+                  <button onClick={function(e){ e.stopPropagation(); setAcctAdd({}); setAcctModal({dateKey:dateKey}); }} title="Accounting for the day" style={{background:"none",border:"none",cursor:"pointer",padding:(getDayCount()>3?"0 2px":"0 4px 0 2px"),color:acctHasData(dateKey)?"#2a6a2a":"#bbb",fontSize:"19px",fontWeight:"bold",lineHeight:1,flexShrink:0,fontFamily:"Georgia,serif"}}>{"$"}</button>
                   <button onClick={function(e){ e.stopPropagation(); setNoteDraft(dayNotes[dateKey]||""); setNoteModal({dayKey:dateKey,isDay:true,name:friendlyDateLong(dateKey)}); }} title="Note for the day" style={{background:"none",border:"none",cursor:"pointer",padding:(getDayCount()>3?"0 2px":"0 9px 0 2px"),color:dayNotes[dateKey]?"#c9a96e":"#bbb",fontSize:"22px",lineHeight:1,flexShrink:0,WebkitTextStroke:"0.5px currentColor"}}>{"✎"}</button>
                 </div>
                 <div data-slotscroll="1" style={{flex:(slots.length+" 1 0px"),minHeight:0,paddingBottom:"0px",overflowX:"hidden",overscrollBehavior:"contain",display:"flex",flexDirection:"column"}}
@@ -4077,8 +4200,8 @@ export default function TheList() {
                                   {!compactIcons&&filled&&slot.price&&<span style={{fontSize:"12px",color:slot.done?"#3a5a3a":"#a07830"}}>{slot.price}</span>}
                                   {!compactIcons&&filled&&(slot.recurWeeks?(
                                     <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:"2px",width:"50px",flexShrink:0}}>
-                                      <span onClick={function(e){ e.stopPropagation(); openClientProfile(slot.name); }} style={{fontSize:"12px",fontWeight:"500",color:"#4a8a9a",cursor:"pointer",lineHeight:1,letterSpacing:"0.01em"}}>{(slot.recurWeeks===1?"1w":(slot.recurWeeks+"w"))+(slot.isException?"*":"")}</span>
-                                      <button onClick={function(e){ e.stopPropagation(); if(slot.groupId){var aS=getSlots(dateKey);var gS=aS.map(function(s,i){ return {...s,i}; }).filter(function(s){ return s.groupId===slot.groupId&&s.name; });if(gS.length>1){setGroupRecurModal({dateKey,idx,slot,groupSlots:gS,weeks:null});return;}} setRecurringModal({dateKey,idx,slot}); }} title="Recurring — tap to manage" style={{background:"none",border:"none",cursor:"pointer",padding:"0 1px",color:"#4a8a9a",fontSize:"16px",fontWeight:"500",lineHeight:1}}>{"↺"}</button>
+                                      <span onClick={function(e){ e.stopPropagation(); if(slot.done){ handleDoneRowTap(dateKey,idx); } else { openClientProfile(slot.name); } }} style={{fontSize:"12px",fontWeight:"500",color:"#4a8a9a",cursor:"pointer",lineHeight:1,letterSpacing:"0.01em"}}>{(slot.recurWeeks===1?"1w":(slot.recurWeeks+"w"))+(slot.isException?"*":"")}</span>
+                                      <button onClick={function(e){ e.stopPropagation(); if(slot.done){ handleDoneRowTap(dateKey,idx); return; } if(slot.groupId){var aS=getSlots(dateKey);var gS=aS.map(function(s,i){ return {...s,i}; }).filter(function(s){ return s.groupId===slot.groupId&&s.name; });if(gS.length>1){setGroupRecurModal({dateKey,idx,slot,groupSlots:gS,weeks:null});return;}} setRecurringModal({dateKey,idx,slot}); }} title={slot.done?"Schedule next":"Recurring — tap to manage"} style={{background:"none",border:"none",cursor:"pointer",padding:"0 1px",color:"#4a8a9a",fontSize:"16px",fontWeight:"500",lineHeight:1}}>{"↺"}</button>
                                     </div>
                                   ):<div style={{width:"50px",flexShrink:0}}/>)}
                                   {!compactIcons&&filled&&(function(){
