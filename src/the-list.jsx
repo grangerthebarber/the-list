@@ -1755,14 +1755,21 @@ export default function TheList() {
       var dgid = times.length>1 ? newGroupId() : null;
       times.forEach(function(t){
         var nm = t.name || slot.name;
-        var si = daySlots.findIndex(function(s){ return s.time===t.time; });
-        if (si>=0) {
-          var taken = daySlots[si].name && daySlots[si].name.toLowerCase()!==nm.toLowerCase();
-          if (!taken && (allowOverwriteSame || !daySlots[si].name)) {
-            daySlots[si] = {...daySlots[si],name:nm,price:t.price,recurWeeks:t.recurWeeks,done:false,groupId:dgid};
+        // Model B: a time may hold more than one person. Look for a row at this time
+        // already under THIS name (extend it), else an EMPTY row at this time (fill it),
+        // else add a NEW row alongside whoever's there — SHARE instead of skipping.
+        var myIdx = daySlots.findIndex(function(s){ return s.time===t.time && s.name && s.name.toLowerCase()===nm.toLowerCase(); });
+        if (myIdx>=0) {
+          if (allowOverwriteSame) {
+            daySlots[myIdx] = {...daySlots[myIdx],name:nm,price:t.price,recurWeeks:t.recurWeeks,done:false,groupId:dgid};
           }
         } else {
-          daySlots.push({time:t.time,name:nm,price:t.price,recurWeeks:t.recurWeeks,done:false,groupId:dgid});
+          var emptyIdx = daySlots.findIndex(function(s){ return s.time===t.time && !s.name; });
+          if (emptyIdx>=0) {
+            daySlots[emptyIdx] = {...daySlots[emptyIdx],name:nm,price:t.price,recurWeeks:t.recurWeeks,done:false,groupId:dgid};
+          } else {
+            daySlots.push({time:t.time,name:nm,price:t.price,recurWeeks:t.recurWeeks,done:false,groupId:dgid});
+          }
         }
       });
       daySlots.sort(function(a,b){ return parseTime(a.time)-parseTime(b.time); });
@@ -1806,14 +1813,21 @@ export default function TheList() {
       var dgid = times.length>1 ? newGroupId() : null;
       times.forEach(function(t){
         var nm = t.name || slot.name;
-        var si = daySlots.findIndex(function(s){ return s.time===t.time; });
-        if (si>=0) {
-          var taken = daySlots[si].name && daySlots[si].name.toLowerCase()!==nm.toLowerCase();
-          if (!taken && (allowOverwriteSame || !daySlots[si].name)) {
-            daySlots[si] = {...daySlots[si],name:nm,price:t.price,recurWeeks:t.recurWeeks,done:false,groupId:dgid};
+        // Model B: a time may hold more than one person. Look for a row at this time
+        // already under THIS name (extend it), else an EMPTY row at this time (fill it),
+        // else add a NEW row alongside whoever's there — SHARE instead of skipping.
+        var myIdx = daySlots.findIndex(function(s){ return s.time===t.time && s.name && s.name.toLowerCase()===nm.toLowerCase(); });
+        if (myIdx>=0) {
+          if (allowOverwriteSame) {
+            daySlots[myIdx] = {...daySlots[myIdx],name:nm,price:t.price,recurWeeks:t.recurWeeks,done:false,groupId:dgid};
           }
         } else {
-          daySlots.push({time:t.time,name:nm,price:t.price,recurWeeks:t.recurWeeks,done:false,groupId:dgid});
+          var emptyIdx = daySlots.findIndex(function(s){ return s.time===t.time && !s.name; });
+          if (emptyIdx>=0) {
+            daySlots[emptyIdx] = {...daySlots[emptyIdx],name:nm,price:t.price,recurWeeks:t.recurWeeks,done:false,groupId:dgid};
+          } else {
+            daySlots.push({time:t.time,name:nm,price:t.price,recurWeeks:t.recurWeeks,done:false,groupId:dgid});
+          }
         }
       });
       daySlots.sort(function(a,b){ return parseTime(a.time)-parseTime(b.time); });
@@ -1913,14 +1927,21 @@ export default function TheList() {
       var dgid = times.length>1 ? newGroupId() : null;
       times.forEach(function(t){
         var nm = t.name || client.name;
-        var si = daySlots.findIndex(function(s){ return s.time===t.time; });
-        if (si>=0) {
-          var taken = daySlots[si].name && daySlots[si].name.toLowerCase()!==nm.toLowerCase();
-          if (!taken && (allowOverwriteSame || !daySlots[si].name)) {
-            daySlots[si] = {...daySlots[si],name:nm,price:t.price,recurWeeks:t.recurWeeks,isException:false,done:false,groupId:dgid};
+        // Model B: a time may hold more than one person. Look for a row at this time
+        // already under THIS name (extend it), else an EMPTY row at this time (fill it),
+        // else add a NEW row alongside whoever's there — SHARE instead of skipping.
+        var myIdx = daySlots.findIndex(function(s){ return s.time===t.time && s.name && s.name.toLowerCase()===nm.toLowerCase(); });
+        if (myIdx>=0) {
+          if (allowOverwriteSame) {
+            daySlots[myIdx] = {...daySlots[myIdx],name:nm,price:t.price,recurWeeks:t.recurWeeks,isException:false,done:false,groupId:dgid};
           }
         } else {
-          daySlots.push({time:t.time,name:nm,price:t.price,recurWeeks:t.recurWeeks,isException:false,done:false,groupId:dgid});
+          var emptyIdx = daySlots.findIndex(function(s){ return s.time===t.time && !s.name; });
+          if (emptyIdx>=0) {
+            daySlots[emptyIdx] = {...daySlots[emptyIdx],name:nm,price:t.price,recurWeeks:t.recurWeeks,isException:false,done:false,groupId:dgid};
+          } else {
+            daySlots.push({time:t.time,name:nm,price:t.price,recurWeeks:t.recurWeeks,isException:false,done:false,groupId:dgid});
+          }
         }
       });
       daySlots.sort(function(a,b){ return parseTime(a.time)-parseTime(b.time); });
@@ -3222,7 +3243,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v32</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v33</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
