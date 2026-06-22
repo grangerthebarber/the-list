@@ -28,16 +28,18 @@ const DEFAULT_TIMES = [
   "7:13","7:36","7:58",
   "8:21","8:43","9:06","9:28","9:51","10:13","10:36","10:58",
   "11:21","11:43","12:06","12:28","12:51",
-  "1:13","1:36","1:58","2:21","2:43"
+  "1:13","1:36","1:58","2:21","2:43","3:06"
 ];
 
-// #15: 3:06 / 3:28 / 3:51 were retired from the auto-populated grid so the
-// remaining rows get more height (no scrolling). They stay in ALL_TIMES, so the
-// user can still hand-add one as a custom +PM slot. Existing saved days that
-// still carry these as EMPTY default placeholders are trimmed on load (named,
-// blocked, custom, marked, or noted slots at these times are always preserved —
-// we never silently delete a booked appointment).
-const REMOVED_TAIL_TIMES = ["3:06","3:28","3:51"];
+// #15: 3:06 is BACK as a permanent default slot (Granger's decision) and ends the
+// default day. Only 3:28 / 3:51 remain retired from the auto-populated grid so the
+// rows keep their height (no scrolling). 3:28 / 3:51 stay in ALL_TIMES, so the user
+// can still hand-add one as a custom +PM slot. Existing saved days that still carry
+// 3:28 / 3:51 as EMPTY default placeholders are trimmed on load (named, blocked,
+// custom, marked, or noted slots at these times are always preserved — we never
+// silently delete a booked appointment). 3:06 is intentionally NOT in this list:
+// every saved day is guaranteed a 3:06 by ensure306() in migrateSchedules.
+const REMOVED_TAIL_TIMES = ["3:28","3:51"];
 function trimRemovedTail(slots) {
   if (!slots || !slots.length) return slots;
   var out = [];
@@ -219,6 +221,24 @@ function topUpAfternoonTail(slots) {
   return out;
 }
 
+// #15: 3:06 PM is now a permanent default slot, and Granger wants it on EVERY saved
+// day — past, completed, and future. Guarantee exactly one 3:06 per day without
+// disturbing anything else. Idempotent: if the day already carries a 3:06 (default,
+// hand-added custom, or a booked appointment), it is left completely alone — no
+// duplicate. Otherwise an EMPTY / not-done / not-recurring 3:06 is inserted in
+// chronological order (timeToAbsMinutes puts 3:06 after 2:43 and before any 3:28).
+// A truly empty day ([]) is left empty, matching extendDefaultTail/topUpAfternoonTail.
+function ensure306(slots) {
+  if (!slots || !slots.length) return slots;
+  for (var i = 0; i < slots.length; i++) {
+    if (slots[i].time === "3:06") return slots;
+  }
+  var out = slots.slice();
+  out.push({time:"3:06",name:"",price:"",done:false,recurWeeks:null,isCustom:false});
+  out.sort(function(a,b){ return timeToAbsMinutes(a.time)-timeToAbsMinutes(b.time); });
+  return out;
+}
+
 function migrateSchedules(raw) {
   var result = {};
   var keys = Object.keys(raw);
@@ -229,6 +249,9 @@ function migrateSchedules(raw) {
     } else {
       result[dk] = trimRemovedTail(topUpAfternoonTail(extendDefaultTail(raw[dk])));
     }
+    // #15: applied to BOTH branches so the reset day and the topped-up day both
+    // end up with 3:06; the idempotent guard means it is never added twice.
+    result[dk] = ensure306(result[dk]);
   }
   return result;
 }
@@ -3199,7 +3222,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v31</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v32</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -3754,6 +3777,13 @@ export default function TheList() {
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#a07830",marginBottom:"8px"}}>{noteModal.isDay?"Day Note":"Note"}</div>
             <div style={{fontSize:"16px",color:"#1a1a1a",marginBottom:"14px"}}>{noteModal.name}</div>
             <textarea autoFocus value={noteDraft} onChange={function(e){ setNoteDraft(e.target.value); }} onKeyDown={function(e){ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); var nm=noteModal; if(nm.isDay){ var t=noteDraft.trim(); setDayNotes(function(prev){ var n={...prev}; if(t) n[nm.dayKey]=t; else delete n[nm.dayKey]; return n; }); } else { var slots=[...getSlots(nm.dateKey)]; var s=slots[nm.idx]; slots[nm.idx]={...s,note:noteDraft.trim()}; setSlots(nm.dateKey,slots); } setNoteModal(null); setNoteDraft(""); } }} placeholder={noteModal.isDay?"Write a note to yourself for this day...":"Add a note for this appointment..."} style={{width:"100%",boxSizing:"border-box",minHeight:"96px",resize:"vertical",background:"#efefed",border:"1px solid #d8d8d6",borderRadius:"6px",padding:"10px",fontSize:"14px",fontFamily:"Georgia,serif",color:"#1a1a1a",outline:"none",marginBottom:"14px"}}/>
+            {noteModal.isDay && (
+              <div style={{display:"flex",alignItems:"center",gap:"8px",marginBottom:"14px"}}>
+                <span style={{fontSize:"11px",letterSpacing:"0.08em",textTransform:"uppercase",color:"#999",flexShrink:0}}>Add slot</span>
+                <button onClick={function(){ addSlotToBeginning(noteModal.dayKey); }} style={{flex:1,padding:"7px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ AM</button>
+                <button onClick={function(){ addSlotToEnd(noteModal.dayKey); }} style={{flex:1,padding:"7px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ PM</button>
+              </div>
+            )}
             <div style={{display:"flex",gap:"8px"}}>
               <button onClick={function(){
                 var nm=noteModal;
@@ -4241,10 +4271,6 @@ export default function TheList() {
                       </div>
                     );
                   })}
-                </div>
-                <div data-footer="1" style={{display:"flex",gap:"6px",padding:isPhone?"2px 10px 2px":"2px 12px 2px",paddingBottom:"2px",flexShrink:0}}>
-                  <button onClick={function(){ addSlotToBeginning(dateKey); }} style={{flex:1,padding:isPhone?"5px":"5px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ AM</button>
-                  <button onClick={function(){ addSlotToEnd(dateKey); }} style={{flex:1,padding:isPhone?"5px":"5px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.08em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#e8e8e6"; }} onMouseLeave={function(e){ e.currentTarget.style.background="#f4f4f2"; }}>+ PM</button>
                 </div>
               </div>
             );
