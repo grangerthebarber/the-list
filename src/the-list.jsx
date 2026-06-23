@@ -487,6 +487,8 @@ export default function TheList() {
   const [blockLabelModal, setBlockLabelModal] = useState(null);
   const [blockLabel, setBlockLabel] = useState("Lunch");
   const [clientProfile, setClientProfile] = useState(null);
+  const [renamingProfile, setRenamingProfile] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
   const [phoneModal, setPhoneModal] = useState(null);
   const [checkoffCalMonth, setCheckoffCalMonth] = useState(null);
   const [editingOccupied, setEditingOccupied] = useState(false);
@@ -2071,6 +2073,7 @@ export default function TheList() {
     var usualTime = nonEx.length>0?nonEx[0].time:(bookings[0]&&bookings[0].time)||"";
     var recurFound = bookings.find(function(b){ return b.recurWeeks; });
     var recurWeeks = recurFound ? recurFound.recurWeeks : null;
+    setRenamingProfile(false); setRenameValue("");
     setClientProfile({name,recurWeeks,usualTime,bookings,phone:getClientPhone(name)});
   };
 
@@ -2089,6 +2092,51 @@ export default function TheList() {
       if (i>=0) { var u=[...mem]; u[i]={...u[i],phone:phone}; return u; }
       return [...mem,{name:name,price:"",phone:phone}];
     });
+  };
+
+  // Rename a client EVERYWHERE in one deliberate move, from inside their profile.
+  // This only swaps the name STRING on slots that already exist — it never touches
+  // the recurring engine, so every recurring date, phone number, and price stays put.
+  // Identity here is the (lower-cased) name, so we match case-insensitively. If the
+  // new name already belongs to another saved client, we fold the two together rather
+  // than leave a duplicate. Not added to the undo stack on purpose: undo only restores
+  // schedules, and a half-restore (slots reverted but the saved-client list not) would
+  // be worse than no undo. A rename is a deliberate, explicit action.
+  const renameClient = function(oldName, newName) {
+    var nn = (newName||"").trim();
+    if (!nn || !oldName) return;
+    if (nn === oldName) return;
+    var oldLower = oldName.toLowerCase();
+    var newLower = nn.toLowerCase();
+    setSchedules(function(prev){
+      var next = {};
+      Object.keys(prev).forEach(function(dk){
+        next[dk] = prev[dk].map(function(s){
+          if (s.name && s.name.toLowerCase()===oldLower) { return {...s, name:nn}; }
+          return s;
+        });
+      });
+      return next;
+    });
+    setClientMemory(function(mem){
+      var oldIdx = mem.findIndex(function(c){ return c.name && c.name.toLowerCase()===oldLower; });
+      if (oldIdx<0) return mem;
+      var newIdx = mem.findIndex(function(c){ return c.name && c.name.toLowerCase()===newLower; });
+      var u = mem.slice();
+      if (newIdx>=0 && newIdx!==oldIdx) {
+        var merged = {...u[newIdx]};
+        if (!merged.phone && u[oldIdx].phone) merged.phone = u[oldIdx].phone;
+        if (!merged.price && u[oldIdx].price) merged.price = u[oldIdx].price;
+        merged.name = nn;
+        u[newIdx] = merged;
+        u.splice(oldIdx,1);
+        return u;
+      }
+      u[oldIdx] = {...u[oldIdx], name:nn};
+      return u;
+    });
+    setClientProfile(function(p){ return p?{...p, name:nn}:p; });
+    addHistoryEntry({type:"edited", name:nn, prevName:oldName, time:"", dateKey:null, bannerType:"edited"});
   };
 
   const removeClientBooking = function(dateKey, name) {
@@ -2639,6 +2687,69 @@ export default function TheList() {
     setSlots(dateKey,slots); setBlockLabelModal(null); setBlockLabel("Lunch"); setSwipedSlot(null);
   };
 
+  // A second, human-readable export. The JSON backup is for re-importing; this one is
+  // for YOU — a plain-text copy of the upcoming schedule plus everyone's phone number,
+  // so if the app itself is ever gone you still have your day in front of you. Opens in
+  // any text app on any device. Saved as a .txt next to the .json.
+  const exportReadable = function() {
+    var padTime = function(t){ var s=(t||""); while(s.length<6) s+=" "; return s; };
+    var now = new Date();
+    var lines = [];
+    lines.push("THE LIST  —  readable backup");
+    lines.push("Exported " + now.toLocaleString());
+    lines.push("Plain-text copy of your schedule, in case the app is ever gone.");
+    lines.push("");
+    lines.push("============================================================");
+    lines.push("UPCOMING SCHEDULE");
+    lines.push("============================================================");
+    lines.push("");
+    var sch = schedulesRef.current || {};
+    var today = toDateKey(now);
+    var keys = Object.keys(sch).filter(function(k){ return k >= today; }).sort();
+    var anyDay = false;
+    keys.forEach(function(dk){
+      var slots = sch[dk] || [];
+      var rows = [];
+      slots.forEach(function(s){
+        if (s.blocked) {
+          rows.push(padTime(s.time) + (s.blockLabel || "Blocked"));
+        } else if (s.name) {
+          var line = padTime(s.time) + s.name;
+          if (s.price) line += "   " + s.price;
+          if (s.recurWeeks) line += "   [repeats]";
+          if (s.done) line += "   (done)";
+          rows.push(line);
+        }
+      });
+      if (rows.length === 0) return;
+      anyDay = true;
+      lines.push(friendlyDateLong(dk));
+      var note = dayNoteText(dk);
+      if (note) lines.push("  note: " + note);
+      rows.forEach(function(r){ lines.push("  " + r); });
+      lines.push("");
+    });
+    if (!anyDay) { lines.push("(Nothing on the books from today forward.)"); lines.push(""); }
+    lines.push("============================================================");
+    lines.push("CLIENTS  (name  —  phone)");
+    lines.push("============================================================");
+    lines.push("");
+    var cm = (clientMemoryRef.current || []).slice().sort(function(a,b){ return (a.name||"").toLowerCase().localeCompare((b.name||"").toLowerCase()); });
+    if (cm.length === 0) lines.push("(No saved clients.)");
+    cm.forEach(function(c){
+      var l = c.name || "";
+      if (c.phone) l += "  —  " + c.phone;
+      if (c.price) l += "   (" + c.price + ")";
+      lines.push(l);
+    });
+    lines.push("");
+    var blob = new Blob([lines.join("\n")], {type:"text/plain"});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url; a.download = "the-list-readable-" + toDateKey(now) + ".txt"; a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const exportData = function() {
     var data = {schedules:schedulesRef.current, clients:clientMemory, holidays:customHolidays, history:history, dayNotes:dayNotes, exportedAt:new Date().toISOString()};
     var blob = new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
@@ -2646,6 +2757,9 @@ export default function TheList() {
     var a = document.createElement("a");
     a.href=url; a.download="the-list-backup-"+(new Date().toISOString().split("T")[0])+".json"; a.click();
     URL.revokeObjectURL(url);
+    // Also drop the human-readable .txt. Slight delay so Safari treats it as a second,
+    // separate download instead of swallowing it behind the first.
+    setTimeout(exportReadable, 350);
     showBanner({type:"added",msg:"Backup exported",time:null,dateKey:null});
     setHistory(function(prev){ return [{type:"backup",name:"Backup exported",timestamp:new Date().toLocaleTimeString(),id:Date.now()+Math.random()},...prev].slice(0,200); });
   };
@@ -3335,7 +3449,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v36</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v38</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -3513,7 +3627,7 @@ export default function TheList() {
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={function(){ setDailyExportPrompt(false); }}>
           <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"24px",width:"min(320px,90vw)",textAlign:"center"}} onClick={function(e){ e.stopPropagation(); }}>
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#aaa",marginBottom:"10px"}}>Good Morning</div>
-            <div style={{fontSize:"15px",color:"#1a1a1a",marginBottom:"18px",lineHeight:1.4}}>Back up today's list?</div>
+            <div style={{fontSize:"15px",color:"#1a1a1a",marginBottom:"18px",lineHeight:1.4}}>Back up today's list?<div style={{fontSize:"11px",color:"#999",marginTop:"6px"}}>Saves two files: one to re-import, one you can read.</div></div>
             <div style={{display:"flex",gap:"8px"}}>
               <button onClick={function(){ exportData(); setDailyExportPrompt(false); }} style={{flex:1,padding:"12px",background:"#c9a96e",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",fontWeight:"bold"}}>Export</button>
             </div>
@@ -3641,9 +3755,22 @@ export default function TheList() {
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={function(){ setClientProfile(null); }}>
           <div style={{background:"#ffffff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"28px 28px 24px",width:"min(420px,92vw)",maxHeight:"82vh",display:"flex",flexDirection:"column"}} onClick={function(e){ e.stopPropagation(); }}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"6px"}}>
-              <div>
+              <div style={{flex:1,minWidth:0}}>
                 <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#aaa",marginBottom:"4px"}}>Client Profile</div>
-                <div style={{fontSize:"20px",color:"#1a1a1a"}}>{clientProfile.name}</div>
+                {renamingProfile ? (
+                  <div style={{display:"flex",gap:"6px",alignItems:"center",flexWrap:"wrap"}}>
+                    <input autoFocus value={renameValue} onChange={function(e){ setRenameValue(e.target.value); }}
+                      onKeyDown={function(e){ if(e.key==="Enter"){ renameClient(clientProfile.name, renameValue); setRenamingProfile(false); } else if(e.key==="Escape"){ setRenamingProfile(false); } }}
+                      style={{...inputStyle,fontSize:"18px",flex:"1 1 140px",minWidth:0}}/>
+                    <button onClick={function(){ renameClient(clientProfile.name, renameValue); setRenamingProfile(false); }} style={{padding:"7px 12px",background:"#2a6a2a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",flexShrink:0}}>Save</button>
+                    <button onClick={function(){ setRenamingProfile(false); }} style={{padding:"7px 12px",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"8px",color:"#777",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",flexShrink:0}}>Cancel</button>
+                  </div>
+                ) : (
+                  <div style={{display:"flex",gap:"8px",alignItems:"baseline"}}>
+                    <div style={{fontSize:"20px",color:"#1a1a1a"}}>{clientProfile.name}</div>
+                    <button onClick={function(){ setRenameValue(clientProfile.name); setRenamingProfile(true); }} style={{background:"none",border:"none",color:"#a0a0a0",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",padding:"2px 4px",flexShrink:0,textDecoration:"underline"}}>Edit name</button>
+                  </div>
+                )}
               </div>
             </div>
             {clientProfile.recurWeeks && <div style={{fontSize:"12px",color:"#6a8aaa",marginBottom:"12px"}}>{"↺"} Every {clientProfile.recurWeeks===1?"week":(clientProfile.recurWeeks+" weeks")} · usual time {clientProfile.usualTime}</div>}
@@ -4025,14 +4152,15 @@ export default function TheList() {
               <div style={{marginBottom:"20px",marginTop:"16px"}}>
                 <div style={{fontSize:"10px",letterSpacing:"0.15em",textTransform:"uppercase",color:"#aaa",marginBottom:"8px"}}>Saved Clients</div>
                 <div style={{display:"flex",gap:"6px",marginBottom:"8px"}}>
-                  <input value={clientSearch} onChange={function(e){ setClientSearch(e.target.value); }} placeholder="Search clients..." style={{...inputStyle,flex:1,boxSizing:"border-box",fontSize:"12px"}}/>
+                  <input value={clientSearch} onChange={function(e){ setClientSearch(e.target.value); }} placeholder="Search name or phone..." style={{...inputStyle,flex:1,boxSizing:"border-box",fontSize:"12px"}}/>
                   <button onClick={function(){ setShowAllClients(function(p){ return !p; }); }} title="Show all clients A–Z" style={{flexShrink:0,padding:"5px 12px",background:showAllClients?"#1a1a1a":"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"4px",color:showAllClients?"#fff":"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",letterSpacing:"0.08em"}}>A–Z</button>
                 </div>
-                {clientMemory.slice().sort(function(a,b){ return a.name.toLowerCase().localeCompare(b.name.toLowerCase()); }).filter(function(c){ if(showAllClients) return true; return clientSearch&&c.name.toLowerCase().includes(clientSearch.toLowerCase()); }).map(function(c,i){ return (
+                {clientMemory.slice().sort(function(a,b){ return a.name.toLowerCase().localeCompare(b.name.toLowerCase()); }).filter(function(c){ if(showAllClients) return true; if(!clientSearch) return false; var q=clientSearch.toLowerCase().trim(); if(!q) return false; var nameHit=c.name.toLowerCase().indexOf(q)>=0; var qDigits=q.replace(/[^0-9]/g,""); var phoneDigits=(c.phone||"").replace(/[^0-9]/g,""); var phoneHit=qDigits.length>0&&phoneDigits.length>0&&phoneDigits.indexOf(qDigits)>=0; return nameHit||phoneHit; }).map(function(c,i){ return (
                   <div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 10px",marginBottom:"3px",background:"#f8f8f6",border:"1px solid #e8e8e6",borderRadius:"6px"}}>
                     <div style={{cursor:"pointer",flex:1}} onClick={function(){ openClientProfile(c.name); setShowHistory(false); }}>
                       <span style={{fontSize:"13px",color:"#1a1a1a"}}>{c.name}</span>
                       {c.price&&<span style={{fontSize:"11px",color:"#a07830",marginLeft:"8px"}}>{c.price}</span>}
+                      {c.phone&&<div style={{fontSize:"11px",color:"#8a9aa8",marginTop:"2px"}}>{c.phone}</div>}
                     </div>
                     <button onClick={function(){ setClientMemory(function(mem){ return mem.filter(function(m){ return m.name!==c.name; }); }); }} style={{background:"none",border:"none",color:"#ccc",cursor:"pointer",fontSize:"14px",padding:"2px 6px",fontFamily:"inherit"}} onMouseEnter={function(e){ e.currentTarget.style.color="#c0392b"; }} onMouseLeave={function(e){ e.currentTarget.style.color="#ccc"; }}>×</button>
                   </div>
@@ -4244,15 +4372,24 @@ export default function TheList() {
                   }}
                 >
                   {slots.map(function(slot,idx){
-                    // Shared slot (Model B): pair two same-time, both-named rows into one
-                    // shared row (the leader draws both; the follower is skipped). A 3+
-                    // pile-up at one time falls back to normal stacked rows so nobody hides.
-                    var __sameP = idx>0 && slots[idx-1].time===slot.time;
-                    var __sameN = idx<slots.length-1 && slots[idx+1].time===slot.time;
-                    var __isLeader = __sameN && !!slot.name && !!slots[idx+1].name && !__sameP && !(idx<slots.length-2 && slots[idx+2].time===slot.time);
-                    var __isFollower = __sameP && !!slot.name && !!slots[idx-1].name && !(idx>1 && slots[idx-2].time===slots[idx-1].time) && !__sameN;
-                    if (__isFollower) return null;
-                    if (__isLeader) return renderSharedPair(dateKey, slot, idx, slots[idx+1], idx+1);
+                    // Same-time collision: show the two people SIDE BY SIDE as one shared
+                    // row, so a double-up is obvious instead of hiding as a near-identical
+                    // extra row stacked at the same time. Scan the whole run of slots at this
+                    // time; if 2+ are NAMED, the first two render as the shared pair. A stray
+                    // EMPTY row sharing that time is hidden (it's the confusing "extra slot,"
+                    // not a real open spot). A rare 3rd named person still stacks below the
+                    // pair so nobody is hidden. (Old rule only paired EXACTLY two adjacent
+                    // named rows, so any stray same-time slot broke the pairing into a stack.)
+                    var __t = slot.time;
+                    var __runStart = idx; while (__runStart>0 && slots[__runStart-1].time===__t) __runStart--;
+                    var __runEnd = idx; while (__runEnd<slots.length-1 && slots[__runEnd+1].time===__t) __runEnd++;
+                    var __named = [];
+                    for (var __r=__runStart; __r<=__runEnd; __r++) { if (slots[__r].name) __named.push(__r); }
+                    if (__named.length>=2) {
+                      if (idx===__named[0]) return renderSharedPair(dateKey, slots[__named[0]], __named[0], slots[__named[1]], __named[1]);
+                      if (idx===__named[1]) return null;
+                      if (!slot.name) return null;
+                    }
                     var isEditing=editingCell&&editingCell.dateKey===dateKey&&editingCell.idx===idx;
                     var filled=!!slot.name; var wasRemoved=recentlyRemoved[dateKey+"-"+idx]&&!slot.name;
                     var isSwiped=swipedSlot===(dateKey+"-"+idx); var rowKey=dateKey+"-"+idx;
