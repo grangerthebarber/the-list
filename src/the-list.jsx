@@ -1682,11 +1682,18 @@ export default function TheList() {
     var rowKey = dateKey+"-"+leftIdx+"-pair";
     var bothDone = !!leftSlot.done && !!rightSlot.done;
     var pad = getDayCount()>3 ? "0 7px" : "0 14px";
+    // In shared mode each half shows ONLY the name (declutter — request #1). Price,
+    // the recurring badge, and the pencil are dropped while two people share a time
+    // and come back automatically when they no longer share it (the normal row draws
+    // them). The recurring/move logic is unaffected — it reads the slot's own data,
+    // not these icons. onPointerDown records the pointer id so a long-press drag can
+    // be captured and survive on the iPad (request #3 — the missing piece).
     var renderHalf = function(s, i) {
       return (
         <div data-droprow={dateKey+"-"+i} data-dropfilled="1"
           style={{flex:"1 1 0px",minWidth:0,display:"flex",alignItems:"center",gap:"6px",padding:"0 6px",background:s.done?"#f4faf4":"transparent",cursor:"pointer",userSelect:"none",WebkitUserSelect:"none"}}
           onClick={function(){ if(s.done) handleDoneRowTap(dateKey,i); else openClientProfile(s.name); }}
+          onPointerDown={function(e){ dragPointerId.current=e.pointerId; }}
           onMouseDown={function(){ if(!s.done) startDragLongPress(dateKey,i,0,0); }}
           onMouseUp={function(){ cancelDragLongPress(); }}
           onMouseLeave={cancelDragLongPress}
@@ -1694,11 +1701,7 @@ export default function TheList() {
           onTouchMove={function(e){ if(e.touches[0]) cancelDragLongPressIfMoved(e.touches[0].clientX,e.touches[0].clientY); }}
           onTouchEnd={function(e){ var wasTap=!!dragLongPress.current; cancelDragLongPress(); handleTouchEnd(e,dateKey,i); if(wasTap){ if(s.done) handleDoneRowTap(dateKey,i); else openClientProfile(s.name); } }}
         >
-          <span style={{fontSize:"12px",color:s.done?"#3a5a3a":"#c9a96e",flexShrink:0,fontVariantNumeric:"tabular-nums",letterSpacing:"0.02em"}}>{s.time}</span>
           <span style={{flex:1,minWidth:0,fontSize:isPhone?"15px":"13px",color:s.done?"#2a6a2a":"#1a1a1a",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",fontFamily:"Georgia,serif"}}>{s.name}</span>
-          {s.price?<span style={{fontSize:"11px",color:s.done?"#3a5a3a":"#a07830",flexShrink:0}}>{s.price}</span>:null}
-          {s.recurWeeks?<button onClick={function(e){ e.stopPropagation(); if(s.done){ handleDoneRowTap(dateKey,i); return; } if(s.groupId){ var aS=getSlots(dateKey); var gS=aS.map(function(x,xi){ return {...x,i:xi}; }).filter(function(x){ return x.groupId===s.groupId&&x.name; }); if(gS.length>1){ setGroupRecurModal({dateKey:dateKey,idx:i,slot:s,groupSlots:gS,weeks:null}); return; } } setRecurringModal({dateKey:dateKey,idx:i,slot:s}); }} title="Recurring — tap to manage" style={{background:"none",border:"none",cursor:"pointer",padding:"0 1px",color:"#4a8a9a",fontSize:"12px",fontWeight:"500",lineHeight:1,flexShrink:0}}>{(s.recurWeeks===1?"1w":(s.recurWeeks+"w"))+(s.isException?"*":"")}</button>:null}
-          <button onClick={function(e){ e.stopPropagation(); setNoteDraft(s.note||""); setNoteKind(s.noteKind||null); setNoteModal({dateKey:dateKey,idx:i,name:s.name}); }} title="Note" style={{background:"none",border:"none",cursor:"pointer",padding:"2px 3px",color:s.note?(s.noteKind==="personal"?TODAY_BLUE:"#c9a96e"):"#cfcfcf",fontSize:"18px",lineHeight:1,flexShrink:0,WebkitTextStroke:"0.5px currentColor"}}>{"✎"}</button>
         </div>
       );
     };
@@ -1706,6 +1709,7 @@ export default function TheList() {
       <div key={rowKey} style={{position:"relative",overflow:"hidden",borderBottom:"1px solid #efefed",flex:"1 1 0px",minHeight:"26px",display:"flex",flexDirection:"column"}}>
         <div style={{display:"flex",alignItems:"center",flex:"1 1 auto",minHeight:0,padding:pad,background:"#fcfcfa"}}>
           <button onClick={function(){ handleCheckoffPair(dateKey,[leftIdx,rightIdx]); }} title="Check off both" style={{width:"18px",height:"18px",borderRadius:"50%",border:bothDone?"1.5px solid #2a7a2a":"1.5px solid #aaaaaa",background:bothDone?"#2a7a2a":"transparent",cursor:"pointer",flexShrink:0,marginRight:"10px",display:"flex",alignItems:"center",justifyContent:"center",transition:"all 0.15s"}}>{bothDone?<span style={{color:"#fff",fontSize:"10px",lineHeight:1}}>{"✓"}</span>:null}</button>
+          <span style={{fontSize:"12px",color:bothDone?"#3a5a3a":"#c9a96e",flexShrink:0,width:"40px",fontVariantNumeric:"tabular-nums",letterSpacing:"0.02em"}}>{leftSlot.time}</span>
           {renderHalf(leftSlot,leftIdx)}
           <div style={{width:"1px",alignSelf:"stretch",background:"#d8d2c4",margin:"4px 2px"}}/>
           {renderHalf(rightSlot,rightIdx)}
@@ -3449,7 +3453,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v38</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v39</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
