@@ -522,6 +522,21 @@ export default function TheList() {
   const [timeEditModal, setTimeEditModal] = useState(null);
   const [timeEditMinutes, setTimeEditMinutes] = useState(0);
   const [dailyExportPrompt, setDailyExportPrompt] = useState(false);
+  // Second step of the morning prompt: after the backup exports, offer the readable
+  // schedule download as its own tap (iPad Safari only allows one download per tap).
+  const [dailyDownloadPrompt, setDailyDownloadPrompt] = useState(false);
+  // Header name search (iPad): what's typed, whether the dropdown is open, and the
+  // current green "found them" highlight ({name lower-cased, dateKey}) that fades after 8s.
+  const [searchText, setSearchText] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchHit, setSearchHit] = useState(null);
+  const searchHitTimer = useRef(null);
+  // Delete-a-client guards shown inside the profile: a block message (when they still
+  // have upcoming bookings) and a confirm step (when it's safe to remove).
+  const [clientDeleteMsg, setClientDeleteMsg] = useState("");
+  const [clientDeleteConfirm, setClientDeleteConfirm] = useState(false);
+  // Remove ONE person from a shared (same-time) slot — a small confirm scoped to that one.
+  const [sharedRemove, setSharedRemove] = useState(null);
   const [seriesEditModal, setSeriesEditModal] = useState(null);
   const [renameRequiredModal, setRenameRequiredModal] = useState(null);
   const [navAnim, setNavAnim] = useState({n:0,dir:0});
@@ -537,6 +552,8 @@ export default function TheList() {
   const appRootRef = useRef(null);
   const dragPointerId = useRef(null);
   const bannerTimer = useRef(null);
+  const bannerRef = useRef(null);
+  bannerRef.current = banner;
   const longPressTimer = useRef(null);
   const checkoffLongPress = useRef(null);
   const dragLongPress = useRef(null);
@@ -978,6 +995,25 @@ export default function TheList() {
     setBannerSwipeY(0);
     setBanner(null);
   };
+
+  // A download on the iPad takes over the screen, which can FREEZE the 10-second
+  // auto-dismiss timer so a banner like "Schedule downloaded" hangs there forever.
+  // When the app comes back to the foreground with a banner still up, give it a
+  // short beat to be seen, then clear it — so it can never get stuck again.
+  useEffect(function() {
+    var clearSoon = function() {
+      if (!bannerRef.current) return;
+      if (bannerTimer.current) clearTimeout(bannerTimer.current);
+      bannerTimer.current = setTimeout(function(){ setBanner(null); }, 1500);
+    };
+    var onVis = function() { if (document.visibilityState === "visible") clearSoon(); };
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("focus", clearSoon);
+    return function() {
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("focus", clearSoon);
+    };
+  }, []);
 
   const getHolidayForDate = function(dateKey) {
     var d = parseDateKey(dateKey);
@@ -1689,9 +1725,10 @@ export default function TheList() {
     // not these icons. onPointerDown records the pointer id so a long-press drag can
     // be captured and survive on the iPad (request #3 — the missing piece).
     var renderHalf = function(s, i) {
+      var hsh = searchHit && s.name && s.name.toLowerCase()===searchHit.name && dateKey===searchHit.dateKey;
       return (
         <div data-droprow={dateKey+"-"+i} data-dropfilled="1"
-          style={{flex:"1 1 0px",minWidth:0,display:"flex",alignItems:"center",gap:"6px",padding:"0 6px",background:s.done?"#f4faf4":"transparent",cursor:"pointer",userSelect:"none",WebkitUserSelect:"none"}}
+          style={{flex:"1 1 0px",minWidth:0,display:"flex",alignItems:"center",gap:"6px",padding:"0 6px",background:hsh?"#bfe9bf":(s.done?"#f4faf4":"transparent"),cursor:"pointer",userSelect:"none",WebkitUserSelect:"none"}}
           onClick={function(){ if(s.done) handleDoneRowTap(dateKey,i); else openClientProfile(s.name); }}
           onPointerDown={function(e){ dragPointerId.current=e.pointerId; }}
           onMouseDown={function(){ if(!s.done) startDragLongPress(dateKey,i,0,0); }}
@@ -1702,6 +1739,14 @@ export default function TheList() {
           onTouchEnd={function(e){ var wasTap=!!dragLongPress.current; cancelDragLongPress(); handleTouchEnd(e,dateKey,i); if(wasTap){ if(s.done) handleDoneRowTap(dateKey,i); else openClientProfile(s.name); } }}
         >
           <span style={{flex:1,minWidth:0,fontSize:isPhone?"15px":"13px",color:s.done?"#2a6a2a":"#1a1a1a",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",fontFamily:"Georgia,serif"}}>{s.name}</span>
+          <button
+            onClick={function(e){ e.stopPropagation(); setSharedRemove({dateKey:dateKey,idx:i,name:s.name,time:s.time,groupId:s.groupId||null}); }}
+            onPointerDown={function(e){ e.stopPropagation(); }}
+            onMouseDown={function(e){ e.stopPropagation(); }}
+            onTouchStart={function(e){ e.stopPropagation(); }}
+            onTouchEnd={function(e){ e.stopPropagation(); }}
+            title="Remove from this slot"
+            style={{flexShrink:0,width:"22px",height:"22px",lineHeight:1,border:"none",background:"none",color:"#c2b8b8",cursor:"pointer",fontFamily:"inherit",fontSize:"15px",padding:0,display:"flex",alignItems:"center",justifyContent:"center"}}>{"×"}</button>
         </div>
       );
     };
@@ -2056,6 +2101,54 @@ export default function TheList() {
     setCheckoffModal(null); setNudgedDate(null); setCheckoffCalMonth(null);
   };
 
+  // Header search: the earliest day from today forward where this name has a real
+  // (non-blocked) appointment, or "" if they have nothing on the books.
+  const findNextBookingDate = function(name) {
+    var lower = (name || "").toLowerCase();
+    if (!lower) return "";
+    var today = toDateKey(new Date());
+    var sch = schedulesRef.current || {};
+    var keys = Object.keys(sch).filter(function(k){ return k >= today; }).sort();
+    for (var i = 0; i < keys.length; i++) {
+      var slots = sch[keys[i]] || [];
+      for (var j = 0; j < slots.length; j++) {
+        var s = slots[j];
+        if (s && !s.blocked && s.name && s.name.toLowerCase() === lower) return keys[i];
+      }
+    }
+    return "";
+  };
+
+  // The names offered in the search dropdown: saved clients whose name contains the
+  // typed text, A–Z, capped at 8. Empty text shows nothing (no giant dump).
+  const searchMatches = function(text) {
+    var q = (text || "").trim().toLowerCase();
+    if (!q) return [];
+    var mem = clientMemoryRef.current || [];
+    var out = [];
+    mem.forEach(function(c){ if (c.name && c.name.toLowerCase().indexOf(q) !== -1) out.push(c.name); });
+    out.sort(function(a,b){ return a.toLowerCase().localeCompare(b.toLowerCase()); });
+    return out.slice(0, 8);
+  };
+
+  // Pick a name from search: jump to their next appointment and flash a green
+  // highlight for 8 seconds. If they have nothing coming up, open their profile
+  // (where you can edit the name or delete them) and say so.
+  const runClientSearch = function(name) {
+    setSearchText(""); setSearchOpen(false);
+    if (searchHitTimer.current) { clearTimeout(searchHitTimer.current); searchHitTimer.current = null; }
+    var dk = findNextBookingDate(name);
+    if (dk) {
+      jumpToDate(dk);
+      setSearchHit({name:(name||"").toLowerCase(), dateKey:dk});
+      searchHitTimer.current = setTimeout(function(){ setSearchHit(null); }, 8000);
+    } else {
+      setSearchHit(null);
+      openClientProfile(name);
+      showBanner({type:"info",msg:"No upcoming appointments for "+name,time:null,dateKey:null});
+    }
+  };
+
   const jumpToDateForBooking = function(targetDateKey, slot) {
     setCheckoffModal(null); setNudgedDate(null); setCheckoffCalMonth(null);
     setBaseDate(parseDateKey(targetDateKey)); setView(isPhone?"Day":"3-Day");
@@ -2078,6 +2171,7 @@ export default function TheList() {
     var recurFound = bookings.find(function(b){ return b.recurWeeks; });
     var recurWeeks = recurFound ? recurFound.recurWeeks : null;
     setRenamingProfile(false); setRenameValue("");
+    setClientDeleteMsg(""); setClientDeleteConfirm(false);
     setClientProfile({name,recurWeeks,usualTime,bookings,phone:getClientPhone(name)});
   };
 
@@ -2711,6 +2805,16 @@ export default function TheList() {
     var today = toDateKey(now);
     var keys = Object.keys(sch).filter(function(k){ return k >= today; }).sort();
     var anyDay = false;
+    // Look up a client's saved phone number so it can sit right next to their name
+    // in the slot (instead of a separate contact list at the bottom).
+    var phoneOf = function(nm) {
+      var arr = clientMemoryRef.current || [];
+      var lo = (nm || "").toLowerCase();
+      for (var pi = 0; pi < arr.length; pi++) {
+        if ((arr[pi].name || "").toLowerCase() === lo) return arr[pi].phone || "";
+      }
+      return "";
+    };
     keys.forEach(function(dk){
       var slots = sch[dk] || [];
       var rows = [];
@@ -2719,6 +2823,8 @@ export default function TheList() {
           rows.push(padTime(s.time) + (s.blockLabel || "Blocked"));
         } else if (s.name) {
           var line = padTime(s.time) + s.name;
+          var ph = phoneOf(s.name);
+          if (ph) line += "  " + ph;
           if (s.price) line += "   " + s.price;
           if (s.recurWeeks) line += "   [repeats]";
           if (s.done) line += "   (done)";
@@ -2734,19 +2840,6 @@ export default function TheList() {
       lines.push("");
     });
     if (!anyDay) { lines.push("(Nothing on the books from today forward.)"); lines.push(""); }
-    lines.push("============================================================");
-    lines.push("CLIENTS  (name  —  phone)");
-    lines.push("============================================================");
-    lines.push("");
-    var cm = (clientMemoryRef.current || []).slice().sort(function(a,b){ return (a.name||"").toLowerCase().localeCompare((b.name||"").toLowerCase()); });
-    if (cm.length === 0) lines.push("(No saved clients.)");
-    cm.forEach(function(c){
-      var l = c.name || "";
-      if (c.phone) l += "  —  " + c.phone;
-      if (c.price) l += "   (" + c.price + ")";
-      lines.push(l);
-    });
-    lines.push("");
     var blob = new Blob([lines.join("\n")], {type:"text/plain"});
     var url = URL.createObjectURL(blob);
     var a = document.createElement("a");
@@ -2840,24 +2933,31 @@ export default function TheList() {
         playSound("lock");
         return;
       }
-      // If this slot belongs to a group, the whole group travels together.
+      // If this slot belongs to a group, the whole group travels together — UNLESS
+      // it's a same-time shared slot. Two people sharing one time are a temporary
+      // holding pen: dragging one of them should peel out ONLY that person (and the
+      // single drop below un-shares whoever is left). A real multi-time group (slots
+      // linked across different times) still moves as a unit.
       if (slot.groupId) {
         var daySlots = getSlots(dateKey);
-        var groupClients = daySlots.map(function(s,i){ return {s:s,i:i}; })
-          .filter(function(o){ return o.s.groupId===slot.groupId && o.s.name; })
-          .map(function(o){ return {name:o.s.name,price:o.s.price,recurWeeks:o.s.recurWeeks,originalTime:o.s.time,originalDateKey:dateKey,originalIdx:o.i}; });
-        if (groupClients.length > 1) {
-          setDragState({clients:groupClients,sourceKey:dateKey+"-"+idx,multi:true,group:true,label:slot.name});
-          if (isTouch) {
-            dragPosRef.current = {x:startX, y:startY};
-            dragOverRef.current = null; setDragOverKey(null);
-            setIsLiveDragging(true);
-            captureDragPointer();
-          } else {
-            setDragCalOpen(true); setDragCalMonth(new Date()); setDragCalHover(true);
+        var sharesTimeWithAnother = daySlots.some(function(s2,i2){ return i2!==idx && s2.name && s2.time===slot.time; });
+        if (!sharesTimeWithAnother) {
+          var groupClients = daySlots.map(function(s,i){ return {s:s,i:i}; })
+            .filter(function(o){ return o.s.groupId===slot.groupId && o.s.name; })
+            .map(function(o){ return {name:o.s.name,price:o.s.price,recurWeeks:o.s.recurWeeks,originalTime:o.s.time,originalDateKey:dateKey,originalIdx:o.i}; });
+          if (groupClients.length > 1) {
+            setDragState({clients:groupClients,sourceKey:dateKey+"-"+idx,multi:true,group:true,label:slot.name});
+            if (isTouch) {
+              dragPosRef.current = {x:startX, y:startY};
+              dragOverRef.current = null; setDragOverKey(null);
+              setIsLiveDragging(true);
+              captureDragPointer();
+            } else {
+              setDragCalOpen(true); setDragCalMonth(new Date()); setDragCalHover(true);
+            }
+            playSound("lock");
+            return;
           }
-          playSound("lock");
-          return;
         }
       }
       var clients = [{name:slot.name,price:slot.price,recurWeeks:slot.recurWeeks,originalTime:slot.time,originalDateKey:dateKey,originalIdx:idx}];
@@ -2947,15 +3047,25 @@ export default function TheList() {
     pushUndo(snapshot);
     if (sameDay) {
       var arr = [...getSlots(targetDateKey)];
-      arr[targetIdx] = {...arr[targetIdx],name:client.name,price:client.price,recurWeeks:client.recurWeeks,isException:true,done:false};
+      var srcGidSame = arr[client.originalIdx] ? arr[client.originalIdx].groupId : null;
+      arr[targetIdx] = {...arr[targetIdx],name:client.name,price:client.price,recurWeeks:client.recurWeeks,isException:true,done:false,groupId:null};
       arr[client.originalIdx] = {...arr[client.originalIdx],name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null};
+      if (srcGidSame) {
+        var remSame = arr.filter(function(x){ return x.groupId===srcGidSame && x.name; });
+        if (remSame.length===1) { var riSame = arr.findIndex(function(x){ return x.groupId===srcGidSame && x.name; }); if (riSame>=0) arr[riSame]={...arr[riSame],groupId:null}; }
+      }
       setSlots(targetDateKey, arr);
     } else {
       var ts = [...getSlots(targetDateKey)];
-      ts[targetIdx] = {...ts[targetIdx],name:client.name,price:client.price,recurWeeks:client.recurWeeks,isException:true,done:false};
+      ts[targetIdx] = {...ts[targetIdx],name:client.name,price:client.price,recurWeeks:client.recurWeeks,isException:true,done:false,groupId:null};
       setSlots(targetDateKey, ts);
       var os = [...getSlots(client.originalDateKey)];
+      var srcGidX = os[client.originalIdx] ? os[client.originalIdx].groupId : null;
       os[client.originalIdx] = {...os[client.originalIdx],name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null};
+      if (srcGidX) {
+        var remX = os.filter(function(x){ return x.groupId===srcGidX && x.name; });
+        if (remX.length===1) { var riX = os.findIndex(function(x){ return x.groupId===srcGidX && x.name; }); if (riX>=0) os[riX]={...os[riX],groupId:null}; }
+      }
       setSlots(client.originalDateKey, os);
     }
     addHistoryEntry({type:"rescheduled",time:targetSlot.time,name:client.name,price:client.price,dateKey:targetDateKey});
@@ -3451,7 +3561,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v40</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v41</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -3463,10 +3573,11 @@ export default function TheList() {
           onTouchStart={function(e){ if(e.touches&&e.touches.length===1){ bannerTouchStart.current=e.touches[0].clientY; } }}
           onTouchMove={function(e){ if(bannerTouchStart.current==null||!e.touches||!e.touches.length) return; var dy=e.touches[0].clientY-bannerTouchStart.current; setBannerSwipeY(Math.min(0,dy)); }}
           onTouchEnd={function(){ var dy=bannerSwipeY; bannerTouchStart.current=null; if(dy<-30){ dismissBanner(); } else { setBannerSwipeY(0); } }}
+          onClick={function(){ dismissBanner(); }}
           style={{position:"fixed",left:"50%",top:isPhone?"auto":(gridTopY>0?(gridTopY/2+"px"):listTopY>0?(listTopY/2+"px"):"calc(env(safe-area-inset-top,0px) + 8px)"),bottom:isPhone?"calc(env(safe-area-inset-bottom,0px) + 18px)":"auto",transform:((!isPhone&&(gridTopY>0||listTopY>0))?"translate(-50%,-50%)":"translateX(-50%)")+" translateY("+bannerSwipeY+"px)",opacity:Math.max(0.2,1+bannerSwipeY/80),transition:bannerSwipeY===0?"transform 0.2s ease, opacity 0.2s ease":"none",zIndex:2000,background:getBannerColor(banner.type),color:"#fff",padding:"6px 14px",borderRadius:"20px",fontSize:"12px",letterSpacing:"0.04em",boxShadow:"0 2px 12px rgba(0,0,0,0.2)",display:"flex",alignItems:"center",gap:"10px",maxWidth:"90vw",pointerEvents:"auto",touchAction:"none"}}>
           <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{describeBanner(banner)}</span>
           {(banner.type!=="undo"&&banner.type!=="redo"&&canUndo)&&(
-            <button onClick={handleUndo} title="Undo" style={{background:"rgba(255,255,255,0.22)",border:"none",borderRadius:"10px",color:"#fff",padding:"4px 9px",cursor:"pointer",fontFamily:"inherit",flexShrink:0,display:"flex",alignItems:"center"}}><UndoIcon size={15} color="#fff"/></button>
+            <button onClick={function(e){ e.stopPropagation(); handleUndo(); }} title="Undo" style={{background:"rgba(255,255,255,0.22)",border:"none",borderRadius:"10px",color:"#fff",padding:"4px 9px",cursor:"pointer",fontFamily:"inherit",flexShrink:0,display:"flex",alignItems:"center"}}><UndoIcon size={15} color="#fff"/></button>
           )}
         </div>
       )}
@@ -3629,9 +3740,23 @@ export default function TheList() {
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={function(){ setDailyExportPrompt(false); }}>
           <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"24px",width:"min(320px,90vw)",textAlign:"center"}} onClick={function(e){ e.stopPropagation(); }}>
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#aaa",marginBottom:"10px"}}>Good Morning</div>
-            <div style={{fontSize:"15px",color:"#1a1a1a",marginBottom:"18px",lineHeight:1.4}}>Back up today's list?<div style={{fontSize:"11px",color:"#999",marginTop:"6px"}}>Saves two files: one to re-import, one you can read.</div></div>
+            <div style={{fontSize:"15px",color:"#1a1a1a",marginBottom:"18px",lineHeight:1.4}}>Step 1 of 2 — back up today's list?<div style={{fontSize:"11px",color:"#999",marginTop:"6px"}}>Saves the restore file. The schedule download comes next.</div></div>
             <div style={{display:"flex",gap:"8px"}}>
-              <button onClick={function(){ exportData(); setDailyExportPrompt(false); }} style={{flex:1,padding:"12px",background:"#c9a96e",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",fontWeight:"bold"}}>Export</button>
+              <button onClick={function(){ setDailyExportPrompt(false); }} style={{flex:"0 0 auto",padding:"12px 16px",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"14px"}}>Skip</button>
+              <button onClick={function(){ exportData(); setDailyExportPrompt(false); setDailyDownloadPrompt(true); }} style={{flex:1,padding:"12px",background:"#c9a96e",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",fontWeight:"bold"}}>Export backup</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {dailyDownloadPrompt && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={function(){ setDailyDownloadPrompt(false); }}>
+          <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"24px",width:"min(320px,90vw)",textAlign:"center"}} onClick={function(e){ e.stopPropagation(); }}>
+            <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#aaa",marginBottom:"10px"}}>Backup Saved</div>
+            <div style={{fontSize:"15px",color:"#1a1a1a",marginBottom:"18px",lineHeight:1.4}}>Step 2 of 2 — download the readable schedule?<div style={{fontSize:"11px",color:"#999",marginTop:"6px"}}>The plain-text copy of your day, with phone numbers.</div></div>
+            <div style={{display:"flex",gap:"8px"}}>
+              <button onClick={function(){ setDailyDownloadPrompt(false); }} style={{flex:"0 0 auto",padding:"12px 16px",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"14px"}}>Skip</button>
+              <button onClick={function(){ exportReadable(); setDailyDownloadPrompt(false); }} style={{flex:1,padding:"12px",background:"#c9a96e",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",fontWeight:"bold"}}>Download schedule</button>
             </div>
           </div>
         </div>
@@ -3753,6 +3878,33 @@ export default function TheList() {
         </div>
       )}
 
+      {sharedRemove && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={function(){ setSharedRemove(null); }}>
+          <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"24px",width:"min(320px,90vw)",textAlign:"center"}} onClick={function(e){ e.stopPropagation(); }}>
+            <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#aaa",marginBottom:"10px"}}>Remove From Slot</div>
+            <div style={{fontSize:"15px",color:"#1a1a1a",marginBottom:"4px"}}>{sharedRemove.name}</div>
+            <div style={{fontSize:"12px",color:"#999",marginBottom:"18px"}}>at {sharedRemove.time} · the other person keeps the slot</div>
+            <div style={{display:"flex",gap:"8px"}}>
+              <button onClick={function(){ setSharedRemove(null); }} style={{flex:1,padding:"11px",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#777",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Keep</button>
+              <button onClick={function(){
+                var m=sharedRemove; if(!m){ return; }
+                if (m.groupId) {
+                  cancelGroupSlots(m.dateKey, m.groupId, m.idx);
+                } else {
+                  var snap={schedules:JSON.parse(JSON.stringify(schedulesRef.current))}; pushUndo(snap);
+                  var slots=[...getSlots(m.dateKey)];
+                  var s=slots[m.idx];
+                  slots[m.idx]={...s,name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null,pending:false,availStatus:null};
+                  addHistoryEntry({type:"removed",time:s.time,name:s.name,dateKey:m.dateKey});
+                  setSlots(m.dateKey,slots);
+                }
+                setSharedRemove(null);
+              }} style={{flex:1,padding:"11px",background:"#c0392b",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Remove</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {clientProfile && (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={function(){ setClientProfile(null); }}>
           <div style={{background:"#ffffff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"28px 28px 24px",width:"min(420px,92vw)",maxHeight:"82vh",display:"flex",flexDirection:"column"}} onClick={function(e){ e.stopPropagation(); }}>
@@ -3826,6 +3978,31 @@ export default function TheList() {
                   )}
                 </div>
               ); })}
+            </div>
+            <div style={{borderTop:"1px solid #eee",marginTop:"14px",paddingTop:"12px"}}>
+              {clientDeleteMsg ? (
+                <div style={{fontSize:"12px",color:"#c0392b",lineHeight:1.4}}>{clientDeleteMsg}</div>
+              ) : clientDeleteConfirm ? (
+                <div style={{display:"flex",gap:"8px",alignItems:"center"}}>
+                  <div style={{flex:1,fontSize:"12px",color:"#666"}}>Remove {clientProfile.name} from your client list?</div>
+                  <button onClick={function(){
+                    var nm=clientProfile.name;
+                    setClientMemory(function(mem){ return mem.filter(function(c){ return !(c.name && c.name.toLowerCase()===nm.toLowerCase()); }); });
+                    setClientDeleteConfirm(false); setClientProfile(null);
+                    showBanner({type:"removed",msg:"Removed "+nm+" from your client list",time:null,dateKey:null});
+                  }} style={{padding:"7px 12px",background:"#c0392b",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",flexShrink:0}}>Remove</button>
+                  <button onClick={function(){ setClientDeleteConfirm(false); }} style={{padding:"7px 12px",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"8px",color:"#777",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",flexShrink:0}}>Keep</button>
+                </div>
+              ) : (
+                <button onClick={function(){
+                  if (clientProfile.bookings && clientProfile.bookings.length>0) {
+                    setClientDeleteMsg("Can't delete "+clientProfile.name+" yet — they still have upcoming appointments. Cancel those first, then delete.");
+                    setClientDeleteConfirm(false);
+                  } else {
+                    setClientDeleteMsg(""); setClientDeleteConfirm(true);
+                  }
+                }} style={{background:"none",border:"none",color:"#c0a0a0",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",padding:"2px 0",textDecoration:"underline"}}>Delete client</button>
+              )}
             </div>
           </div>
         </div>
@@ -4249,6 +4426,29 @@ export default function TheList() {
               }} style={{padding:"5px 12px",fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",border:"none",borderRadius:"4px",cursor:"pointer",background:view===v?"#1a1a1a":"transparent",color:view===v?"#ffffff":"#999",fontFamily:"inherit",transition:"all 0.15s"}}>{v}</button>
             ); })}
           </div>
+          <div style={{position:"relative",flex:"1 1 auto",display:"flex",justifyContent:"center",padding:"0 14px",minWidth:0}}>
+            <div style={{position:"relative",width:"100%",maxWidth:"300px"}}>
+              <input value={searchText}
+                onChange={function(e){ setSearchText(e.target.value); setSearchOpen(true); }}
+                onFocus={function(){ setSearchOpen(true); }}
+                onBlur={function(){ setTimeout(function(){ setSearchOpen(false); }, 150); }}
+                onKeyDown={function(e){ if(e.key==="Enter"){ var m=searchMatches(searchText); if(m.length>0) runClientSearch(m[0]); } else if(e.key==="Escape"){ setSearchText(""); setSearchOpen(false); } }}
+                placeholder="Search a name…"
+                style={{width:"100%",boxSizing:"border-box",padding:"5px 12px",border:"1px solid #e0e0de",borderRadius:"14px",background:"#f6f6f4",fontFamily:"inherit",fontSize:"12px",color:"#1a1a1a",outline:"none"}} />
+              {searchOpen && searchText.trim() && (function(){
+                var matches = searchMatches(searchText);
+                return (
+                  <div style={{position:"absolute",top:"30px",left:0,right:0,background:"#fff",border:"1px solid #e0e0de",borderRadius:"8px",boxShadow:"0 6px 20px rgba(0,0,0,0.12)",zIndex:200,overflow:"hidden",maxHeight:"50vh",overflowY:"auto"}}>
+                    {matches.length===0 ? (
+                      <div style={{padding:"8px 12px",fontSize:"12px",color:"#aaa"}}>No matches</div>
+                    ) : matches.map(function(nm){ return (
+                      <div key={nm} onMouseDown={function(e){ e.preventDefault(); }} onClick={function(){ runClientSearch(nm); }} style={{padding:"9px 12px",fontSize:"13px",color:"#1a1a1a",cursor:"pointer",borderBottom:"1px solid #f2f2f0",fontFamily:"Georgia,serif"}}>{nm}</div>
+                    ); })}
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
           {view==="Month"&&<div style={{fontSize:"14px",color:"#1a1a1a"}}>{baseDate.toLocaleDateString("en-US",{month:"long",year:"numeric"})}</div>}
           <div style={{display:"flex",gap:"4px",alignItems:"center"}}>
             <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()-1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,-7); }); }} style={{...navBtn,fontSize:"11px",letterSpacing:"-1px"}}>{"‹‹"}</button>
@@ -4405,6 +4605,8 @@ export default function TheList() {
                     var isSelected=selectMode&&!!selectedSlots[rowKey];
                     var isDragging=dragState&&dragState.sourceKey===rowKey;
                     var slotBg=slot.blocked?"#f4f4f2":(wasRemoved&&!isEditing)?"#fff0ee":isOccEdit?"#fff0ee":isSelected?"#f0f4ff":slot.done?"#f4faf4":(isEditing&&editChromeReady)?"#f0f0ee":filled?"#fcfcfa":"transparent";
+                    var isSearchHit=searchHit&&slot.name&&slot.name.toLowerCase()===searchHit.name&&dateKey===searchHit.dateKey;
+                    if (isSearchHit&&!isEditing) slotBg="#bfe9bf";
                     var isCustomSlot=slot.isCustom===true||(slot.isCustom===undefined&&!slot.defaultBaseTime&&!DEFAULT_TIMES.includes(slot.time));
                     var defShift=(!isCustomSlot&&slot.defaultBaseTime&&slot.time!==slot.defaultBaseTime)?(timeToAbsMinutes(slot.time)<timeToAbsMinutes(slot.defaultBaseTime)?"earlier":"later"):null;
                     var compactIcons=(view==="Week")||(isPhone&&view==="Wknd");
@@ -4439,6 +4641,7 @@ export default function TheList() {
                         >
                           {(wasRemoved||isOccEdit)&&<div style={{position:"absolute",left:0,top:0,bottom:0,width:"3px",background:"#c0392b"}}/>}
                           {isSelected&&<div style={{position:"absolute",left:0,top:0,bottom:0,width:"3px",background:"#4a7aaa"}}/>}
+                          {isSearchHit&&!isEditing&&<div style={{position:"absolute",left:0,top:0,bottom:0,width:"3px",background:"#2a7a2a"}}/>}
                           {slot.groupId&&!wasRemoved&&(function(){
                             var ds=getSlots(dateKey); var gS=ds.map(function(s,i){ return {...s,i}; }).filter(function(s){ return s.groupId===slot.groupId&&s.name; });
                             var first=gS[0]&&gS[0].i===idx; var last=gS[gS.length-1]&&gS[gS.length-1].i===idx; var inG=gS.some(function(s){ return s.i===idx; });
