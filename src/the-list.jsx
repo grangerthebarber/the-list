@@ -2691,10 +2691,10 @@ export default function TheList() {
     setSlots(dateKey,slots); setBlockLabelModal(null); setBlockLabel("Lunch"); setSwipedSlot(null);
   };
 
-  // A second, human-readable export. The JSON backup is for re-importing; this one is
-  // for YOU — a plain-text copy of the upcoming schedule plus everyone's phone number,
-  // so if the app itself is ever gone you still have your day in front of you. Opens in
-  // any text app on any device. Saved as a .txt next to the .json.
+  // The human-readable export — fired by its own "Download schedule" button. The JSON
+  // backup is for re-importing; this one is for YOU — a plain-text copy of the upcoming
+  // schedule plus everyone's phone number, so if the app is ever gone you still have your
+  // day in front of you. Opens in any text app on any device. Saved as a .txt.
   const exportReadable = function() {
     var padTime = function(t){ var s=(t||""); while(s.length<6) s+=" "; return s; };
     var now = new Date();
@@ -2752,6 +2752,7 @@ export default function TheList() {
     var a = document.createElement("a");
     a.href = url; a.download = "the-list-readable-" + toDateKey(now) + ".txt"; a.click();
     URL.revokeObjectURL(url);
+    showBanner({type:"added",msg:"Schedule downloaded",time:null,dateKey:null});
   };
 
   const exportData = function() {
@@ -2761,9 +2762,6 @@ export default function TheList() {
     var a = document.createElement("a");
     a.href=url; a.download="the-list-backup-"+(new Date().toISOString().split("T")[0])+".json"; a.click();
     URL.revokeObjectURL(url);
-    // Also drop the human-readable .txt. Slight delay so Safari treats it as a second,
-    // separate download instead of swallowing it behind the first.
-    setTimeout(exportReadable, 350);
     showBanner({type:"added",msg:"Backup exported",time:null,dateKey:null});
     setHistory(function(prev){ return [{type:"backup",name:"Backup exported",timestamp:new Date().toLocaleTimeString(),id:Date.now()+Math.random()},...prev].slice(0,200); });
   };
@@ -3453,7 +3451,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v39</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v40</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -4151,6 +4149,7 @@ export default function TheList() {
                 <input type="file" accept=".json" onChange={importData} style={{display:"none"}}/>
               </label>
             </div>
+            <button onClick={exportReadable} style={{width:"100%",padding:"8px",marginBottom:"8px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#666",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.05em"}}>Download schedule</button>
             <button onClick={function(){ try { signOut(fbAuth); } catch(e) {} }} style={{width:"100%",padding:"8px",marginBottom:"8px",background:"none",border:"1px solid #e0b0a8",borderRadius:"6px",color:"#b04a3a",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.05em"}}>{authUser?("Sign out ("+authUser.email+")"):"Sign out"}</button>
             {clientMemory.length>0&&(
               <div style={{marginBottom:"20px",marginTop:"16px"}}>
