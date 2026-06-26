@@ -128,6 +128,12 @@ function capitalizeFirst(str) { if (!str) return str; return str.charAt(0).toUpp
 function stripLeadingNumbers(str) { if (!str) return str; return str.replace(/^\s*\d+\s*[.)\-]\s*/, "").replace(/^\s*\d+\s+(?=\D)/, ""); }
 function isLunchName(str) { var v = str ? str.trim().toLowerCase() : ""; return v==="lunch" || v==="l"; }
 function isBlockName(str) { var v = str ? str.trim().toLowerCase() : ""; return v==="block" || v==="b"; }
+// Typing "a" / "available" marks an OPEN slot AVAILABLE; "o" / "overtime" marks it
+// OVERTIME. Mirrors the single-letter "l" (lunch) / "b" (block) shortcuts. These
+// only ever apply to a truly open slot (see doCommit) — they never overwrite a
+// booked or blocked slot.
+function isAvailName(str) { var v = str ? str.trim().toLowerCase() : ""; return v==="a" || v==="available"; }
+function isOvertimeName(str) { var v = str ? str.trim().toLowerCase() : ""; return v==="o" || v==="overtime"; }
 function parseDateKey(key) { var parts = key.split("-").map(Number); return new Date(parts[0],parts[1]-1,parts[2]); }
 function formatDateKey(date) { return toDateKey(date); }
 function friendlyDate(dateKey) {
@@ -1276,7 +1282,9 @@ export default function TheList() {
     var newPrice = (values.price||"").trim();
     var asLunch = isLunchName(rawName);
     var asBlock = isBlockName(rawName);
-    var newName = (asLunch||asBlock) ? "" : capitalizeFirst(rawName);
+    var asAvail = isAvailName(rawName);
+    var asOvertime = isOvertimeName(rawName);
+    var newName = (asLunch||asBlock||asAvail||asOvertime) ? "" : capitalizeFirst(rawName);
     // Removing the name removes the price along with it (a price never outlives
     // its person). Clearing only the price, though, leaves the name in place.
     if (!newName) newPrice = "";
@@ -1300,6 +1308,15 @@ export default function TheList() {
         setSlots(dateKey,slots);
         addHistoryEntry({type:"blocked",time:prev.time,name:blkLabel,dateKey});
       }
+      finishEdit();
+      return;
+    }
+    if (asAvail || asOvertime) {
+      // Typing "a" / "o" marks an OPEN slot AVAILABLE / OVERTIME (same green
+      // highlight as the double-tap mark). cycleSlotMark refuses named/blocked
+      // slots, so this never wipes a booking — if the slot isn't open, the typed
+      // letter is simply discarded and the slot is left exactly as it was.
+      cycleSlotMark(dateKey, idx, asOvertime ? "overtime" : "available");
       finishEdit();
       return;
     }
@@ -1333,7 +1350,7 @@ export default function TheList() {
     var cv = valsArg || editValuesRef.current;
     var rawName = stripLeadingNumbers((cv.name||"").trim());
     if (!rawName && prev.name) rawName = prev.name; // blur may have committed already
-    if (isLunchName(rawName) || isBlockName(rawName) || !rawName) { doCommit(dateKey, idx, cv, keepActive); return; }
+    if (isLunchName(rawName) || isBlockName(rawName) || isAvailName(rawName) || isOvertimeName(rawName) || !rawName) { doCommit(dateKey, idx, cv, keepActive); return; }
     var newName = capitalizeFirst(rawName);
     var newPrice = (cv.price||"").trim() || prev.price || "";
     var snapshot = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
@@ -3607,7 +3624,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v43</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v44</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -4673,7 +4690,7 @@ export default function TheList() {
                             <button onClick={function(e){ e.stopPropagation(); removeCustomSlot(dateKey,idx); }} style={{background:"none",border:"none",color:"#ddd",fontSize:"12px",cursor:"pointer",fontFamily:"inherit",padding:"2px 4px"}} onMouseEnter={function(e){ e.currentTarget.style.color="#c0392b"; }} onMouseLeave={function(e){ e.currentTarget.style.color="#ddd"; }}>{"× slot"}</button>
                           </div>
                         )}
-                        {!filled&&!slot.blocked&&!isEditing&&!(reassignMode&&reassignMode.currentDateKey===dateKey)&&!placingClient&&slot.availStatus&&(
+                        {view!=="Week"&&!filled&&!slot.blocked&&!isEditing&&!(reassignMode&&reassignMode.currentDateKey===dateKey)&&!placingClient&&slot.availStatus&&(
                           <div style={{position:"absolute",right:"10px",top:0,bottom:0,display:"flex",alignItems:"center",pointerEvents:"auto",zIndex:2}}>
                             <button onClick={function(e){ e.stopPropagation(); cycleSlotMark(dateKey,idx,null); }} title="Restore to an open slot" style={{background:"#fff",border:"1px solid #cfe6cf",borderRadius:"50%",width:"20px",height:"20px",display:"flex",alignItems:"center",justifyContent:"center",color:"#3a7a3a",fontSize:"13px",lineHeight:1,cursor:"pointer",fontFamily:"inherit",padding:0}}>{"×"}</button>
                           </div>
@@ -4738,7 +4755,7 @@ export default function TheList() {
                             >
                               {isOccEdit&&<div style={{position:"absolute",top:"2px",left:"70px",fontSize:"9px",color:"#c0392b"}}>Editing {slot.name}</div>}
                               <input
-                                value={isEditing?editValues.name:(wasRemoved?"":(slot.name||((!filled&&slot.availStatus)?(slot.availStatus==="overtime"?"OVERTIME PREMIUM":"AVAILABLE"):"")))}
+                                value={isEditing?editValues.name:(wasRemoved?"":(slot.name||((!filled&&slot.availStatus)?(slot.availStatus==="overtime"?"OVERTIME":"AVAILABLE"):"")))}
                                 readOnly={!isEditing && !phoneEmptyTypable}
                                 name="tlentry" inputMode="text" data-lpignore="true" data-1p-ignore="true" data-form-type="other" data-bwignore="true"
                                 autoComplete="off" autoCorrect="off" autoCapitalize="words" spellCheck={false}
