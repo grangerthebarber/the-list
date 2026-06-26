@@ -1247,8 +1247,11 @@ export default function TheList() {
     if (settleTimer.current) { clearTimeout(settleTimer.current); settleTimer.current=null; }
     if (defer) {
       // Hold the edit chrome back briefly so a fast double/triple tap doesn't flash it.
+      // Matched roughly to the multi-tap window (450ms) so the editing layout stays
+      // hidden until the tap sequence resolves; a plain single tap still gets the name
+      // field instantly (focus below) and the price box/pencil a beat later.
       setEditChromeReady(false);
-      settleTimer.current = setTimeout(function(){ settleTimer.current=null; setEditChromeReady(true); }, 140);
+      settleTimer.current = setTimeout(function(){ settleTimer.current=null; setEditChromeReady(true); }, 350);
     } else {
       setEditChromeReady(true);
     }
@@ -1812,7 +1815,7 @@ export default function TheList() {
       slotTapRef.current = {key:null,count:0,timer:null};
       if (c >= 3) cycleSlotMark(dk, ix, "overtime");
       else if (c === 2) cycleSlotMark(dk, ix, "available");
-    }, 200);
+    }, 450);
   };
 
   // Build the list of times that share a slot's group on a given day (sorted by time).
@@ -2840,6 +2843,43 @@ export default function TheList() {
       lines.push("");
     });
     if (!anyDay) { lines.push("(Nothing on the books from today forward.)"); lines.push(""); }
+    // Month totals — dollars / services / hours, summed per calendar month across every
+    // day that carries accounting data. Sorted oldest -> newest so the CURRENT month is
+    // the very last thing on the page (the spot you land on after scrolling the schedule).
+    // Day-level totals are deliberately left out; this is the month recap Granger asked
+    // for. Built in one pass over the whole accounting map (mirrors acctMonthTotals math).
+    lines.push("============================================================");
+    lines.push("MONTH TOTALS");
+    lines.push("============================================================");
+    lines.push("");
+    var fmtNum = function(n){ var r = Math.round(n*100)/100; if (r === Math.round(r)) return String(Math.round(r)); return String(r); };
+    var acctMap = accountingRef.current || {};
+    var monthAgg = {};
+    var monthOrder = [];
+    Object.keys(acctMap).forEach(function(dk){
+      var d = parseDateKey(dk);
+      if (!d || isNaN(d.getTime())) return;
+      var mm = d.getMonth();
+      var ymKey = d.getFullYear() + "-" + (mm < 9 ? "0" : "") + (mm + 1);
+      if (!monthAgg[ymKey]) {
+        monthAgg[ymKey] = {th:0, sv:0, hr:0, label:d.toLocaleDateString("en-US", {month:"long", year:"numeric"})};
+        monthOrder.push(ymKey);
+      }
+      var r = acctMap[dk] || {};
+      monthAgg[ymKey].th += acctTakehome(r);
+      monthAgg[ymKey].sv += acctNum(r.services);
+      monthAgg[ymKey].hr += acctNum(r.hours);
+    });
+    monthOrder.sort();
+    var anyMonth = false;
+    monthOrder.forEach(function(ymKey){
+      var m = monthAgg[ymKey];
+      if (m.th <= 0 && m.sv <= 0 && m.hr <= 0) return;
+      anyMonth = true;
+      lines.push(m.label + ":   $" + fmtNum(m.th) + ",   " + fmtNum(m.sv) + " services,   " + fmtNum(m.hr) + " hours");
+    });
+    if (!anyMonth) { lines.push("(No accounting recorded yet.)"); }
+    lines.push("");
     var blob = new Blob([lines.join("\n")], {type:"text/plain"});
     var url = URL.createObjectURL(blob);
     var a = document.createElement("a");
@@ -3561,7 +3601,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v41</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v42</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -3743,14 +3783,14 @@ export default function TheList() {
             <div style={{fontSize:"15px",color:"#1a1a1a",marginBottom:"18px",lineHeight:1.4}}>Step 1 of 2 — back up today's list?<div style={{fontSize:"11px",color:"#999",marginTop:"6px"}}>Saves the restore file. The schedule download comes next.</div></div>
             <div style={{display:"flex",gap:"8px"}}>
               <button onClick={function(){ setDailyExportPrompt(false); }} style={{flex:"0 0 auto",padding:"12px 16px",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"14px"}}>Skip</button>
-              <button onClick={function(){ exportData(); setDailyExportPrompt(false); setDailyDownloadPrompt(true); }} style={{flex:1,padding:"12px",background:"#c9a96e",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",fontWeight:"bold"}}>Export backup</button>
+              <button onClick={function(){ setDailyExportPrompt(false); setDailyDownloadPrompt(true); exportData(); }} style={{flex:1,padding:"12px",background:"#c9a96e",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",fontWeight:"bold"}}>Export backup</button>
             </div>
           </div>
         </div>
       )}
 
       {dailyDownloadPrompt && (
-        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={function(){ setDailyDownloadPrompt(false); }}>
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center"}}>
           <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"24px",width:"min(320px,90vw)",textAlign:"center"}} onClick={function(e){ e.stopPropagation(); }}>
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#aaa",marginBottom:"10px"}}>Backup Saved</div>
             <div style={{fontSize:"15px",color:"#1a1a1a",marginBottom:"18px",lineHeight:1.4}}>Step 2 of 2 — download the readable schedule?<div style={{fontSize:"11px",color:"#999",marginTop:"6px"}}>The plain-text copy of your day, with phone numbers.</div></div>
