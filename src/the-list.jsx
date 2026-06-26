@@ -573,7 +573,7 @@ export default function TheList() {
   dragStateRef.current = dragState;
   const viewRef = useRef(view);
   viewRef.current = view;
-  const slotTapRef = useRef({key:null,count:0,timer:null});
+  const slotTapRef = useRef({key:null,count:0,timer:null,side:null});
   // Pencil "arm" mode: clicking the pencil with an empty field arms it so the
   // next Enter pencils the person in; clicking it again disarms.
   const [pencilArmed, setPencilArmed] = useState(false);
@@ -1786,21 +1786,27 @@ export default function TheList() {
     });
   };
 
-  // Taps on an open slot: 1 = edit (handled live by the input focus), 2 =
-  // AVAILABLE, 3 = OVERTIME. On the 2nd tap we back out of the edit the first
-  // tap started so the keyboard goes away, then settle the label after a beat.
-  const handleOpenSlotTap = function(dateKey, idx) {
+  // Taps on an open slot: 1 = edit (handled live by the input focus). A DOUBLE tap
+  // MARKS the slot, and the SIDE of the tap decides which: left half = AVAILABLE,
+  // right half = OVERTIME. (Triple-tap-for-overtime was unreliable on-device — even
+  // a clean triple rarely landed — so the second choice moved off tap-COUNT and onto
+  // tap-POSITION, which double-tap already proved it can hit.) The "side" arg is
+  // "left" or "right", measured against the name cell at the call site. On the 2nd tap we back
+  // out of the edit the first tap started so the keyboard goes away, then settle the
+  // label after a beat. count>=2 (not ===2) so a stray 3rd tap still marks, not edits.
+  const handleOpenSlotTap = function(dateKey, idx, side) {
     var key = dateKey+"-"+idx;
     var st = slotTapRef.current;
     if (st.key !== key) { if (st.timer) clearTimeout(st.timer); st.key=key; st.count=0; st.timer=null; }
     st.count += 1;
+    st.side = side;
     if (st.count >= 2) {
       // If the first tap opened an edit and they've started writing a name, this
       // is real typing/cursor work — leave it alone instead of marking the slot.
       var cv = editValuesRef.current;
       if (editingRef.current && cv && (cv.name||"").trim().length>0) {
         if (st.timer) clearTimeout(st.timer);
-        slotTapRef.current = {key:null,count:0,timer:null};
+        slotTapRef.current = {key:null,count:0,timer:null,side:null};
         return;
       }
       editingRef.current=null; setEditingCell(null); setEditingOccupied(false);
@@ -1812,9 +1818,9 @@ export default function TheList() {
     var dk = dateKey; var ix = idx;
     st.timer = setTimeout(function(){
       var c = slotTapRef.current.count;
-      slotTapRef.current = {key:null,count:0,timer:null};
-      if (c >= 3) cycleSlotMark(dk, ix, "overtime");
-      else if (c === 2) cycleSlotMark(dk, ix, "available");
+      var sd = slotTapRef.current.side;
+      slotTapRef.current = {key:null,count:0,timer:null,side:null};
+      if (c >= 2) cycleSlotMark(dk, ix, sd === "right" ? "overtime" : "available");
     }, 450);
   };
 
@@ -3601,7 +3607,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v42</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v43</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -4721,7 +4727,7 @@ export default function TheList() {
                             <div onClick={function(){ placeClientInSlot(dateKey,idx); }} style={{flex:1,fontSize:"13px",color:"#2a7a2a",cursor:"pointer",padding:"0 2px"}}>tap to place</div>
                           ):(
                             <div style={{flex:1,minWidth:0,display:"flex",alignItems:"center",gap:"4px",position:"relative"}}
-                              onClick={function(){ if(filled&&slot.done) handleDoneRowTap(dateKey,idx); else if(!filled&&!slot.blocked){ if(slot.availStatus) startEdit(dateKey,idx,false); else handleOpenSlotTap(dateKey,idx); } }}
+                              onClick={function(e){ if(filled&&slot.done) handleDoneRowTap(dateKey,idx); else if(!filled&&!slot.blocked){ if(slot.availStatus) startEdit(dateKey,idx,false); else { var r=e.currentTarget.getBoundingClientRect(); var side=(r.width>0&&(e.clientX-r.left)<r.width/2)?"left":"right"; handleOpenSlotTap(dateKey,idx,side); } } }}
                               onPointerDown={function(e){ dragPointerId.current=e.pointerId; }}
                               onMouseDown={function(){ if(filled&&!slot.done&&!isEditing&&(!selectMode||selectedSlots[rowKey])) startDragLongPress(dateKey,idx,0,0); }}
                               onMouseUp={function(){ cancelDragLongPress(); }}
