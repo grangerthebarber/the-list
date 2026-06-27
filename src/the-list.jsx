@@ -895,14 +895,38 @@ export default function TheList() {
     if (!checkoffModal) { setCheckoffRecur(null); setRecurPickerOpen(false); }
   }, [checkoffModal]);
 
+  // When the accounting popup opens, drop an end-of-day estimate into the services and
+  // hours fields — but ONLY where nothing is stored AND nothing's been typed yet, so a
+  // saved number or one you just entered is never overwritten. The estimate lands in the
+  // editable draft: delete it and type your own, or just tap Done to accept it. Emptying
+  // a field and saving lets it be re-estimated next time; typing a number locks it in.
+  useEffect(function(){
+    if (!acctModal) return;
+    var dk = acctModal.dateKey;
+    var rec = acctFor(dk);
+    var est = acctAutoEstimate(dk);
+    if (!est.any) return;
+    setAcctAdd(function(prev){
+      var n = {...prev};
+      if (n.services===undefined && !(acctNum(rec.services)>0)) n.services = est.services;
+      if (n.hours===undefined && !(acctNum(rec.hours)>0)) n.hours = est.hours;
+      return n;
+    });
+  }, [acctModal]);
+
   useEffect(function() {
     var handler = function(e) {
       if ((e.ctrlKey||e.metaKey) && e.key==="z" && !e.shiftKey) { e.preventDefault(); handleUndo(); }
       if ((e.ctrlKey||e.metaKey) && (e.key==="y" || (e.key==="z" && e.shiftKey))) { e.preventDefault(); handleRedo(); }
+      // While ANY popup is open the arrows belong to the popup, not the schedule behind
+      // it — so they never page the day or jump the background to today. (Undo/redo above
+      // still work.) Each modal's own handlers take over the arrows from here.
+      var anyOverlay = !!(acctModal||noteModal||checkoffModal||confirmDelete||phoneModal||blockLabelModal||clientProfile||renameRequiredModal||recurringModal||conflictModal||groupRecurModal||holidayModal||groupScheduleModal||timeEditModal||seriesEditModal);
       // Left/Right arrows page through days (months in Month view), mirroring the
       // on-screen ‹ / › buttons. Ignored while a field is focused — there the arrows
       // move the text cursor / hop slot rows, and Shift+Arrow nudges the time.
       if ((e.key==="ArrowLeft"||e.key==="ArrowRight") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (anyOverlay) return;
         if (editingRef.current) return;
         var ae = (typeof document!=="undefined") ? document.activeElement : null;
         // Only bail when focus sits in an EDITABLE field (live text entry). After
@@ -918,6 +942,7 @@ export default function TheList() {
       // Up arrow (outside any text field) jumps straight back to today, on whatever
       // view is currently showing. Down arrow is intentionally left alone.
       if (e.key==="ArrowUp" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+        if (anyOverlay) return;
         if (editingRef.current) return;
         var aeu = (typeof document!=="undefined") ? document.activeElement : null;
         if (aeu && (aeu.tagName==="INPUT" || aeu.tagName==="TEXTAREA") && !aeu.readOnly && !aeu.disabled) return;
@@ -2293,6 +2318,34 @@ export default function TheList() {
   };
   var acctSetField = function(dateKey, field, value){ var r={...acctFor(dateKey)}; r[field]=acctNum(value); acctCommit(dateKey,r); };
   var acctAddTo = function(dateKey, method, amount){ var amt=acctNum(amount); if(!amt) return; var r={...acctFor(dateKey)}; r[method]=acctNum(r[method])+amt; acctCommit(dateKey,r); };
+  // End-of-day estimate from the checked-off appointments, used to PRE-FILL the popup.
+  // Services: each done person with no price counts as 1 (base rate); everyone with a
+  // price has their prices summed and divided by 44 (so a $66 = 1.5 services). Hours:
+  // first person's start to (last person's start + one 23-min appointment), plus 30 min
+  // for arriving early / closing up. Returns clean strings; any:false means no done
+  // appointments yet, so nothing is pre-filled. Only used when a field is still blank.
+  var ACCT_APPT_MIN = 23;   // one appointment's length (matches the default slot spacing)
+  var ACCT_PAD_MIN = 30;    // 15 min early + 15 min to close up
+  var acctFmt = function(n){ var r=Math.round(n*100)/100; if(r===Math.round(r)) return String(Math.round(r)); return String(r); };
+  var acctAutoEstimate = function(dateKey){
+    var slots = getSlots(dateKey);
+    var noPrice=0, customSum=0, firstAbs=null, lastAbs=null, any=false, i, s, p, ab;
+    for (i=0;i<slots.length;i++){
+      s = slots[i];
+      if (!s || !s.name || !s.done) continue;
+      any = true;
+      p = acctNum(s.price);
+      if (p>0) customSum += p; else noPrice += 1;
+      ab = timeToAbsMinutes(s.time);
+      if (firstAbs===null || ab<firstAbs) firstAbs = ab;
+      if (lastAbs===null || ab>lastAbs) lastAbs = ab;
+    }
+    if (!any) return {any:false, services:"", hours:""};
+    var services = noPrice + customSum/44;
+    var workMin = (lastAbs + ACCT_APPT_MIN) - firstAbs + ACCT_PAD_MIN;
+    if (workMin < 0) workMin = 0;
+    return {any:true, services:acctFmt(services), hours:acctFmt(workMin/60)};
+  };
   // Sum take-home / services / hours across every day of a given month (Date object).
   var acctMonthTotals = function(monthDate){
     var y=monthDate.getFullYear(); var m=monthDate.getMonth();
@@ -2871,11 +2924,30 @@ export default function TheList() {
     // the very last thing on the page (the spot you land on after scrolling the schedule).
     // Day-level totals are deliberately left out; this is the month recap Granger asked
     // for. Built in one pass over the whole accounting map (mirrors acctMonthTotals math).
+    var fmtNum = function(n){ var r = Math.round(n*100)/100; if (r === Math.round(r)) return String(Math.round(r)); return String(r); };
+    // Per-day numbers straight from the accounting popup — take-home $, services, and
+    // hours for every day that carries data, oldest -> newest. These are the day-by-day
+    // figures the month recap below rolls up.
+    lines.push("============================================================");
+    lines.push("DAILY NUMBERS");
+    lines.push("============================================================");
+    lines.push("");
+    var acctDayMap = accountingRef.current || {};
+    var acctDayKeys = Object.keys(acctDayMap).sort();
+    var anyDaily = false;
+    acctDayKeys.forEach(function(dk){
+      var rr = acctDayMap[dk] || {};
+      var dth = acctTakehome(rr); var dsv = acctNum(rr.services); var dhr = acctNum(rr.hours);
+      if (dth<=0 && dsv<=0 && dhr<=0) return;
+      anyDaily = true;
+      lines.push(friendlyDateLong(dk) + ":   $" + fmtNum(dth) + ",   " + fmtNum(dsv) + " services,   " + fmtNum(dhr) + " hours");
+    });
+    if (!anyDaily) { lines.push("(No accounting recorded yet.)"); }
+    lines.push("");
     lines.push("============================================================");
     lines.push("MONTH TOTALS");
     lines.push("============================================================");
     lines.push("");
-    var fmtNum = function(n){ var r = Math.round(n*100)/100; if (r === Math.round(r)) return String(Math.round(r)); return String(r); };
     var acctMap = accountingRef.current || {};
     var monthAgg = {};
     var monthOrder = [];
@@ -2912,7 +2984,7 @@ export default function TheList() {
   };
 
   const exportData = function() {
-    var data = {schedules:schedulesRef.current, clients:clientMemory, holidays:customHolidays, history:history, dayNotes:dayNotes, exportedAt:new Date().toISOString()};
+    var data = {schedules:schedulesRef.current, clients:clientMemory, holidays:customHolidays, history:history, dayNotes:dayNotes, accounting:accountingRef.current, exportedAt:new Date().toISOString()};
     var blob = new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
     var url = URL.createObjectURL(blob);
     var a = document.createElement("a");
@@ -2934,6 +3006,7 @@ export default function TheList() {
         if (data.holidays) setCustomHolidays(data.holidays);
         if (data.history) setHistory(data.history);
         if (data.dayNotes) setDayNotes(data.dayNotes);
+        if (data.accounting) setAccounting(data.accounting);
         showBanner({type:"added",name:"Backup restored",time:null,dateKey:null});
       } catch(err) { alert("Couldn't read that file."); }
     };
@@ -3624,7 +3697,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v44</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v45</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -4232,6 +4305,16 @@ export default function TheList() {
               var list=box.querySelectorAll("input"); var i; var found=-1;
               for (i=0;i<list.length;i++){ if(list[i]===e.target){ found=i; break; } }
               if (found>=0 && found+1<list.length) list[found+1].focus();
+            }
+            return;
+          }
+          if (e.key==="ArrowUp"){
+            e.preventDefault();
+            var boxU=e.target.closest("[data-acctbox='1']");
+            if (boxU){
+              var listU=boxU.querySelectorAll("input"); var iu; var foundU=-1;
+              for (iu=0;iu<listU.length;iu++){ if(listU[iu]===e.target){ foundU=iu; break; } }
+              if (foundU>0) listU[foundU-1].focus();
             }
             return;
           }
