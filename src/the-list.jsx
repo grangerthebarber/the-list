@@ -558,6 +558,7 @@ export default function TheList() {
   const appRootRef = useRef(null);
   const dragPointerId = useRef(null);
   const bannerTimer = useRef(null);
+  const bannerTapClear = useRef(null);
   const bannerRef = useRef(null);
   bannerRef.current = banner;
   const longPressTimer = useRef(null);
@@ -1025,6 +1026,28 @@ export default function TheList() {
     if (bannerTimer.current) clearTimeout(bannerTimer.current);
     setBannerSwipeY(0);
     setBanner(null);
+  };
+
+  // After an export on the iPad, the download/share sheet takes over the screen.
+  // While it's up, the banner's auto-dismiss setTimeout is FROZEN, and the sheet
+  // does NOT reliably fire the visibility/focus events the effect below listens
+  // for — so the "Backup exported" / "Schedule downloaded" banner can hang on
+  // screen forever. The one signal we can always count on is the next screen tap
+  // (the user's back, the sheet is gone). So for the export banners specifically,
+  // we arm a one-shot listener: the very next touch anywhere clears the banner.
+  // It never calls preventDefault, so that tap still does whatever it was going
+  // to do — and every other banner keeps its normal 10s / swipe behavior.
+  const armBannerTapClear = function() {
+    if (bannerTapClear.current) bannerTapClear.current();
+    var remove = function() {
+      window.removeEventListener("pointerdown", handler, true);
+      window.removeEventListener("touchstart", handler, true);
+      bannerTapClear.current = null;
+    };
+    var handler = function() { remove(); dismissBanner(); };
+    window.addEventListener("pointerdown", handler, true);
+    window.addEventListener("touchstart", handler, true);
+    bannerTapClear.current = remove;
   };
 
   // A download on the iPad takes over the screen, which can FREEZE the 10-second
@@ -2981,6 +3004,7 @@ export default function TheList() {
     a.href = url; a.download = "the-list-readable-" + toDateKey(now) + ".txt"; a.click();
     URL.revokeObjectURL(url);
     showBanner({type:"added",msg:"Schedule downloaded",time:null,dateKey:null});
+    armBannerTapClear();
   };
 
   const exportData = function() {
@@ -2992,6 +3016,7 @@ export default function TheList() {
     URL.revokeObjectURL(url);
     showBanner({type:"added",msg:"Backup exported",time:null,dateKey:null});
     setHistory(function(prev){ return [{type:"backup",name:"Backup exported",timestamp:new Date().toLocaleTimeString(),id:Date.now()+Math.random()},...prev].slice(0,200); });
+    armBannerTapClear();
   };
 
   const importData = function(e) {
@@ -3697,7 +3722,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v45</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v46</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
