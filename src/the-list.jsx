@@ -53,6 +53,27 @@ function trimRemovedTail(slots) {
   return out;
 }
 
+// When a person leaves a slot they were SHARING (two array entries at the same
+// time, drawn as one paired row), the freed entry must be REMOVED from the day,
+// not just blanked — a blanked duplicate renders as a phantom empty row stacked
+// at the shared time (the "extra slot" bug). So: if the slot at idx still shares
+// its time with another entry, splice it out and the slot collapses back to the
+// one remaining person; otherwise blank it in place (keeps the lone default-time
+// slot present). Pure — never mutates the input array. Callers apply this LAST on
+// the array they hand to setSlots, AFTER any index-based writes, so the splice
+// can't shift a still-needed index. Behaviorally identical to a plain blank
+// whenever the time is NOT shared, which is the normal, overwhelmingly common case.
+function vacateSlotCollapsing(arr, idx) {
+  if (!arr || !arr[idx]) return arr;
+  var t = arr[idx].time;
+  var shares = false; var i;
+  for (i = 0; i < arr.length; i++) { if (i !== idx && arr[i] && arr[i].time === t) { shares = true; break; } }
+  if (shares) { return arr.slice(0, idx).concat(arr.slice(idx + 1)); }
+  var out = arr.slice();
+  out[idx] = {...out[idx], name:"", price:"", done:false, recurWeeks:null, isException:false, groupId:null, pending:false, availStatus:null};
+  return out;
+}
+
 const OLD_DEFAULT_TIMES_A = [
   "6:51","7:13","7:36","7:58",
   "8:21","8:43","9:06","9:28","9:51","10:13","10:36","10:58",
@@ -531,6 +552,31 @@ export default function TheList() {
   // Second step of the morning prompt: after the backup exports, offer the readable
   // schedule download as its own tap (iPad Safari only allows one download per tap).
   const [dailyDownloadPrompt, setDailyDownloadPrompt] = useState(false);
+  // ── Share openings ───────────────────────────────────────────────────────────
+  // The "Share openings" sheet: gather open times across the coming week, pre-check
+  // the ones worth offering (gaps between bookings + the single slot just before the
+  // first booking and just after the last), let Granger trim/add, toggle overtime,
+  // pad the times, then copy a customer-ready message to the clipboard.
+  const [shareModal, setShareModal] = useState(false);
+  // Which "dateKey|time" rows are checked (offered) and which are flagged OT.
+  const [shareChecked, setShareChecked] = useState({});
+  const [shareOT, setShareOT] = useState({});
+  // The overtime surcharge — a plain number string. Shows in the header line AND in
+  // each OT time's "(OT: +$NN)" tag. Editable before copying; always a number.
+  const [shareAmt, setShareAmt] = useState("22");
+  // Time padding applied to EVERY offered time at copy/preview. Granger's "+5" means
+  // 5 minutes EARLIER (8:21 -> 8:16); "-5" means 5 minutes later. Stored as a mode so
+  // the two buttons are mutually-exclusive toggles. Overtime is judged on the REAL
+  // slot time, never the padded display time.
+  const [shareShift, setShareShift] = useState("none"); // "none" | "plus" | "minus"
+  // How many days out the sheet reaches. Starts at 7; "Load more days" adds a week.
+  const [shareWindow, setShareWindow] = useState(7);
+  // Per-day reveal of the not-pre-checked open times (kept tucked away so booked days
+  // and empty days both stay tidy until Granger wants to hand-pick more).
+  const [shareExpanded, setShareExpanded] = useState({});
+  // Brief "Copied" confirmation on the copy button.
+  const [shareCopied, setShareCopied] = useState(false);
+  const shareCopyTimer = useRef(null);
   // Header name search (iPad): what's typed, whether the dropdown is open, and the
   // current green "found them" highlight ({name lower-cased, dateKey}) that fades after 8s.
   const [searchText, setSearchText] = useState("");
@@ -1889,6 +1935,208 @@ export default function TheList() {
     }, 450);
   };
 
+  // ── Share openings: helpers ──────────────────────────────────────────────────
+  // Minutes (on a 24h scale) that count as "before 8 AM" — anything earlier is
+  // overtime by default. 8:00 itself is regular.
+  var SHARE_OT_CUTOFF = timeToAbsMinutes("8:00");
+  // The padding the active +5 / -5 mode applies, in clock minutes. "+5" (plus) makes
+  // a time EARLIER per Granger's wording, so it subtracts; "-5" (minus) adds.
+  const shareShiftDelta = function(mode) { return mode === "plus" ? -5 : (mode === "minus" ? 5 : 0); };
+  // Format a stored time ("8:21", "1:13") as "8:21 AM" / "1:13 PM", applying a
+  // clock-minute delta. Works off the afternoon-aware absolute-minute mapping so
+  // 1:00–4:00 land in the afternoon correctly.
+  const shareFmtTime = function(time, delta) {
+    var base = timeToAbsMinutes(time) + (delta || 0);
+    if (base < 0) base = 0;
+    var realH = Math.floor(base / 60);
+    var realM = base % 60;
+    var period = realH >= 12 ? "PM" : "AM";
+    var h12 = realH % 12; if (h12 === 0) h12 = 12;
+    var mm = realM < 10 ? ("0" + realM) : ("" + realM);
+    return h12 + ":" + mm + " " + period;
+  };
+  // Default-overtime check on the REAL slot time (never the padded display time).
+  const shareIsOTTime = function(time) { return timeToAbsMinutes(time) < SHARE_OT_CUTOFF; };
+  // Sanitize the OT amount to a bare number string for display in the message.
+  const shareAmtClean = function() {
+    var d = (shareAmt || "").replace(/[^0-9]/g, "");
+    return d.length ? d : "0";
+  };
+
+  // Walk the coming windowDays days and, for each, sort the open times into:
+  //   auto  — pre-checked: any gap BETWEEN booked clients, plus the single open slot
+  //           immediately before the first booking and immediately after the last.
+  //   extra — every other open time that day (shown only when a day is expanded),
+  //           so Granger can still hand-pick something further out.
+  // A day with no open times at all is dropped. Bookings = named, non-blocked slots;
+  // lunch/blocked breaks anchor nothing and are never offered. Times are de-duped, so
+  // a shared/paired slot can't double-list and a half-booked time is never offered.
+  const computeShareDays = function(windowDays) {
+    var out = [];
+    var today = new Date();
+    var d;
+    for (d = 0; d < windowDays; d++) {
+      var dateObj = addDays(today, d);
+      var dk = toDateKey(dateObj);
+      var slots = getSlots(dk);
+      var timeMap = {};
+      var i;
+      for (i = 0; i < slots.length; i++) {
+        var s = slots[i];
+        if (!s || !s.time) continue;
+        var rec = timeMap[s.time];
+        if (!rec) { rec = {hasBooked:false, hasBlocked:false, hasEmpty:false, abs:timeToAbsMinutes(s.time)}; timeMap[s.time] = rec; }
+        if (s.blocked) rec.hasBlocked = true;
+        else if (s.name) rec.hasBooked = true;
+        else rec.hasEmpty = true;
+      }
+      var times = Object.keys(timeMap);
+      var bookedAbs = [];
+      var openList = [];
+      for (i = 0; i < times.length; i++) {
+        var t = times[i]; var r = timeMap[t];
+        if (r.hasBooked) { bookedAbs.push(r.abs); }
+        else if (!r.hasBlocked && r.hasEmpty) { openList.push({time:t, abs:r.abs}); }
+      }
+      if (!openList.length) continue;
+      openList.sort(function(a, b){ return a.abs - b.abs; });
+      var hasBookings = bookedAbs.length > 0;
+      var firstAbs = 0, lastAbs = 0;
+      if (hasBookings) {
+        firstAbs = bookedAbs[0]; lastAbs = bookedAbs[0];
+        for (i = 1; i < bookedAbs.length; i++) { if (bookedAbs[i] < firstAbs) firstAbs = bookedAbs[i]; if (bookedAbs[i] > lastAbs) lastAbs = bookedAbs[i]; }
+      }
+      // Nearest open slot just before the first booking / just after the last.
+      var beforeAbs = null, afterAbs = null;
+      if (hasBookings) {
+        for (i = 0; i < openList.length; i++) {
+          var oa = openList[i].abs;
+          if (oa < firstAbs) { if (beforeAbs === null || oa > beforeAbs) beforeAbs = oa; }
+          if (oa > lastAbs) { if (afterAbs === null || oa < afterAbs) afterAbs = oa; }
+        }
+      }
+      var auto = []; var extra = [];
+      for (i = 0; i < openList.length; i++) {
+        var o = openList[i];
+        var isAuto = false;
+        if (hasBookings) {
+          if (o.abs > firstAbs && o.abs < lastAbs) isAuto = true;       // gap in the middle
+          else if (beforeAbs !== null && o.abs === beforeAbs) isAuto = true; // one before first
+          else if (afterAbs !== null && o.abs === afterAbs) isAuto = true;   // one after last
+        }
+        if (isAuto) auto.push(o); else extra.push(o);
+      }
+      out.push({dateKey:dk, label:friendlyDate(dk), hasBookings:hasBookings, auto:auto, extra:extra});
+    }
+    return out;
+  };
+
+  // Seed the checked / OT maps for a freshly computed list. preserve keeps any row
+  // the user already touched (used by "Load more days"); a fresh open passes {} so the
+  // sheet starts from the smart defaults every time.
+  const seedShareMaps = function(days, preserveChecked, preserveOT) {
+    var checked = {...(preserveChecked || {})};
+    var ot = {...(preserveOT || {})};
+    var di, si;
+    for (di = 0; di < days.length; di++) {
+      var day = days[di];
+      var all = day.auto.concat(day.extra);
+      for (si = 0; si < all.length; si++) {
+        var key = day.dateKey + "|" + all[si].time;
+        if (!(key in checked)) checked[key] = day.auto.indexOf(all[si]) !== -1;
+        if (!(key in ot)) ot[key] = shareIsOTTime(all[si].time);
+      }
+    }
+    return {checked:checked, ot:ot};
+  };
+
+  const openShareSheet = function() {
+    var days = computeShareDays(7);
+    var seeded = seedShareMaps(days, {}, {});
+    setShareChecked(seeded.checked);
+    setShareOT(seeded.ot);
+    setShareWindow(7);
+    setShareExpanded({});
+    setShareShift("none");
+    setShareCopied(false);
+    setShowHistory(false);
+    setShareModal(true);
+  };
+
+  const loadMoreShareDays = function() {
+    var next = shareWindow + 7;
+    var days = computeShareDays(next);
+    var seeded = seedShareMaps(days, shareChecked, shareOT);
+    setShareChecked(seeded.checked);
+    setShareOT(seeded.ot);
+    setShareWindow(next);
+  };
+
+  const toggleShareChecked = function(key) { setShareChecked(function(p){ var n={...p}; n[key] = !n[key]; return n; }); };
+  const toggleShareOT = function(key) { setShareOT(function(p){ var n={...p}; n[key] = !n[key]; return n; }); };
+  const toggleShareExpand = function(dk) { setShareExpanded(function(p){ var n={...p}; n[dk] = !n[dk]; return n; }); };
+  const setShareShiftMode = function(mode) { setShareShift(function(p){ return p === mode ? "none" : mode; }); };
+
+  // Assemble the customer-ready message from the current checks / OT flags / amount /
+  // padding. Header first (with the live OT amount), then one line per offered day.
+  const buildShareText = function() {
+    var amt = shareAmtClean();
+    var delta = shareShiftDelta(shareShift);
+    var header =
+      "Hello! All my current openings are listed below.\n\n" +
+      "\"OT (Overtime)\" indicates appointments outside of my regular schedule. (I offer to come in early or stay late to accommodate, for an additional $" + amt + ")\n\n" +
+      "(All the unmarked times are during regular hours, and are therefore regular price)\n\n";
+    var days = computeShareDays(shareWindow);
+    var lines = [];
+    var di, si;
+    for (di = 0; di < days.length; di++) {
+      var day = days[di];
+      var all = day.auto.concat(day.extra).slice().sort(function(a, b){ return a.abs - b.abs; });
+      var parts = [];
+      for (si = 0; si < all.length; si++) {
+        var time = all[si].time;
+        var key = day.dateKey + "|" + time;
+        if (!shareChecked[key]) continue;
+        var label = shareFmtTime(time, delta);
+        if (shareOT[key]) label = label + " (OT: +$" + amt + ")";
+        parts.push(label);
+      }
+      if (parts.length) lines.push(day.label + ": " + parts.join(", "));
+    }
+    if (!lines.length) return header + "(no openings selected)";
+    return header + lines.join("\n");
+  };
+
+  // Copy synchronously inside the tap gesture (iOS PWA requirement): try the async
+  // Clipboard API first, fall back to a hidden textarea + execCommand. No awaits run
+  // before the write, so Safari keeps the user-gesture permission.
+  const copyPlainText = function(text) {
+    var ok = false;
+    try { if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text); ok = true; } } catch (e) { ok = false; }
+    if (!ok) {
+      try {
+        var ta = document.createElement("textarea");
+        ta.value = text; ta.setAttribute("readonly", "");
+        ta.style.position = "absolute"; ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.select();
+        if (ta.setSelectionRange) ta.setSelectionRange(0, text.length);
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        ok = true;
+      } catch (e2) { ok = false; }
+    }
+    return ok;
+  };
+
+  const doShareCopy = function() {
+    var text = buildShareText();
+    copyPlainText(text);
+    setShareCopied(true);
+    if (shareCopyTimer.current) clearTimeout(shareCopyTimer.current);
+    shareCopyTimer.current = setTimeout(function(){ setShareCopied(false); }, 2200);
+  };
+
   // Build the list of times that share a slot's group on a given day (sorted by time).
   const getGroupTimes = function(dateKey, slot) {
     return getSlots(dateKey)
@@ -2659,12 +2907,12 @@ export default function TheList() {
       if (tslot && !tslot.name && !tslot.blocked) {
         tgt[m.targetIdx]={...tslot,name:m.name,price:m.price,recurWeeks:m.recurWeeks,isException:true,done:false,groupId:null,pending:!!m.pending};
         if (m.targetDateKey===m.dateKey) {
-          tgt[m.idx]={...tgt[m.idx],name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null,pending:false,availStatus:null};
+          tgt=vacateSlotCollapsing(tgt,m.idx);
           setSlots(m.targetDateKey,tgt);
         } else {
           setSlots(m.targetDateKey,tgt);
           var src=[...getSlots(m.dateKey)];
-          src[m.idx]={...src[m.idx],name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null,pending:false,availStatus:null};
+          src=vacateSlotCollapsing(src,m.idx);
           setSlots(m.dateKey,src);
         }
         addHistoryEntry({type:"rescheduled",time:m.newTime,name:m.name,price:m.price,dateKey:m.targetDateKey});
@@ -3172,14 +3420,14 @@ export default function TheList() {
     if (client.originalDateKey === targetDateKey) {
       var arr = [...getSlots(targetDateKey)];
       arr[targetIdx] = {...arr[targetIdx],name:client.name,price:client.price,recurWeeks:client.recurWeeks,isException:true,done:false};
-      arr[client.originalIdx] = {...arr[client.originalIdx],name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null};
+      arr = vacateSlotCollapsing(arr, client.originalIdx);
       setSlots(targetDateKey, arr);
     } else {
       var ts = [...getSlots(targetDateKey)];
       ts[targetIdx] = {...ts[targetIdx],name:client.name,price:client.price,recurWeeks:client.recurWeeks,isException:true,done:false};
       setSlots(targetDateKey, ts);
       var os = [...getSlots(client.originalDateKey)];
-      os[client.originalIdx] = {...os[client.originalIdx],name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null};
+      os = vacateSlotCollapsing(os, client.originalIdx);
       setSlots(client.originalDateKey, os);
     }
     addHistoryEntry({type:"rescheduled",time:targetSlot.time,name:client.name,price:client.price,dateKey:targetDateKey});
@@ -3210,7 +3458,7 @@ export default function TheList() {
       var arr = [...getSlots(targetDateKey)];
       var srcGidSame = arr[client.originalIdx] ? arr[client.originalIdx].groupId : null;
       arr[targetIdx] = {...arr[targetIdx],name:client.name,price:client.price,recurWeeks:client.recurWeeks,isException:true,done:false,groupId:null};
-      arr[client.originalIdx] = {...arr[client.originalIdx],name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null};
+      arr = vacateSlotCollapsing(arr, client.originalIdx);
       if (srcGidSame) {
         var remSame = arr.filter(function(x){ return x.groupId===srcGidSame && x.name; });
         if (remSame.length===1) { var riSame = arr.findIndex(function(x){ return x.groupId===srcGidSame && x.name; }); if (riSame>=0) arr[riSame]={...arr[riSame],groupId:null}; }
@@ -3222,7 +3470,7 @@ export default function TheList() {
       setSlots(targetDateKey, ts);
       var os = [...getSlots(client.originalDateKey)];
       var srcGidX = os[client.originalIdx] ? os[client.originalIdx].groupId : null;
-      os[client.originalIdx] = {...os[client.originalIdx],name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null};
+      os = vacateSlotCollapsing(os, client.originalIdx);
       if (srcGidX) {
         var remX = os.filter(function(x){ return x.groupId===srcGidX && x.name; });
         if (remX.length===1) { var riX = os.findIndex(function(x){ return x.groupId===srcGidX && x.name; }); if (riX>=0) os[riX]={...os[riX],groupId:null}; }
@@ -3722,7 +3970,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v46</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v48</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -4055,7 +4303,7 @@ export default function TheList() {
                   var snap={schedules:JSON.parse(JSON.stringify(schedulesRef.current))}; pushUndo(snap);
                   var slots=[...getSlots(m.dateKey)];
                   var s=slots[m.idx];
-                  slots[m.idx]={...s,name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null,pending:false,availStatus:null};
+                  slots=vacateSlotCollapsing(slots, m.idx);
                   addHistoryEntry({type:"removed",time:s.time,name:s.name,dateKey:m.dateKey});
                   setSlots(m.dateKey,slots);
                 }
@@ -4483,6 +4731,72 @@ export default function TheList() {
         </div>
       )}
 
+      {shareModal && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:600,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px"}} onClick={function(){ setShareModal(false); }}>
+          <div onClick={function(e){ e.stopPropagation(); }} style={{width:"min(560px,96vw)",maxHeight:"92vh",background:"#fafaf8",borderRadius:"12px",boxShadow:"0 12px 40px rgba(0,0,0,0.25)",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+            <div style={{padding:"16px 18px 12px",borderBottom:"1px solid #ececea",display:"flex",justifyContent:"space-between",alignItems:"center",flexShrink:0}}>
+              <div style={{fontSize:"15px",fontWeight:"bold",color:"#1a1a1a",fontFamily:"inherit"}}>Share openings</div>
+              <button onClick={function(){ setShareModal(false); }} style={{background:"none",border:"none",fontSize:"22px",color:"#999",cursor:"pointer",lineHeight:1,padding:"0 4px"}}>{"×"}</button>
+            </div>
+            <div style={{padding:"12px 18px",borderBottom:"1px solid #ececea",display:"flex",flexWrap:"wrap",gap:"16px",alignItems:"center",flexShrink:0}}>
+              <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
+                <span style={{fontSize:"12px",color:"#666"}}>OT surcharge $</span>
+                <input value={shareAmt} inputMode="numeric" onChange={function(e){ setShareAmt(e.target.value.replace(/[^0-9]/g,"")); }} style={{width:"54px",padding:"5px 7px",border:"1px solid #d8d8d6",borderRadius:"5px",background:"#fff",fontFamily:"inherit",fontSize:"13px",color:"#1a1a1a",outline:"none"}}/>
+              </div>
+              <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
+                <span style={{fontSize:"12px",color:"#666"}}>Pad times</span>
+                <button onClick={function(){ setShareShiftMode("plus"); }} style={{padding:"5px 11px",borderRadius:"6px",border:shareShift==="plus"?"1px solid #2e7d46":"1px solid #d8d8d6",background:shareShift==="plus"?"#2e7d46":"#fff",color:shareShift==="plus"?"#fff":"#777",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",fontWeight:"bold"}}>+5</button>
+                <button onClick={function(){ setShareShiftMode("minus"); }} style={{padding:"5px 11px",borderRadius:"6px",border:shareShift==="minus"?"1px solid #2e7d46":"1px solid #d8d8d6",background:shareShift==="minus"?"#2e7d46":"#fff",color:shareShift==="minus"?"#fff":"#777",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",fontWeight:"bold"}}>-5</button>
+              </div>
+            </div>
+            <div style={{flex:"1 1 auto",overflowY:"auto",padding:"4px 0",WebkitOverflowScrolling:"touch"}}>
+              {(function(){
+                var days = computeShareDays(shareWindow);
+                if (!days.length) {
+                  return <div style={{padding:"28px 18px",fontSize:"13px",color:"#999",textAlign:"center"}}>No open times in this stretch.</div>;
+                }
+                var delta = shareShiftDelta(shareShift);
+                return days.map(function(day){
+                  var expanded = !!shareExpanded[day.dateKey];
+                  var renderRow = function(o){
+                    var key = day.dateKey + "|" + o.time;
+                    var checked = !!shareChecked[key];
+                    var isOT = !!shareOT[key];
+                    return (
+                      <div key={key} style={{display:"flex",alignItems:"center",gap:"10px",padding:"7px 18px"}}>
+                        <button onClick={function(){ toggleShareChecked(key); }} style={{width:"22px",height:"22px",flexShrink:0,borderRadius:"5px",border:checked?"1.5px solid #2e7d46":"1.5px solid #c4c4c2",background:checked?"#2e7d46":"#fff",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",padding:0}}>{checked?<span style={{color:"#fff",fontSize:"13px",lineHeight:1}}>{"✓"}</span>:null}</button>
+                        <span style={{flex:"0 0 auto",minWidth:"88px",fontSize:"14px",color:checked?"#1a1a1a":"#9a9a9a",fontFamily:"Georgia,serif",fontVariantNumeric:"tabular-nums"}}>{shareFmtTime(o.time, delta)}</span>
+                        <button onClick={function(){ toggleShareOT(key); }} style={{marginLeft:"auto",flexShrink:0,padding:"3px 10px",borderRadius:"12px",border:isOT?"1px solid #c9852e":"1px solid #d8d8d6",background:isOT?"#f6e6cf":"#fff",color:isOT?"#9a5e12":"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.04em"}}>{isOT?"OT ✓":"OT"}</button>
+                      </div>
+                    );
+                  };
+                  return (
+                    <div key={day.dateKey} style={{borderBottom:"1px solid #f0f0ee"}}>
+                      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"9px 18px 2px"}}>
+                        <span style={{fontSize:"12px",letterSpacing:"0.08em",textTransform:"uppercase",color:"#888",fontWeight:"bold"}}>{day.label}</span>
+                        {!day.hasBookings&&<span style={{fontSize:"10px",color:"#bbb",letterSpacing:"0.04em"}}>no bookings</span>}
+                      </div>
+                      {day.auto.map(renderRow)}
+                      {expanded&&day.extra.map(renderRow)}
+                      {day.extra.length>0&&(
+                        <button onClick={function(){ toggleShareExpand(day.dateKey); }} style={{margin:"2px 18px 8px",background:"none",border:"none",color:"#4a8a9a",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",padding:"3px 0"}}>{expanded?"Hide extra times":("+ "+day.extra.length+" more open "+(day.extra.length===1?"time":"times"))}</button>
+                      )}
+                    </div>
+                  );
+                });
+              })()}
+              <div style={{padding:"10px 18px 16px",textAlign:"center"}}>
+                <button onClick={loadMoreShareDays} style={{background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#777",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",padding:"7px 16px"}}>Load more days</button>
+              </div>
+            </div>
+            <div style={{padding:"10px 18px 14px",borderTop:"1px solid #ececea",flexShrink:0}}>
+              <div style={{fontSize:"11px",color:"#aaa",marginBottom:"8px",lineHeight:1.3}}>A short intro and the pricing note are added to the top of the message automatically.</div>
+              <button onClick={doShareCopy} style={{width:"100%",padding:"12px",background:shareCopied?"#246b3a":"#2e7d46",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",fontWeight:"bold"}}>{shareCopied?"Copied to clipboard ✓":"Copy to clipboard"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showHistory && (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:500,display:"flex",justifyContent:"flex-end"}} onClick={function(){ setShowHistory(false); }}>
           <div style={{width:"min(360px,90vw)",height:"100%",background:"#fafaf8",borderLeft:"1px solid #e4e4e2",overflowY:"auto",padding:"24px 20px",paddingTop:"calc(env(safe-area-inset-top,0px) + 24px)",boxShadow:"-4px 0 20px rgba(0,0,0,0.08)"}} onClick={function(e){ e.stopPropagation(); }}>
@@ -4490,6 +4804,7 @@ export default function TheList() {
               <div style={{fontSize:"11px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#888"}}>Change History</div>
               <span style={{fontSize:"10px",letterSpacing:"0.04em",color:"#bbb",fontFamily:"Georgia,serif"}}>{(function(){ var n=0; var sk=Object.keys(schedules); for(var ii=0;ii<sk.length;ii++){ var arr=schedules[sk[ii]]||[]; for(var jj=0;jj<arr.length;jj++){ var ss=arr[jj]; if(ss&&ss.name&&!ss.blocked) n++; } } return n+" on the list"; })()}</span>
             </div>
+            <button onClick={openShareSheet} style={{width:"100%",padding:"11px",marginBottom:"10px",background:"#2e7d46",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",letterSpacing:"0.04em",fontWeight:"bold"}}>Share openings</button>
             <div style={{display:"flex",gap:"8px",marginBottom:"8px"}}>
               <button onClick={exportData} style={{flex:1,padding:"8px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#666",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.05em"}}>Export backup</button>
               <label style={{flex:1,padding:"8px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#666",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.05em",textAlign:"center",display:"flex",alignItems:"center",justifyContent:"center"}}>
@@ -4852,7 +5167,7 @@ export default function TheList() {
                             <div onClick={function(){ placeClientInSlot(dateKey,idx); }} style={{flex:1,fontSize:"13px",color:"#2a7a2a",cursor:"pointer",padding:"0 2px"}}>tap to place</div>
                           ):(
                             <div style={{flex:1,minWidth:0,display:"flex",alignItems:"center",gap:"4px",position:"relative"}}
-                              onClick={function(e){ if(filled&&slot.done) handleDoneRowTap(dateKey,idx); else if(!filled&&!slot.blocked){ if(slot.availStatus) startEdit(dateKey,idx,false); else { var r=e.currentTarget.getBoundingClientRect(); var side=(r.width>0&&(e.clientX-r.left)<r.width/2)?"left":"right"; handleOpenSlotTap(dateKey,idx,side); } } }}
+                              onClick={function(e){ if(filled&&slot.done) handleDoneRowTap(dateKey,idx); else if(!filled&&!slot.blocked){ startEdit(dateKey,idx,false); } }}
                               onPointerDown={function(e){ dragPointerId.current=e.pointerId; }}
                               onMouseDown={function(){ if(filled&&!slot.done&&!isEditing&&(!selectMode||selectedSlots[rowKey])) startDragLongPress(dateKey,idx,0,0); }}
                               onMouseUp={function(){ cancelDragLongPress(); }}
@@ -4867,8 +5182,8 @@ export default function TheList() {
                                 readOnly={!isEditing && !phoneEmptyTypable}
                                 name="tlentry" inputMode="text" data-lpignore="true" data-1p-ignore="true" data-form-type="other" data-bwignore="true"
                                 autoComplete="off" autoCorrect="off" autoCapitalize="words" spellCheck={false}
-                                onFocus={function(){ if(!isEditing&&!selectMode&&!isLiveDragging&&!dragState&&!slot.done) startEdit(dateKey,idx,(!filled&&!slot.availStatus)); }}
-                                onChange={function(e){ if(!isEditing){ if(!selectMode&&!isLiveDragging&&!dragState&&!slot.done) startEdit(dateKey,idx,(!filled&&!slot.availStatus)); } setEditValues(function(v){ return {...v,name:e.target.value}; }); setSuggestIdx(-1); setSuggestHide(false); if(!editChromeReady) setEditChromeReady(true); }}
+                                onFocus={function(){ if(!isEditing&&!selectMode&&!isLiveDragging&&!dragState&&!slot.done) startEdit(dateKey,idx,false); }}
+                                onChange={function(e){ if(!isEditing){ if(!selectMode&&!isLiveDragging&&!dragState&&!slot.done) startEdit(dateKey,idx,false); } setEditValues(function(v){ return {...v,name:e.target.value}; }); setSuggestIdx(-1); setSuggestHide(false); if(!editChromeReady) setEditChromeReady(true); }}
                                 onKeyDown={function(e){ if(isEditing) handleKeyDown(e,dateKey,idx); }}
                                 onBlur={function(e){ if(isEditing) handleBlur(e); }}
                                 onMouseDown={function(){ if(filled&&!slot.done&&!isEditing&&!selectMode) startDragLongPress(dateKey,idx,0,0); }}
