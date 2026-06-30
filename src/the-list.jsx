@@ -312,6 +312,14 @@ function describeBanner(entry) {
 }
 
 const VIEWS = ["Day","3-Day","Wknd","Week","Month"];
+// Default "Share openings" intro drafts. {{OT_AMT}} is replaced with the live OT
+// surcharge number at copy time, independent of which draft is active. "full" is
+// word-for-word the original always-on intro; "short" skips the OT explainer for
+// people who already know the deal.
+const DEFAULT_SHARE_DRAFTS = [
+  {id:"full", name:"Full", text:"Hello! All my current openings are listed below.\n\n\"OT (Overtime)\" indicates appointments outside of my regular schedule. (I offer to come in early or stay late to accommodate, for an additional ${{OT_AMT}})\n\n(All the unmarked times are during regular hours, and are therefore regular price)"},
+  {id:"short", name:"Short", text:"Hello! Here are my current openings:"}
+];
 
 // Compare two schedule snapshots and return the single most salient slot that
 // differs, preferring one where a name appears or disappears. Used to label
@@ -427,6 +435,15 @@ function RedoIcon(props) {
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" style={{display:"block"}}>
       <polyline points="23 4 23 10 17 10"/>
       <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+    </svg>
+  );
+}
+function SearchIcon(props) {
+  var size = props.size || 15; var color = props.color || "#888";
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{display:"block"}}>
+      <circle cx="11" cy="11" r="7"/>
+      <line x1="21" y1="21" x2="16.65" y2="16.65"/>
     </svg>
   );
 }
@@ -569,6 +586,9 @@ export default function TheList() {
   // the two buttons are mutually-exclusive toggles. Overtime is judged on the REAL
   // slot time, never the padded display time.
   const [shareShift, setShareShift] = useState("none"); // "none" | "plus" | "minus"
+  // Per-row pad override ("dateKey|time" -> "plus"|"minus"), 5 minutes either way.
+  // When a row has an override it wins over the global +5/-5 for that one time only.
+  const [shareTimeShift, setShareTimeShift] = useState({});
   // How many days out the sheet reaches. Starts at 7; "Load more days" adds a week.
   const [shareWindow, setShareWindow] = useState(7);
   // Per-day reveal of the not-pre-checked open times (kept tucked away so booked days
@@ -577,10 +597,22 @@ export default function TheList() {
   // Brief "Copied" confirmation on the copy button.
   const [shareCopied, setShareCopied] = useState(false);
   const shareCopyTimer = useRef(null);
+  // Saved intro-message drafts (the text that precedes the times). Syncs to Firebase
+  // like everything else. Each draft is {id, name, text}; text may contain the
+  // literal token {{OT_AMT}}, which is swapped for the live OT surcharge number at
+  // copy time — so the dollar amount stays independent of which draft is active and
+  // can be changed freely no matter which draft is selected.
+  const [shareDrafts, setShareDrafts] = useState(function() { return loadFromStorage("tl_sharedrafts", DEFAULT_SHARE_DRAFTS); });
+  const [shareActiveDraftId, setShareActiveDraftId] = useState(function() { return loadFromStorage("tl_sharedraftid", "full"); });
+  const [shareDraftEditing, setShareDraftEditing] = useState(false);
+  const [shareDraftEditText, setShareDraftEditText] = useState("");
+  const [shareDraftDeleteConfirm, setShareDraftDeleteConfirm] = useState(false);
   // Header name search (iPad): what's typed, whether the dropdown is open, and the
   // current green "found them" highlight ({name lower-cased, dateKey}) that fades after 8s.
   const [searchText, setSearchText] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
+  const [searchExpanded, setSearchExpanded] = useState(false);
+  const searchInputRef = useRef(null);
   const [searchHit, setSearchHit] = useState(null);
   const searchHitTimer = useRef(null);
   // Delete-a-client guards shown inside the profile: a block message (when they still
@@ -687,6 +719,10 @@ export default function TheList() {
   dayNotesRef.current = dayNotes;
   const accountingRef = useRef(accounting);
   accountingRef.current = accounting;
+  const shareDraftsRef = useRef(shareDrafts);
+  shareDraftsRef.current = shareDrafts;
+  const shareActiveDraftIdRef = useRef(shareActiveDraftId);
+  shareActiveDraftIdRef.current = shareActiveDraftId;
   const lastSyncRef = useRef(null);
   const saveTimer = useRef(null);
 
@@ -745,6 +781,8 @@ export default function TheList() {
   useEffect(function() { try { localStorage.setItem("tl_history", JSON.stringify(history)); } catch(e) {} }, [history]);
   useEffect(function() { try { localStorage.setItem("tl_daynotes", JSON.stringify(dayNotes)); } catch(e) {} }, [dayNotes]);
   useEffect(function() { try { localStorage.setItem("tl_accounting", JSON.stringify(accounting)); } catch(e) {} }, [accounting]);
+  useEffect(function() { try { localStorage.setItem("tl_sharedrafts", JSON.stringify(shareDrafts)); } catch(e) {} }, [shareDrafts]);
+  useEffect(function() { try { localStorage.setItem("tl_sharedraftid", JSON.stringify(shareActiveDraftId)); } catch(e) {} }, [shareActiveDraftId]);
 
   useEffect(function() {
     var unsub = onAuthStateChanged(fbAuth, function(u) {
@@ -764,17 +802,17 @@ export default function TheList() {
         if (first) {
           first = false;
           var seedSch = migrateSchedules(schedulesRef.current || {});
-          var seeded = {schedules:seedSch, clients:clientMemoryRef.current, holidays:customHolidaysRef.current, history:historyRef.current, dayNotes:dayNotesRef.current, accounting:accountingRef.current};
+          var seeded = {schedules:seedSch, clients:clientMemoryRef.current, holidays:customHolidaysRef.current, history:historyRef.current, dayNotes:dayNotesRef.current, accounting:accountingRef.current, shareDrafts:shareDraftsRef.current, shareActiveDraftId:shareActiveDraftIdRef.current};
           lastSyncRef.current = JSON.stringify(seeded);
           recentWritesRef.current.push(lastSyncRef.current);
-          try { setDoc(userDoc, {schedules:seedSch, clients:seeded.clients, holidays:seeded.holidays, history:seeded.history, dayNotes:seeded.dayNotes, accounting:seeded.accounting, updatedAt:serverTimestamp()}, {merge:true}); } catch(e) {}
+          try { setDoc(userDoc, {schedules:seedSch, clients:seeded.clients, holidays:seeded.holidays, history:seeded.history, dayNotes:seeded.dayNotes, accounting:seeded.accounting, shareDrafts:seeded.shareDrafts, shareActiveDraftId:seeded.shareActiveDraftId, updatedAt:serverTimestamp()}, {merge:true}); } catch(e) {}
           setHydrated(true);
         }
         return;
       }
       var data = snap.data() || {};
       var migrated = migrateSchedules(data.schedules || {});
-      var applied = {schedules:migrated, clients:data.clients||[], holidays:data.holidays||[], history:data.history||[], dayNotes:data.dayNotes||{}, accounting:data.accounting||{}};
+      var applied = {schedules:migrated, clients:data.clients||[], holidays:data.holidays||[], history:data.history||[], dayNotes:data.dayNotes||{}, accounting:data.accounting||{}, shareDrafts:(data.shareDrafts&&data.shareDrafts.length?data.shareDrafts:DEFAULT_SHARE_DRAFTS), shareActiveDraftId:data.shareActiveDraftId||"full"};
       var json = JSON.stringify(applied);
       if (recentWritesRef.current.indexOf(json) >= 0) { lastSyncRef.current = json; return; }
       if (!first && json === lastSyncRef.current) return;
@@ -786,6 +824,8 @@ export default function TheList() {
       setHistory(applied.history);
       setDayNotes(applied.dayNotes);
       setAccounting(applied.accounting);
+      setShareDrafts(applied.shareDrafts);
+      setShareActiveDraftId(applied.shareActiveDraftId);
       setHydrated(true);
     }, function(err) { setHydrated(true); });
     return function() { try { unsub(); } catch(e) {} };
@@ -793,7 +833,7 @@ export default function TheList() {
 
   useEffect(function() {
     if (!hydrated || !authUser) return;
-    var payload = {schedules:schedules, clients:clientMemory, holidays:customHolidays, history:history, dayNotes:dayNotes, accounting:accounting};
+    var payload = {schedules:schedules, clients:clientMemory, holidays:customHolidays, history:history, dayNotes:dayNotes, accounting:accounting, shareDrafts:shareDrafts, shareActiveDraftId:shareActiveDraftId};
     var json = JSON.stringify(payload);
     if (json === lastSyncRef.current) return;
     lastSyncRef.current = json;
@@ -802,9 +842,9 @@ export default function TheList() {
     if (saveTimer.current) clearTimeout(saveTimer.current);
     var uid = authUser.uid;
     saveTimer.current = setTimeout(function() {
-      try { setDoc(doc(fbDb, "users", uid), {schedules:payload.schedules, clients:payload.clients, holidays:payload.holidays, history:payload.history, dayNotes:payload.dayNotes, accounting:payload.accounting, updatedAt:serverTimestamp()}, {merge:true}); } catch(e) {}
+      try { setDoc(doc(fbDb, "users", uid), {schedules:payload.schedules, clients:payload.clients, holidays:payload.holidays, history:payload.history, dayNotes:payload.dayNotes, accounting:payload.accounting, shareDrafts:payload.shareDrafts, shareActiveDraftId:payload.shareActiveDraftId, updatedAt:serverTimestamp()}, {merge:true}); } catch(e) {}
     }, 600);
-  }, [schedules, clientMemory, customHolidays, history, dayNotes, accounting, hydrated, authUser]);
+  }, [schedules, clientMemory, customHolidays, history, dayNotes, accounting, shareDrafts, shareActiveDraftId, hydrated, authUser]);
 
   // Stop the whole page from bouncing/scrolling when there is nothing under the
   // list. iOS standalone PWAs ignore CSS overscroll-behavior, so the only thing
@@ -1942,6 +1982,13 @@ export default function TheList() {
   // The padding the active +5 / -5 mode applies, in clock minutes. "+5" (plus) makes
   // a time EARLIER per Granger's wording, so it subtracts; "-5" (minus) adds.
   const shareShiftDelta = function(mode) { return mode === "plus" ? -5 : (mode === "minus" ? 5 : 0); };
+  // The delta to actually use for one row: its own override if it has one
+  // (independent 5-minute nudge, either direction), else the global +5/-5 pad.
+  const effectiveShareDelta = function(key) {
+    var override = shareTimeShift[key];
+    if (override === "plus" || override === "minus") return shareShiftDelta(override);
+    return shareShiftDelta(shareShift);
+  };
   // Format a stored time ("8:21", "1:13") as "8:21 AM" / "1:13 PM", applying a
   // clock-minute delta. Works off the afternoon-aware absolute-minute mapping so
   // 1:00–4:00 land in the afternoon correctly.
@@ -1957,6 +2004,16 @@ export default function TheList() {
   };
   // Default-overtime check on the REAL slot time (never the padded display time).
   const shareIsOTTime = function(time) { return timeToAbsMinutes(time) < SHARE_OT_CUTOFF; };
+  // Day label for the share sheet / message: "Today" / "Tomorrow" for the first two
+  // days, a bare weekday name through 6 days out (no risk of meaning the wrong one),
+  // and the full short date from 7 days out on, so a far-future "Sunday" can't be
+  // mistaken for the wrong Sunday.
+  const shareDayLabel = function(offset, dateKey) {
+    if (offset === 0) return "Today";
+    if (offset === 1) return "Tomorrow";
+    if (offset < 7) return parseDateKey(dateKey).toLocaleDateString("en-US", {weekday:"long"});
+    return friendlyDate(dateKey);
+  };
   // Sanitize the OT amount to a bare number string for display in the message.
   const shareAmtClean = function() {
     var d = (shareAmt || "").replace(/[^0-9]/g, "");
@@ -2026,7 +2083,7 @@ export default function TheList() {
         }
         if (isAuto) auto.push(o); else extra.push(o);
       }
-      out.push({dateKey:dk, label:friendlyDate(dk), hasBookings:hasBookings, auto:auto, extra:extra});
+      out.push({dateKey:dk, label:shareDayLabel(d, dk), hasBookings:hasBookings, auto:auto, extra:extra});
     }
     return out;
   };
@@ -2058,7 +2115,10 @@ export default function TheList() {
     setShareWindow(7);
     setShareExpanded({});
     setShareShift("none");
+    setShareTimeShift({});
     setShareCopied(false);
+    setShareDraftEditing(false);
+    setShareDraftDeleteConfirm(false);
     setShowHistory(false);
     setShareModal(true);
   };
@@ -2074,18 +2134,74 @@ export default function TheList() {
 
   const toggleShareChecked = function(key) { setShareChecked(function(p){ var n={...p}; n[key] = !n[key]; return n; }); };
   const toggleShareOT = function(key) { setShareOT(function(p){ var n={...p}; n[key] = !n[key]; return n; }); };
+  const toggleShareTimeShiftMode = function(key, mode) { setShareTimeShift(function(p){ var n={...p}; n[key] = (p[key] === mode ? "none" : mode); return n; }); };
+  // Whole-day check toggle — affects ONLY the smart-picked ("auto") times for that
+  // day, never the tucked-away extras. "all" -> every auto row is checked, "none"
+  // -> none are, "some" -> a mix (tapping from "some" checks the rest).
+  const shareDayAllState = function(day) {
+    if (!day.auto.length) return "none";
+    var anyChecked = false, anyUnchecked = false, i;
+    for (i = 0; i < day.auto.length; i++) {
+      var k = day.dateKey + "|" + day.auto[i].time;
+      if (shareChecked[k]) anyChecked = true; else anyUnchecked = true;
+    }
+    if (anyChecked && !anyUnchecked) return "all";
+    if (anyChecked && anyUnchecked) return "some";
+    return "none";
+  };
+  const toggleShareDayAll = function(day) {
+    var goTo = shareDayAllState(day) === "all" ? false : true;
+    setShareChecked(function(p){
+      var n = {...p}; var i;
+      for (i = 0; i < day.auto.length; i++) { n[day.dateKey + "|" + day.auto[i].time] = goTo; }
+      return n;
+    });
+  };
   const toggleShareExpand = function(dk) { setShareExpanded(function(p){ var n={...p}; n[dk] = !n[dk]; return n; }); };
   const setShareShiftMode = function(mode) { setShareShift(function(p){ return p === mode ? "none" : mode; }); };
+
+  // ── Share openings: intro drafts ─────────────────────────────────────────────
+  const activeShareDraft = function() {
+    var i;
+    for (i = 0; i < shareDrafts.length; i++) { if (shareDrafts[i].id === shareActiveDraftId) return shareDrafts[i]; }
+    return shareDrafts[0] || {id:"full", name:"Full", text:""};
+  };
+  const selectShareDraft = function(id) { setShareActiveDraftId(id); setShareDraftEditing(false); setShareDraftDeleteConfirm(false); };
+  const startEditShareDraft = function() { setShareDraftEditText(activeShareDraft().text); setShareDraftEditing(true); setShareDraftDeleteConfirm(false); };
+  const cancelEditShareDraft = function() { setShareDraftEditing(false); setShareDraftDeleteConfirm(false); };
+  const saveShareDraftEdit = function() {
+    var id = shareActiveDraftId;
+    setShareDrafts(function(p){ return p.map(function(d){ return d.id === id ? {...d, text:shareDraftEditText} : d; }); });
+    setShareDraftEditing(false);
+    setShareDraftDeleteConfirm(false);
+  };
+  const renameShareDraft = function(id, name) {
+    setShareDrafts(function(p){ return p.map(function(d){ return d.id === id ? {...d, name:name} : d; }); });
+  };
+  const addShareDraft = function() {
+    var id = "draft" + Date.now();
+    var fresh = {id:id, name:"New draft", text:"Hello! Here are my current openings:"};
+    setShareDrafts(function(p){ return p.concat([fresh]); });
+    setShareActiveDraftId(id);
+    setShareDraftEditText(fresh.text);
+    setShareDraftEditing(true);
+    setShareDraftDeleteConfirm(false);
+  };
+  const deleteShareDraft = function(id) {
+    if (shareDrafts.length <= 1) return; // always keep at least one draft
+    var remaining = shareDrafts.filter(function(d){ return d.id !== id; });
+    setShareDrafts(remaining);
+    if (shareActiveDraftId === id) { setShareActiveDraftId(remaining[0].id); }
+    setShareDraftEditing(false);
+    setShareDraftDeleteConfirm(false);
+  };
 
   // Assemble the customer-ready message from the current checks / OT flags / amount /
   // padding. Header first (with the live OT amount), then one line per offered day.
   const buildShareText = function() {
     var amt = shareAmtClean();
-    var delta = shareShiftDelta(shareShift);
-    var header =
-      "Hello! All my current openings are listed below.\n\n" +
-      "\"OT (Overtime)\" indicates appointments outside of my regular schedule. (I offer to come in early or stay late to accommodate, for an additional $" + amt + ")\n\n" +
-      "(All the unmarked times are during regular hours, and are therefore regular price)\n\n";
+    var draftText = activeShareDraft().text.split("{{OT_AMT}}").join(amt);
+    var header = draftText + "\n\n";
     var days = computeShareDays(shareWindow);
     var lines = [];
     var di, si;
@@ -2097,14 +2213,14 @@ export default function TheList() {
         var time = all[si].time;
         var key = day.dateKey + "|" + time;
         if (!shareChecked[key]) continue;
-        var label = shareFmtTime(time, delta);
+        var label = shareFmtTime(time, effectiveShareDelta(key));
         if (shareOT[key]) label = label + " (OT: +$" + amt + ")";
         parts.push(label);
       }
       if (parts.length) lines.push(day.label + ": " + parts.join(", "));
     }
     if (!lines.length) return header + "(no openings selected)";
-    return header + lines.join("\n");
+    return header + lines.join("\n\n");
   };
 
   // Copy synchronously inside the tap gesture (iOS PWA requirement): try the async
@@ -2457,7 +2573,7 @@ export default function TheList() {
   // highlight for 8 seconds. If they have nothing coming up, open their profile
   // (where you can edit the name or delete them) and say so.
   const runClientSearch = function(name) {
-    setSearchText(""); setSearchOpen(false);
+    setSearchText(""); setSearchOpen(false); setSearchExpanded(false);
     if (searchHitTimer.current) { clearTimeout(searchHitTimer.current); searchHitTimer.current = null; }
     var dk = findNextBookingDate(name);
     if (dk) {
@@ -3256,7 +3372,7 @@ export default function TheList() {
   };
 
   const exportData = function() {
-    var data = {schedules:schedulesRef.current, clients:clientMemory, holidays:customHolidays, history:history, dayNotes:dayNotes, accounting:accountingRef.current, exportedAt:new Date().toISOString()};
+    var data = {schedules:schedulesRef.current, clients:clientMemory, holidays:customHolidays, history:history, dayNotes:dayNotes, accounting:accountingRef.current, shareDrafts:shareDraftsRef.current, shareActiveDraftId:shareActiveDraftIdRef.current, exportedAt:new Date().toISOString()};
     var blob = new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
     var url = URL.createObjectURL(blob);
     var a = document.createElement("a");
@@ -3280,6 +3396,8 @@ export default function TheList() {
         if (data.history) setHistory(data.history);
         if (data.dayNotes) setDayNotes(data.dayNotes);
         if (data.accounting) setAccounting(data.accounting);
+        if (data.shareDrafts && data.shareDrafts.length) setShareDrafts(data.shareDrafts);
+        if (data.shareActiveDraftId) setShareActiveDraftId(data.shareActiveDraftId);
         showBanner({type:"added",name:"Backup restored",time:null,dateKey:null});
       } catch(err) { alert("Couldn't read that file."); }
     };
@@ -3970,7 +4088,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v48</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v49</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -4732,67 +4850,100 @@ export default function TheList() {
       )}
 
       {shareModal && (
-        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:600,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px"}} onClick={function(){ setShareModal(false); }}>
-          <div onClick={function(e){ e.stopPropagation(); }} style={{width:"min(560px,96vw)",maxHeight:"92vh",background:"#fafaf8",borderRadius:"12px",boxShadow:"0 12px 40px rgba(0,0,0,0.25)",display:"flex",flexDirection:"column",overflow:"hidden"}}>
-            <div style={{padding:"16px 18px 12px",borderBottom:"1px solid #ececea",display:"flex",justifyContent:"space-between",alignItems:"center",flexShrink:0}}>
-              <div style={{fontSize:"15px",fontWeight:"bold",color:"#1a1a1a",fontFamily:"inherit"}}>Share openings</div>
-              <button onClick={function(){ setShareModal(false); }} style={{background:"none",border:"none",fontSize:"22px",color:"#999",cursor:"pointer",lineHeight:1,padding:"0 4px"}}>{"×"}</button>
+        <div onClick={function(e){ e.stopPropagation(); }} style={{position:"fixed",top:isPhone?0:(gridTopY>0?gridTopY:(listTopY>0?listTopY:"calc(env(safe-area-inset-top,0px) + 56px)")),left:isPhone?0:"auto",right:0,bottom:0,width:isPhone?"100%":"clamp(300px,34vw,460px)",background:"#fafaf8",borderLeft:isPhone?"none":"1px solid #ececea",boxShadow:"-6px 0 24px rgba(0,0,0,0.12)",zIndex:90,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+          <div style={{padding:"14px 16px 10px",borderBottom:"1px solid #ececea",display:"flex",justifyContent:"space-between",alignItems:"center",flexShrink:0}}>
+            <div style={{fontSize:"15px",fontWeight:"bold",color:"#1a1a1a",fontFamily:"inherit"}}>Share openings</div>
+            <button onClick={function(){ setShareModal(false); setShareDraftEditing(false); }} style={{background:"none",border:"none",fontSize:"22px",color:"#999",cursor:"pointer",lineHeight:1,padding:"0 4px"}}>{"×"}</button>
+          </div>
+
+          <div style={{padding:"10px 16px",borderBottom:"1px solid #ececea",flexShrink:0}}>
+            <div style={{display:"flex",flexWrap:"wrap",gap:"6px",alignItems:"center"}}>
+              {shareDrafts.map(function(d){
+                var active = d.id === shareActiveDraftId;
+                return (
+                  <button key={d.id} onClick={function(){ selectShareDraft(d.id); }} style={{padding:"5px 12px",borderRadius:"14px",border:active?"1px solid #2e7d46":"1px solid #d8d8d6",background:active?"#2e7d46":"#fff",color:active?"#fff":"#777",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",fontWeight:active?"bold":"normal"}}>{d.name}</button>
+                );
+              })}
+              <button onClick={addShareDraft} title="New draft" style={{width:"26px",height:"26px",borderRadius:"13px",border:"1px solid #d8d8d6",background:"#fff",color:"#777",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",display:"flex",alignItems:"center",justifyContent:"center",padding:0}}>{"+"}</button>
+              {!shareDraftEditing && <button onClick={startEditShareDraft} title="Edit this draft's message" style={{width:"26px",height:"26px",borderRadius:"13px",border:"1px solid #d8d8d6",background:"#fff",color:"#777",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",display:"flex",alignItems:"center",justifyContent:"center",padding:0,marginLeft:"auto"}}>{"✎"}</button>}
             </div>
-            <div style={{padding:"12px 18px",borderBottom:"1px solid #ececea",display:"flex",flexWrap:"wrap",gap:"16px",alignItems:"center",flexShrink:0}}>
-              <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
-                <span style={{fontSize:"12px",color:"#666"}}>OT surcharge $</span>
-                <input value={shareAmt} inputMode="numeric" onChange={function(e){ setShareAmt(e.target.value.replace(/[^0-9]/g,"")); }} style={{width:"54px",padding:"5px 7px",border:"1px solid #d8d8d6",borderRadius:"5px",background:"#fff",fontFamily:"inherit",fontSize:"13px",color:"#1a1a1a",outline:"none"}}/>
+            {shareDraftEditing && (
+              <div style={{marginTop:"10px"}}>
+                <input value={activeShareDraft().name} onChange={function(e){ renameShareDraft(shareActiveDraftId, e.target.value); }} placeholder="Draft name" style={{width:"100%",boxSizing:"border-box",marginBottom:"6px",padding:"6px 8px",border:"1px solid #d8d8d6",borderRadius:"5px",background:"#fff",fontFamily:"inherit",fontSize:"12px",color:"#1a1a1a",outline:"none"}}/>
+                <textarea value={shareDraftEditText} onChange={function(e){ setShareDraftEditText(e.target.value); }} placeholder="Hello! Here are my current openings..." style={{width:"100%",boxSizing:"border-box",minHeight:"110px",resize:"vertical",padding:"8px",border:"1px solid #d8d8d6",borderRadius:"5px",background:"#fff",fontFamily:"Georgia,serif",fontSize:"13px",color:"#1a1a1a",outline:"none"}}/>
+                <div style={{fontSize:"10px",color:"#aaa",margin:"4px 0 8px",lineHeight:1.3}}>Type {"{{OT_AMT}}"} anywhere you want the OT surcharge dollar amount to appear — it stays live even if you change drafts or the amount below.</div>
+                <div style={{display:"flex",gap:"8px"}}>
+                  <button onClick={saveShareDraftEdit} style={{flex:1,padding:"8px",background:"#2e7d46",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",fontWeight:"bold"}}>Save</button>
+                  <button onClick={cancelEditShareDraft} style={{flex:1,padding:"8px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#666",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>Cancel</button>
+                  {shareDrafts.length>1 && (
+                    <button onClick={function(){ if(shareDraftDeleteConfirm){ deleteShareDraft(shareActiveDraftId); setShareDraftDeleteConfirm(false); } else { setShareDraftDeleteConfirm(true); } }} onBlur={function(){ setShareDraftDeleteConfirm(false); }} style={{padding:"8px 10px",background:shareDraftDeleteConfirm?"#c0392b":"#fff",border:shareDraftDeleteConfirm?"1px solid #c0392b":"1px solid #e0b0a8",borderRadius:"6px",color:shareDraftDeleteConfirm?"#fff":"#c0392b",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",whiteSpace:"nowrap"}}>{shareDraftDeleteConfirm?"Tap again to delete":"Delete"}</button>
+                  )}
+                </div>
               </div>
-              <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
-                <span style={{fontSize:"12px",color:"#666"}}>Pad times</span>
-                <button onClick={function(){ setShareShiftMode("plus"); }} style={{padding:"5px 11px",borderRadius:"6px",border:shareShift==="plus"?"1px solid #2e7d46":"1px solid #d8d8d6",background:shareShift==="plus"?"#2e7d46":"#fff",color:shareShift==="plus"?"#fff":"#777",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",fontWeight:"bold"}}>+5</button>
-                <button onClick={function(){ setShareShiftMode("minus"); }} style={{padding:"5px 11px",borderRadius:"6px",border:shareShift==="minus"?"1px solid #2e7d46":"1px solid #d8d8d6",background:shareShift==="minus"?"#2e7d46":"#fff",color:shareShift==="minus"?"#fff":"#777",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",fontWeight:"bold"}}>-5</button>
-              </div>
+            )}
+          </div>
+
+          <div style={{padding:"10px 16px",borderBottom:"1px solid #ececea",display:"flex",flexWrap:"wrap",gap:"14px",alignItems:"center",flexShrink:0}}>
+            <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
+              <span style={{fontSize:"12px",color:"#666"}}>OT surcharge $</span>
+              <input value={shareAmt} inputMode="numeric" onChange={function(e){ setShareAmt(e.target.value.replace(/[^0-9]/g,"")); }} style={{width:"50px",padding:"5px 7px",border:"1px solid #d8d8d6",borderRadius:"5px",background:"#fff",fontFamily:"inherit",fontSize:"13px",color:"#1a1a1a",outline:"none"}}/>
             </div>
-            <div style={{flex:"1 1 auto",overflowY:"auto",padding:"4px 0",WebkitOverflowScrolling:"touch"}}>
-              {(function(){
-                var days = computeShareDays(shareWindow);
-                if (!days.length) {
-                  return <div style={{padding:"28px 18px",fontSize:"13px",color:"#999",textAlign:"center"}}>No open times in this stretch.</div>;
-                }
-                var delta = shareShiftDelta(shareShift);
-                return days.map(function(day){
-                  var expanded = !!shareExpanded[day.dateKey];
-                  var renderRow = function(o){
-                    var key = day.dateKey + "|" + o.time;
-                    var checked = !!shareChecked[key];
-                    var isOT = !!shareOT[key];
-                    return (
-                      <div key={key} style={{display:"flex",alignItems:"center",gap:"10px",padding:"7px 18px"}}>
-                        <button onClick={function(){ toggleShareChecked(key); }} style={{width:"22px",height:"22px",flexShrink:0,borderRadius:"5px",border:checked?"1.5px solid #2e7d46":"1.5px solid #c4c4c2",background:checked?"#2e7d46":"#fff",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",padding:0}}>{checked?<span style={{color:"#fff",fontSize:"13px",lineHeight:1}}>{"✓"}</span>:null}</button>
-                        <span style={{flex:"0 0 auto",minWidth:"88px",fontSize:"14px",color:checked?"#1a1a1a":"#9a9a9a",fontFamily:"Georgia,serif",fontVariantNumeric:"tabular-nums"}}>{shareFmtTime(o.time, delta)}</span>
-                        <button onClick={function(){ toggleShareOT(key); }} style={{marginLeft:"auto",flexShrink:0,padding:"3px 10px",borderRadius:"12px",border:isOT?"1px solid #c9852e":"1px solid #d8d8d6",background:isOT?"#f6e6cf":"#fff",color:isOT?"#9a5e12":"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.04em"}}>{isOT?"OT ✓":"OT"}</button>
-                      </div>
-                    );
-                  };
+            <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
+              <span style={{fontSize:"12px",color:"#666"}}>Pad all</span>
+              <button onClick={function(){ setShareShiftMode("plus"); }} style={{padding:"5px 10px",borderRadius:"6px",border:shareShift==="plus"?"1px solid #2e7d46":"1px solid #d8d8d6",background:shareShift==="plus"?"#2e7d46":"#fff",color:shareShift==="plus"?"#fff":"#777",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",fontWeight:"bold"}}>+5</button>
+              <button onClick={function(){ setShareShiftMode("minus"); }} style={{padding:"5px 10px",borderRadius:"6px",border:shareShift==="minus"?"1px solid #2e7d46":"1px solid #d8d8d6",background:shareShift==="minus"?"#2e7d46":"#fff",color:shareShift==="minus"?"#fff":"#777",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",fontWeight:"bold"}}>-5</button>
+            </div>
+          </div>
+
+          <div style={{flex:"1 1 auto",overflowY:"auto",padding:"4px 0",WebkitOverflowScrolling:"touch"}}>
+            {(function(){
+              var days = computeShareDays(shareWindow);
+              if (!days.length) {
+                return <div style={{padding:"28px 16px",fontSize:"13px",color:"#999",textAlign:"center"}}>No open times in this stretch.</div>;
+              }
+              return days.map(function(day){
+                var expanded = !!shareExpanded[day.dateKey];
+                var allState = shareDayAllState(day);
+                var renderRow = function(o){
+                  var key = day.dateKey + "|" + o.time;
+                  var checked = !!shareChecked[key];
+                  var isOT = !!shareOT[key];
+                  var rowDelta = effectiveShareDelta(key);
+                  var rowOverride = shareTimeShift[key];
                   return (
-                    <div key={day.dateKey} style={{borderBottom:"1px solid #f0f0ee"}}>
-                      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"9px 18px 2px"}}>
-                        <span style={{fontSize:"12px",letterSpacing:"0.08em",textTransform:"uppercase",color:"#888",fontWeight:"bold"}}>{day.label}</span>
-                        {!day.hasBookings&&<span style={{fontSize:"10px",color:"#bbb",letterSpacing:"0.04em"}}>no bookings</span>}
-                      </div>
-                      {day.auto.map(renderRow)}
-                      {expanded&&day.extra.map(renderRow)}
-                      {day.extra.length>0&&(
-                        <button onClick={function(){ toggleShareExpand(day.dateKey); }} style={{margin:"2px 18px 8px",background:"none",border:"none",color:"#4a8a9a",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",padding:"3px 0"}}>{expanded?"Hide extra times":("+ "+day.extra.length+" more open "+(day.extra.length===1?"time":"times"))}</button>
-                      )}
+                    <div key={key} style={{display:"flex",alignItems:"center",gap:"6px",padding:"6px 16px"}}>
+                      <button onClick={function(){ toggleShareChecked(key); }} style={{width:"20px",height:"20px",flexShrink:0,borderRadius:"5px",border:checked?"1.5px solid #2e7d46":"1.5px solid #c4c4c2",background:checked?"#2e7d46":"#fff",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",padding:0}}>{checked?<span style={{color:"#fff",fontSize:"12px",lineHeight:1}}>{"✓"}</span>:null}</button>
+                      <span style={{flex:"0 0 auto",minWidth:"66px",fontSize:"13px",color:checked?"#1a1a1a":"#9a9a9a",fontFamily:"Georgia,serif",fontVariantNumeric:"tabular-nums"}}>{shareFmtTime(o.time, rowDelta)}</span>
+                      <button onClick={function(){ toggleShareTimeShiftMode(key,"plus"); }} title="Nudge this time 5 min earlier" style={{width:"20px",height:"20px",flexShrink:0,padding:0,borderRadius:"4px",border:rowOverride==="plus"?"1px solid #4a8a9a":"1px solid #d8d8d6",background:rowOverride==="plus"?"#e3eef0":"#fff",color:rowOverride==="plus"?"#2c5a66":"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",lineHeight:1}}>{"+5"}</button>
+                      <button onClick={function(){ toggleShareTimeShiftMode(key,"minus"); }} title="Nudge this time 5 min later" style={{width:"20px",height:"20px",flexShrink:0,padding:0,borderRadius:"4px",border:rowOverride==="minus"?"1px solid #4a8a9a":"1px solid #d8d8d6",background:rowOverride==="minus"?"#e3eef0":"#fff",color:rowOverride==="minus"?"#2c5a66":"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",lineHeight:1}}>{"-5"}</button>
+                      <button onClick={function(){ toggleShareOT(key); }} style={{marginLeft:"auto",flexShrink:0,padding:"3px 9px",borderRadius:"12px",border:isOT?"1px solid #c9852e":"1px solid #d8d8d6",background:isOT?"#f6e6cf":"#fff",color:isOT?"#9a5e12":"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.04em"}}>{isOT?"OT ✓":"OT"}</button>
                     </div>
                   );
-                });
-              })()}
-              <div style={{padding:"10px 18px 16px",textAlign:"center"}}>
-                <button onClick={loadMoreShareDays} style={{background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#777",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",padding:"7px 16px"}}>Load more days</button>
-              </div>
+                };
+                return (
+                  <div key={day.dateKey} style={{borderBottom:"1px solid #f0f0ee"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:"8px",padding:"8px 16px 2px"}}>
+                      <button onClick={function(){ toggleShareDayAll(day); }} title="Check/uncheck all of this day's suggested times" style={{width:"16px",height:"16px",flexShrink:0,borderRadius:"4px",border:allState==="all"?"1.5px solid #2e7d46":(allState==="some"?"1.5px solid #9a9a3a":"1.5px solid #c4c4c2"),background:allState==="all"?"#2e7d46":(allState==="some"?"#e8e2b8":"#fff"),cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",padding:0}}>{allState==="all"?<span style={{color:"#fff",fontSize:"10px",lineHeight:1}}>{"✓"}</span>:(allState==="some"?<span style={{color:"#7a7a2a",fontSize:"10px",lineHeight:1}}>{"–"}</span>:null)}</button>
+                      <span style={{fontSize:"12px",letterSpacing:"0.08em",textTransform:"uppercase",color:"#888",fontWeight:"bold"}}>{day.label}</span>
+                      {!day.hasBookings&&<span style={{fontSize:"10px",color:"#bbb",letterSpacing:"0.04em",marginLeft:"auto"}}>no bookings</span>}
+                    </div>
+                    {day.auto.map(renderRow)}
+                    {expanded&&day.extra.map(renderRow)}
+                    {day.extra.length>0&&(
+                      <button onClick={function(){ toggleShareExpand(day.dateKey); }} style={{margin:"2px 16px 8px",background:"none",border:"none",color:"#4a8a9a",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",padding:"3px 0"}}>{expanded?"Hide extra times":("+ "+day.extra.length+" more open "+(day.extra.length===1?"time":"times"))}</button>
+                    )}
+                  </div>
+                );
+              });
+            })()}
+            <div style={{padding:"10px 16px 16px",textAlign:"center"}}>
+              <button onClick={loadMoreShareDays} style={{background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#777",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",padding:"7px 16px"}}>Load more days</button>
             </div>
-            <div style={{padding:"10px 18px 14px",borderTop:"1px solid #ececea",flexShrink:0}}>
-              <div style={{fontSize:"11px",color:"#aaa",marginBottom:"8px",lineHeight:1.3}}>A short intro and the pricing note are added to the top of the message automatically.</div>
-              <button onClick={doShareCopy} style={{width:"100%",padding:"12px",background:shareCopied?"#246b3a":"#2e7d46",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",fontWeight:"bold"}}>{shareCopied?"Copied to clipboard ✓":"Copy to clipboard"}</button>
-            </div>
+          </div>
+
+          <div style={{padding:"10px 16px 14px",borderTop:"1px solid #ececea",flexShrink:0}}>
+            <div style={{fontSize:"11px",color:"#aaa",marginBottom:"8px",lineHeight:1.3}}>Using the "{activeShareDraft().name}" draft as your intro message.</div>
+            <button onClick={doShareCopy} style={{width:"100%",padding:"12px",background:shareCopied?"#246b3a":"#2e7d46",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",fontWeight:"bold"}}>{shareCopied?"Copied to clipboard ✓":"Copy to clipboard"}</button>
           </div>
         </div>
       )}
@@ -4913,32 +5064,34 @@ export default function TheList() {
             ); })}
           </div>
           <div style={{position:"relative",flex:"1 1 auto",display:"flex",justifyContent:"center",padding:"0 14px",minWidth:0}}>
-            <div style={{position:"relative",width:"100%",maxWidth:"300px"}}>
-              <input value={searchText}
-                onChange={function(e){ setSearchText(e.target.value); setSearchOpen(true); }}
-                onFocus={function(){ setSearchOpen(true); }}
-                onBlur={function(){ setTimeout(function(){ setSearchOpen(false); }, 150); }}
-                onKeyDown={function(e){ if(e.key==="Enter"){ var m=searchMatches(searchText); if(m.length>0) runClientSearch(m[0]); } else if(e.key==="Escape"){ setSearchText(""); setSearchOpen(false); } }}
-                placeholder="Search a name…"
-                style={{width:"100%",boxSizing:"border-box",padding:"5px 12px",border:"1px solid #e0e0de",borderRadius:"14px",background:"#f6f6f4",fontFamily:"inherit",fontSize:"12px",color:"#1a1a1a",outline:"none"}} />
-              {searchOpen && searchText.trim() && (function(){
-                var matches = searchMatches(searchText);
-                return (
-                  <div style={{position:"absolute",top:"30px",left:0,right:0,background:"#fff",border:"1px solid #e0e0de",borderRadius:"8px",boxShadow:"0 6px 20px rgba(0,0,0,0.12)",zIndex:200,overflow:"hidden",maxHeight:"50vh",overflowY:"auto"}}>
-                    {matches.length===0 ? (
-                      <div style={{padding:"8px 12px",fontSize:"12px",color:"#aaa"}}>No matches</div>
-                    ) : matches.map(function(nm){ return (
-                      <div key={nm} onMouseDown={function(e){ e.preventDefault(); }} onClick={function(){ runClientSearch(nm); }} style={{padding:"9px 12px",fontSize:"13px",color:"#1a1a1a",cursor:"pointer",borderBottom:"1px solid #f2f2f0",fontFamily:"Georgia,serif"}}>{nm}</div>
-                    ); })}
-                  </div>
-                );
-              })()}
-            </div>
+            {!searchExpanded ? (
+              <button onClick={function(){ setSearchExpanded(true); setTimeout(function(){ if(searchInputRef.current) searchInputRef.current.focus(); }, 0); }} title="Search a name" style={{...navBtn,width:"32px",padding:"0",background:"#f6f6f4",border:"1px solid #e0e0de"}}><SearchIcon size={15} color="#888"/></button>
+            ) : (
+              <div style={{position:"relative",width:"100%",maxWidth:"300px"}}>
+                <input ref={searchInputRef} value={searchText}
+                  onChange={function(e){ setSearchText(e.target.value); setSearchOpen(true); }}
+                  onFocus={function(){ setSearchOpen(true); }}
+                  onBlur={function(){ setTimeout(function(){ setSearchOpen(false); setSearchExpanded(false); setSearchText(""); }, 150); }}
+                  onKeyDown={function(e){ if(e.key==="Enter"){ var m=searchMatches(searchText); if(m.length>0) runClientSearch(m[0]); } else if(e.key==="Escape"){ setSearchText(""); setSearchOpen(false); setSearchExpanded(false); } }}
+                  placeholder="Search a name…"
+                  style={{width:"100%",boxSizing:"border-box",padding:"5px 12px",border:"1px solid #e0e0de",borderRadius:"14px",background:"#f6f6f4",fontFamily:"inherit",fontSize:"12px",color:"#1a1a1a",outline:"none"}} />
+                {searchOpen && searchText.trim() && (function(){
+                  var matches = searchMatches(searchText);
+                  return (
+                    <div style={{position:"absolute",top:"30px",left:0,right:0,background:"#fff",border:"1px solid #e0e0de",borderRadius:"8px",boxShadow:"0 6px 20px rgba(0,0,0,0.12)",zIndex:200,overflow:"hidden",maxHeight:"50vh",overflowY:"auto"}}>
+                      {matches.length===0 ? (
+                        <div style={{padding:"8px 12px",fontSize:"12px",color:"#aaa"}}>No matches</div>
+                      ) : matches.map(function(nm){ return (
+                        <div key={nm} onMouseDown={function(e){ e.preventDefault(); }} onClick={function(){ runClientSearch(nm); }} style={{padding:"9px 12px",fontSize:"13px",color:"#1a1a1a",cursor:"pointer",borderBottom:"1px solid #f2f2f0",fontFamily:"Georgia,serif"}}>{nm}</div>
+                      ); })}
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
           </div>
           {view==="Month"&&<div style={{fontSize:"14px",color:"#1a1a1a"}}>{baseDate.toLocaleDateString("en-US",{month:"long",year:"numeric"})}</div>}
           <div style={{display:"flex",gap:"4px",alignItems:"center"}}>
-            <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()-1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,-7); }); }} style={{...navBtn,fontSize:"11px",letterSpacing:"-1px"}}>{"‹‹"}</button>
-            <button onClick={function(){ if(view==="Month"){var d=new Date(baseDate);d.setMonth(d.getMonth()+1);setBaseDate(d);}else setBaseDate(function(d){ return addDays(d,7); }); }} style={{...navBtn,fontSize:"11px",letterSpacing:"-1px"}}>{"››"}</button>
             <button onClick={function(){ if(navCanBack) goBack(); }} title="Back to previous view" style={{...navBtn,fontSize:"16px",width:"32px",padding:"0",opacity:navCanBack?1:0.35,cursor:navCanBack?"pointer":"default"}}>{"←"}</button>
             <button onClick={function(){ if(navCanFwd) goFwd(); }} title="Forward to next view" style={{...navBtn,fontSize:"16px",width:"32px",padding:"0",opacity:navCanFwd?1:0.35,cursor:navCanFwd?"pointer":"default"}}>{"→"}</button>
             <div style={{width:"10px"}}/>
