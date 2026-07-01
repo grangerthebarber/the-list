@@ -1659,7 +1659,16 @@ export default function TheList() {
     var newPrice = (cv.price||"").trim() || prev.price || "";
     var snapshot = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
     pushUndo(snapshot);
-    slots[idx] = {...prev,name:newName,price:newPrice,pending:true,done:false};
+    // v55: a pencil-in must never inherit the previous occupant's recurring/exception
+    // flags. When a DIFFERENT name is penciled onto a row (e.g. a new client dropped
+    // into a spot a recurring client just vacated — even before the blank name has
+    // been committed, so prev is still the recurring person), the previous spread
+    // carried recurWeeks straight onto the new name and marked them recurring with no
+    // "just this one / all slots" prompt. That was the inheritance bug. Re-penciling
+    // the SAME name (a price tweak, re-offering the same person) keeps their flag.
+    var pWrite = {...prev,name:newName,price:newPrice,pending:true,done:false};
+    if ((newName||"").toLowerCase() !== (prev.name||"").toLowerCase()) { pWrite.recurWeeks = null; pWrite.isException = false; }
+    slots[idx] = pWrite;
     setSlots(dateKey,slots);
     if (!prev.name) {
       setClientMemory(function(mem) {
@@ -4370,7 +4379,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v54</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v55</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
