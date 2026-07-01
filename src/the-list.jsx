@@ -1511,13 +1511,17 @@ export default function TheList() {
       finishEdit();
       return;
     }
-    // #6C-profile: changing ONLY the price of a person who has a saved profile (a
-    // client-memory entry with a phone) asks whether it's just this appointment or their
-    // profile default. #3 (v51): this now applies to RECURRING clients too — a recurring
-    // price-only change falls through to here from above, so recurring and non-recurring
-    // get the identical price question. A person with NO profile (recurring or not) skips
-    // this and just changes the one appointment (the general write below). Name changes
-    // fall through to the normal path.
+    // #6C-profile / v54: changing ONLY the price of a person who has a saved profile (a
+    // client-memory entry with a phone) NO LONGER asks "just this time / always." Per
+    // Granger: a price change is ALWAYS the client's new price. It attaches to the PROFILE
+    // and sweeps every upcoming booking, applied synchronously right here at commit — no
+    // modal round-trip (the old modal sometimes failed to land the change). Past and
+    // already-checked-off appointments keep the price that was actually charged. A person
+    // with NO profile (recurring or not) has no profile to attach to, so they fall through
+    // to the general write below and just this one appointment changes. This applies to
+    // RECURRING clients too (v51 #3) — every future occurrence of the series is repriced.
+    // Name changes fall through to the normal path. (The old profilePriceModal + its
+    // applyProfilePrice handler are left dormant as a fallback; nothing opens them now.)
     if (prev.name && newName && newName===prev.name && newPrice!==prev.price) {
       var memNowPP = clientMemoryRef.current || [];
       var hasProfilePP = false;
@@ -1526,8 +1530,35 @@ export default function TheList() {
         if (cPP && cPP.name && cPP.name.toLowerCase()===newName.toLowerCase() && cPP.phone && String(cPP.phone).trim()) { hasProfilePP = true; break; }
       }
       if (hasProfilePP) {
+        var snapPP = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
+        pushUndo(snapPP);
+        var todayKeyPP = toDateKey(new Date());
+        var lowerPP = newName.toLowerCase();
+        var newSchPP = {...schedulesRef.current};
+        Object.keys(newSchPP).forEach(function(dk){
+          var dayPP = newSchPP[dk]; if (!dayPP) return;
+          var isEditedDayPP = (dk===dateKey);
+          var isFuturePP = (dk >= todayKeyPP);
+          if (!isEditedDayPP && !isFuturePP) return;
+          var changedPP = false;
+          var outPP = dayPP.map(function(s, si){
+            // The appointment being edited always takes the new price (even if its day is
+            // in the past — that's this record being corrected).
+            if (isEditedDayPP && si===idx) { changedPP = true; return {...s, price:newPrice}; }
+            // Every other UPCOMING, not-yet-done booking under this name is repriced too.
+            if (isFuturePP && s.name && s.name.toLowerCase()===lowerPP && !s.done) { changedPP = true; return {...s, price:newPrice}; }
+            return s;
+          });
+          if (changedPP) newSchPP[dk] = outPP;
+        });
+        setSchedules(newSchPP);
+        setClientMemory(function(mem) {
+          var iPP = mem.findIndex(function(c){ return c.name && c.name.toLowerCase()===lowerPP; });
+          if (iPP>=0) { var uPP=[...mem]; uPP[iPP]={...uPP[iPP],price:newPrice}; return uPP; }
+          return mem;
+        });
+        addHistoryEntry({type:"edited",time:prev.time,name:newName,prevName:newName,dateKey:dateKey});
         finishEdit();
-        setProfilePriceModal({dateKey:dateKey, idx:idx, name:newName, oldPrice:prev.price, newPrice:newPrice});
         return true;
       }
     }
@@ -4339,7 +4370,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v53</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v54</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
