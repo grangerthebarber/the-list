@@ -170,6 +170,19 @@ function friendlyDateLong(dateKey) {
   return d.toLocaleDateString("en-US", {weekday:"long", month:monthStyle, day:"numeric"});
 }
 function friendlyDateTime(time, dateKey) { return time + ", " + friendlyDateLong(dateKey); }
+// Turn a real Date (e.g. a backup's exportedAt) into "Today at 5:40 AM",
+// "Yesterday at 5:40 AM", or "Mon, Jun 29 at 5:40 AM". Used by the import confirm.
+function friendlyWhen(date) {
+  if (!date || isNaN(date.getTime())) return "";
+  var t = date.toLocaleTimeString("en-US", {hour:"numeric", minute:"2-digit"});
+  var thatKey = toDateKey(date);
+  var now = new Date();
+  var todayKey = toDateKey(now);
+  var y = new Date(now.getFullYear(), now.getMonth(), now.getDate()-1);
+  var yestKey = toDateKey(y);
+  var dayLabel = thatKey===todayKey ? "Today" : (thatKey===yestKey ? "Yesterday" : friendlyDate(thatKey));
+  return dayLabel + " at " + t;
+}
 function dayOfWeek(dateKey) { return parseDateKey(dateKey).getDay(); }
 
 function isOldDefault(slots) {
@@ -623,6 +636,11 @@ export default function TheList() {
   const [sharedRemove, setSharedRemove] = useState(null);
   const [seriesEditModal, setSeriesEditModal] = useState(null);
   const [renameRequiredModal, setRenameRequiredModal] = useState(null);
+  // Import backup confirm: {data, whenText}. Held aside so we can ask before overwriting.
+  const [importConfirm, setImportConfirm] = useState(null);
+  // Price change on a profiled, non-recurring person: {dateKey, idx, name, oldPrice, newPrice}.
+  // Asks whether the new price is just this appointment or the person's saved profile default.
+  const [profilePriceModal, setProfilePriceModal] = useState(null);
   const [navAnim, setNavAnim] = useState({n:0,dir:0});
   const [bannerSwipeY, setBannerSwipeY] = useState(0);
   const bannerTouchStart = useRef(null);
@@ -755,28 +773,24 @@ export default function TheList() {
   useEffect(function() { try { localStorage.setItem("tl_clients", JSON.stringify(clientMemory)); } catch(e) {} }, [clientMemory]);
   // Keep the saved-clients roster complete: any name written to the schedule by ANY
   // path (Shift+Enter groups, book-next, drag, recurring fill-out) gets folded in.
-  // Previously only the plain type-a-name path saved to the roster, so father/son
-  // links and booked-forward names never showed up under Saved Clients.
+  // #6: Profiles are only for people with numbers. This used to auto-add every booked
+  // name to the roster; now it does the opposite — it keeps the roster to entries that
+  // have a phone, dropping any without one (existing no-number profiles, or any that
+  // slip in elsewhere). This ONLY prunes the saved-profile roster; it never touches the
+  // schedule, so nobody is ever removed from The List. Returns the same array untouched
+  // when there's nothing to drop, so it can't loop or cause needless cloud sync.
   useEffect(function() {
     setClientMemory(function(mem){
-      var have = {};
-      for (var i=0;i<mem.length;i++) { if(mem[i]&&mem[i].name) have[mem[i].name.toLowerCase()]=true; }
-      var additions = []; var seen = {};
-      var keys = Object.keys(schedules);
-      for (var k=0;k<keys.length;k++) {
-        var day = schedules[keys[k]];
-        for (var j=0;j<day.length;j++) {
-          var s = day[j];
-          if (s.name && !s.blocked) {
-            var lc = s.name.toLowerCase();
-            if (!have[lc] && !seen[lc]) { seen[lc]=true; additions.push({name:s.name,price:s.price||""}); }
-          }
-        }
+      if (!mem || mem.length===0) return mem;
+      var kept = []; var dropped = false;
+      for (var i=0;i<mem.length;i++) {
+        var c = mem[i];
+        if (c && c.phone && String(c.phone).trim()) { kept.push(c); }
+        else { dropped = true; }
       }
-      if (additions.length===0) return mem;
-      return mem.concat(additions);
+      return dropped ? kept : mem;
     });
-  }, [schedules]);
+  }, [schedules, clientMemory, hydrated]);
   useEffect(function() { try { localStorage.setItem("tl_holidays", JSON.stringify(customHolidays)); } catch(e) {} }, [customHolidays]);
   useEffect(function() { try { localStorage.setItem("tl_history", JSON.stringify(history)); } catch(e) {} }, [history]);
   useEffect(function() { try { localStorage.setItem("tl_daynotes", JSON.stringify(dayNotes)); } catch(e) {} }, [dayNotes]);
@@ -1008,7 +1022,7 @@ export default function TheList() {
       // While ANY popup is open the arrows belong to the popup, not the schedule behind
       // it — so they never page the day or jump the background to today. (Undo/redo above
       // still work.) Each modal's own handlers take over the arrows from here.
-      var anyOverlay = !!(acctModal||noteModal||checkoffModal||confirmDelete||phoneModal||blockLabelModal||clientProfile||renameRequiredModal||recurringModal||conflictModal||groupRecurModal||holidayModal||groupScheduleModal||timeEditModal||seriesEditModal);
+      var anyOverlay = !!(acctModal||noteModal||checkoffModal||confirmDelete||phoneModal||blockLabelModal||clientProfile||renameRequiredModal||recurringModal||conflictModal||groupRecurModal||holidayModal||groupScheduleModal||timeEditModal||seriesEditModal||importConfirm||profilePriceModal);
       // Left/Right arrows page through days (months in Month view), mirroring the
       // on-screen ‹ / › buttons. Ignored while a field is focused — there the arrows
       // move the text cursor / hop slot rows, and Shift+Arrow nudges the time.
@@ -1454,6 +1468,23 @@ export default function TheList() {
       finishEdit();
       return;
     }
+    // #6C-profile: changing ONLY the price of a non-recurring person who has a saved
+    // profile (a client-memory entry with a phone) asks whether it's just this
+    // appointment or their profile default. Recurring people returned above (they get
+    // the series modal). Name changes fall through to the normal path.
+    if (prev.name && newName && newName===prev.name && newPrice!==prev.price) {
+      var memNowPP = clientMemoryRef.current || [];
+      var hasProfilePP = false;
+      for (var piPP=0; piPP<memNowPP.length; piPP++) {
+        var cPP = memNowPP[piPP];
+        if (cPP && cPP.name && cPP.name.toLowerCase()===newName.toLowerCase() && cPP.phone && String(cPP.phone).trim()) { hasProfilePP = true; break; }
+      }
+      if (hasProfilePP) {
+        finishEdit();
+        setProfilePriceModal({dateKey:dateKey, idx:idx, name:newName, oldPrice:prev.price, newPrice:newPrice});
+        return true;
+      }
+    }
     if (newName!==prev.name || newPrice!==prev.price || prev.availStatus) {
       var snapshot = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
       pushUndo(snapshot);
@@ -1465,12 +1496,38 @@ export default function TheList() {
         setClientMemory(function(mem) {
           var existing = mem.findIndex(function(c){ return c.name.toLowerCase()===newName.toLowerCase(); });
           if (existing>=0) { var updated=[...mem]; updated[existing]={...updated[existing],name:newName,price:newPrice||mem[existing].price}; return updated; }
-          return [...mem,{name:newName,price:newPrice}];
+          // #6: profiles are only for people with numbers, so booking a fresh name no
+          // longer auto-creates a roster profile. A profile is created when a phone is
+          // added on the profile card. Existing (phoned) profiles above still update.
+          return mem;
         });
       } else if (prev.name&&newName) addHistoryEntry({type:"edited",time:slots[idx].time,name:newName,prevName:prev.name,dateKey});
     }
     finishEdit();
   },[getSlots]);
+
+  // Apply the profile-price choice from the modal. "once" writes only this appointment;
+  // "always" writes this appointment AND updates the person's saved profile default so
+  // future bookings start there. Never touches other already-booked appointments.
+  const applyProfilePrice = function(scope) {
+    var m = profilePriceModal; if (!m) return;
+    var slots = [...getSlots(m.dateKey)];
+    var prev = slots[m.idx];
+    if (!prev) { setProfilePriceModal(null); return; }
+    var snapshot = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
+    pushUndo(snapshot);
+    slots[m.idx] = {...prev, price:m.newPrice};
+    setSlots(m.dateKey, slots);
+    addHistoryEntry({type:"edited",time:prev.time,name:m.name,prevName:m.name,dateKey:m.dateKey});
+    if (scope==="always") {
+      setClientMemory(function(mem) {
+        var i = mem.findIndex(function(c){ return c.name && c.name.toLowerCase()===m.name.toLowerCase(); });
+        if (i>=0) { var u=[...mem]; u[i]={...u[i],price:m.newPrice}; return u; }
+        return mem;
+      });
+    }
+    setProfilePriceModal(null);
+  };
 
   // Save a name as "penciled in" (tentative) — offered but not yet confirmed.
   const commitPenciled = function(dateKey, idx, valsArg, keepActive) {
@@ -1495,7 +1552,8 @@ export default function TheList() {
       setClientMemory(function(mem) {
         var existing = mem.findIndex(function(c){ return c.name.toLowerCase()===newName.toLowerCase(); });
         if (existing>=0) { var u=[...mem]; u[existing]={...u[existing],name:newName,price:newPrice||mem[existing].price}; return u; }
-        return [...mem,{name:newName,price:newPrice}];
+        // #6: no auto-profile for a fresh name — a profile exists only once a phone is added.
+        return mem;
       });
     }
     addHistoryEntry({type:"added",time:prev.time,name:newName,price:newPrice,dateKey,bannerType:"penciled"});
@@ -1629,6 +1687,7 @@ export default function TheList() {
     var seen = {}; var starts = []; var contains = [];
     mem.forEach(function(c){
       if (!c || !c.name) return;
+      if (!c.phone || !String(c.phone).trim()) return; // #6: only phoned profiles
       var ln = c.name.toLowerCase();
       if (seen[ln] || ln===t) return;
       var pos = ln.indexOf(t);
@@ -2562,9 +2621,23 @@ export default function TheList() {
   const searchMatches = function(text) {
     var q = (text || "").trim().toLowerCase();
     if (!q) return [];
+    // #6: the roster is now phone-only, but search should still jump to ANYONE booked
+    // on The List, number or not — so pool phoned profiles with everyone on the schedule.
+    var seen = {}; var out = [];
+    var consider = function(nm){
+      if (!nm) return;
+      var lo = nm.toLowerCase();
+      if (seen[lo]) return;
+      if (lo.indexOf(q) === -1) return;
+      seen[lo] = true; out.push(nm);
+    };
     var mem = clientMemoryRef.current || [];
-    var out = [];
-    mem.forEach(function(c){ if (c.name && c.name.toLowerCase().indexOf(q) !== -1) out.push(c.name); });
+    mem.forEach(function(c){ if (c && c.name && c.phone && String(c.phone).trim()) consider(c.name); });
+    var sch = schedulesRef.current || {};
+    Object.keys(sch).forEach(function(k){
+      var day = sch[k] || [];
+      for (var i=0;i<day.length;i++) { var s=day[i]; if (s && s.name && !s.blocked) consider(s.name); }
+    });
     out.sort(function(a,b){ return a.toLowerCase().localeCompare(b.toLowerCase()); });
     return out.slice(0, 8);
   };
@@ -3383,6 +3456,10 @@ export default function TheList() {
     armBannerTapClear();
   };
 
+  // Importing a backup replaces everything, so we parse the file first and ASK before
+  // applying. The export stamps the moment it was made (exportedAt); if that's missing
+  // (an older backup) we fall back to the file's own modified time, and if neither is
+  // available we say "an unknown time" but still ask.
   const importData = function(e) {
     var file=e.target.files&&e.target.files[0];
     if (!file) return;
@@ -3390,19 +3467,31 @@ export default function TheList() {
     reader.onload=function(ev) {
       try {
         var data=JSON.parse(ev.target.result);
-        if (data.schedules) { setSchedules(migrateSchedules(data.schedules)); }
-        if (data.clients) setClientMemory(data.clients);
-        if (data.holidays) setCustomHolidays(data.holidays);
-        if (data.history) setHistory(data.history);
-        if (data.dayNotes) setDayNotes(data.dayNotes);
-        if (data.accounting) setAccounting(data.accounting);
-        if (data.shareDrafts && data.shareDrafts.length) setShareDrafts(data.shareDrafts);
-        if (data.shareActiveDraftId) setShareActiveDraftId(data.shareActiveDraftId);
-        showBanner({type:"added",name:"Backup restored",time:null,dateKey:null});
+        var when=null;
+        if (data.exportedAt) { var d1=new Date(data.exportedAt); if(!isNaN(d1.getTime())) when=d1; }
+        if (!when && file.lastModified) { var d2=new Date(file.lastModified); if(!isNaN(d2.getTime())) when=d2; }
+        var whenText = when ? friendlyWhen(when) : "an unknown time";
+        setImportConfirm({data:data, whenText:whenText});
       } catch(err) { alert("Couldn't read that file."); }
     };
     reader.readAsText(file);
     e.target.value="";
+  };
+
+  // Actually restore, once the user confirms in the import dialog.
+  const applyImport = function() {
+    var m = importConfirm; if (!m) return;
+    var data = m.data;
+    if (data.schedules) { setSchedules(migrateSchedules(data.schedules)); }
+    if (data.clients) setClientMemory(data.clients);
+    if (data.holidays) setCustomHolidays(data.holidays);
+    if (data.history) setHistory(data.history);
+    if (data.dayNotes) setDayNotes(data.dayNotes);
+    if (data.accounting) setAccounting(data.accounting);
+    if (data.shareDrafts && data.shareDrafts.length) setShareDrafts(data.shareDrafts);
+    if (data.shareActiveDraftId) setShareActiveDraftId(data.shareActiveDraftId);
+    setImportConfirm(null);
+    showBanner({type:"added",msg:"Backup restored",time:null,dateKey:null});
   };
 
   const handleTouchStart = function(e,dateKey,idx) { touchStart.current={x:e.touches[0].clientX,dateKey,idx}; };
@@ -4088,7 +4177,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v49</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v50</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -4343,6 +4432,31 @@ export default function TheList() {
             <button onClick={function(){ if(seriesEditModal.field==="time"){ applySeriesTime("all"); } else if(seriesEditModal.field==="drop"){ applySeriesDrop("all"); } else if(seriesEditModal.field==="lock"){ applySeriesLock("all"); } else { applySeriesNamePrice("all"); } }} style={{display:"block",width:"100%",padding:"12px",background:"#1a1a1a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",marginBottom:"10px"}}>All of {(seriesEditModal.field==="nameprice"?seriesEditModal.oldName:seriesEditModal.name)||"this client"}'s appointments</button>
             <button onClick={function(){ if(seriesEditModal.field==="time"){ applySeriesTime("one"); } else if(seriesEditModal.field==="drop"){ applySeriesDrop("one"); } else if(seriesEditModal.field==="lock"){ applySeriesLock("one"); } else { applySeriesNamePrice("one"); } }} style={{display:"block",width:"100%",padding:"12px",background:"#ffffff",border:"1px solid #d0d0ce",borderRadius:"8px",color:"#1a1a1a",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",marginBottom:"14px"}}>Just this one</button>
             <button onClick={function(){ setSeriesEditModal(null); }} style={{display:"block",width:"100%",padding:"8px",background:"none",border:"none",color:"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {importConfirm && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:1150,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px",boxSizing:"border-box"}} onClick={function(){ setImportConfirm(null); }}>
+          <div style={{background:"#f8f8f6",border:"1px solid #d8d8d6",borderRadius:"12px",padding:"26px 26px 22px",width:"min(360px,92vw)"}} onClick={function(e){ e.stopPropagation(); }}>
+            <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#a97a4a",marginBottom:"8px"}}>Import backup</div>
+            <div style={{fontSize:"16px",color:"#1a1a1a",marginBottom:"6px"}}>Import the backup from {importConfirm.whenText}?</div>
+            <div style={{fontSize:"12px",color:"#888",marginBottom:"20px"}}>This replaces everything currently on The List — appointments, profiles, notes, and accounting.</div>
+            <button onClick={applyImport} style={{display:"block",width:"100%",padding:"12px",background:"#1a1a1a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",marginBottom:"14px"}}>Import</button>
+            <button onClick={function(){ setImportConfirm(null); }} style={{display:"block",width:"100%",padding:"8px",background:"none",border:"none",color:"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {profilePriceModal && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:1150,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px",boxSizing:"border-box"}} onClick={function(){ setProfilePriceModal(null); }}>
+          <div style={{background:"#f8f8f6",border:"1px solid #d8d8d6",borderRadius:"12px",padding:"26px 26px 22px",width:"min(360px,92vw)"}} onClick={function(e){ e.stopPropagation(); }}>
+            <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#4a8a9a",marginBottom:"8px"}}>Price change</div>
+            <div style={{fontSize:"16px",color:"#1a1a1a",marginBottom:"6px"}}>Change {profilePriceModal.name}'s price to…</div>
+            <div style={{fontSize:"12px",color:"#888",marginBottom:"20px"}}>{"\u201cAlways\u201d updates "+profilePriceModal.name+"'s saved profile so future bookings start at "+(profilePriceModal.newPrice?("$"+profilePriceModal.newPrice):"no set price")+". \u201cJust this time\u201d changes only this appointment."}</div>
+            <button onClick={function(){ applyProfilePrice("always"); }} style={{display:"block",width:"100%",padding:"12px",background:"#1a1a1a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",marginBottom:"10px"}}>Always for {profilePriceModal.name}</button>
+            <button onClick={function(){ applyProfilePrice("once"); }} style={{display:"block",width:"100%",padding:"12px",background:"#ffffff",border:"1px solid #d0d0ce",borderRadius:"8px",color:"#1a1a1a",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",marginBottom:"14px"}}>Just this time</button>
+            <button onClick={function(){ setProfilePriceModal(null); }} style={{display:"block",width:"100%",padding:"8px",background:"none",border:"none",color:"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>Cancel</button>
           </div>
         </div>
       )}
