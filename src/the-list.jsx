@@ -492,6 +492,17 @@ function MessageIcon(props) {
   );
 }
 
+// Two overlapping squares — the universal copy/paste glyph.
+function CopyIcon(props) {
+  var size = props.size || 18; var color = props.color || "#888";
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinejoin="round" strokeLinecap="round" style={{display:"block"}}>
+      <rect x="9" y="9" width="12" height="12" rx="2"/>
+      <path d="M5 15 L4 15 C2.9 15 2 14.1 2 13 L2 4 C2 2.9 2.9 2 4 2 L13 2 C14.1 2 15 2.9 15 4 L15 5"/>
+    </svg>
+  );
+}
+
 // Salon day runs morning (hours 5–12) into afternoon (hours 1–4 = PM). Map a
 // displayed "H:MM" to an absolute minute-of-day so nudging/ordering behave.
 function timeToAbsMinutes(t) {
@@ -620,6 +631,32 @@ export default function TheList() {
   const [shareDraftEditing, setShareDraftEditing] = useState(false);
   const [shareDraftEditText, setShareDraftEditText] = useState("");
   const [shareDraftDeleteConfirm, setShareDraftDeleteConfirm] = useState(false);
+  // ── Share openings: save-on-close of the SELECTION only (which times are checked) ──
+  // Fresh opens reseed from the smart defaults. If Granger hand-picks times and chooses
+  // "Save" on the way out, his selection is remembered (in-memory, this app session)
+  // and restored on the next open. OT flags, +5/-5, surcharge and the message are
+  // deliberately NOT part of this — only the checkboxes. (Persisting/syncing this
+  // across restarts and devices means touching the Firebase payload — a separate,
+  // isolated future job, noted in the handoff.)
+  const [shareSavedChecks, setShareSavedChecks] = useState(null);
+  // True once Granger manually checks/unchecks a time this open — gates the prompt so
+  // we only ask when the SELECTION actually changed by hand (never for auto-seeded
+  // times or for OT/+5/-5/surcharge/message tweaks).
+  const [shareDirty, setShareDirty] = useState(false);
+  // Controls the "Save your openings selection?" confirm shown when the ✕ is tapped
+  // after a manual change.
+  const [shareSaveConfirm, setShareSaveConfirm] = useState(false);
+  // ── Quick messages (copy/paste snippets for customers) ───────────────────────
+  // A small list of reusable messages. Each has a short custom TITLE (what shows in
+  // the collapsed list) and a full BODY (what the Copy button copies — NOT the title).
+  // FUTURE-SELF NOTE: these are localStorage-only right now — deliberately NOT in the
+  // Firebase sync payload — so they do NOT cross from iPad to iPhone yet. Making them
+  // sync is a deferred, isolated task (spelled out in the handoff).
+  const [quickMsgs, setQuickMsgs] = useState(function() { return loadFromStorage("tl_quickmsgs", [{id:"qm1",title:"",body:""},{id:"qm2",title:"",body:""},{id:"qm3",title:"",body:""}]); });
+  const [quickMsgModal, setQuickMsgModal] = useState(false);
+  const [quickMsgOpenId, setQuickMsgOpenId] = useState(null);
+  const [quickMsgCopiedId, setQuickMsgCopiedId] = useState(null);
+  const quickMsgCopyTimer = useRef(null);
   // Header name search (iPad): what's typed, whether the dropdown is open, and the
   // current green "found them" highlight ({name lower-cased, dateKey}) that fades after 8s.
   const [searchText, setSearchText] = useState("");
@@ -794,6 +831,7 @@ export default function TheList() {
   useEffect(function() { try { localStorage.setItem("tl_holidays", JSON.stringify(customHolidays)); } catch(e) {} }, [customHolidays]);
   useEffect(function() { try { localStorage.setItem("tl_history", JSON.stringify(history)); } catch(e) {} }, [history]);
   useEffect(function() { try { localStorage.setItem("tl_daynotes", JSON.stringify(dayNotes)); } catch(e) {} }, [dayNotes]);
+  useEffect(function() { try { localStorage.setItem("tl_quickmsgs", JSON.stringify(quickMsgs)); } catch(e) {} }, [quickMsgs]);
   useEffect(function() { try { localStorage.setItem("tl_accounting", JSON.stringify(accounting)); } catch(e) {} }, [accounting]);
   useEffect(function() { try { localStorage.setItem("tl_sharedrafts", JSON.stringify(shareDrafts)); } catch(e) {} }, [shareDrafts]);
   useEffect(function() { try { localStorage.setItem("tl_sharedraftid", JSON.stringify(shareActiveDraftId)); } catch(e) {} }, [shareActiveDraftId]);
@@ -1152,13 +1190,14 @@ export default function TheList() {
 
   // A download on the iPad takes over the screen, which can FREEZE the 10-second
   // auto-dismiss timer so a banner like "Schedule downloaded" hangs there forever.
-  // When the app comes back to the foreground with a banner still up, give it a
-  // short beat to be seen, then clear it — so it can never get stuck again.
+  // When the app comes back to the foreground with a banner still up, restart the
+  // STANDARD 10-second timer so the download/export banner lives the same length as
+  // every other banner (and still can never get stuck: it always clears on return).
   useEffect(function() {
     var clearSoon = function() {
       if (!bannerRef.current) return;
       if (bannerTimer.current) clearTimeout(bannerTimer.current);
-      bannerTimer.current = setTimeout(function(){ setBanner(null); }, 1500);
+      bannerTimer.current = setTimeout(function(){ setBanner(null); }, 10000);
     };
     var onVis = function() { if (document.visibilityState === "visible") clearSoon(); };
     document.addEventListener("visibilitychange", onVis);
@@ -1436,11 +1475,15 @@ export default function TheList() {
     // Removing the name removes the price along with it (a price never outlives
     // its person). Clearing only the price, though, leaves the name in place.
     if (!newName) newPrice = "";
-    // 6C: changing the name or price of an already-recurring person asks whether to
-    // apply the change to just this appointment or the whole future series. (Clearing
-    // the name entirely is treated as a normal one-off removal, not a series edit;
-    // use "Remove recurring" to clear an entire series.)
-    if (prev.recurWeeks && prev.name && newName && (newName!==prev.name || newPrice!==prev.price)) {
+    // 6C: changing the NAME of an already-recurring person asks whether to apply the
+    // rename to just this appointment or the whole future series. (Clearing the name
+    // entirely is treated as a normal one-off removal, not a series edit; use "Remove
+    // recurring" to clear an entire series.)
+    // #3 (v51): a PRICE-only change is NO LONGER handled here. Recurring clients now use
+    // the SAME price question as everyone else — it falls through to the profile-price
+    // intercept below ("Just this time" / "Always for [Name]"), so recurring people don't
+    // live with their own price rules. Only a name change still routes to the series modal.
+    if (prev.recurWeeks && prev.name && newName && newName!==prev.name) {
       finishEdit();
       setSeriesEditModal({field:"nameprice", dateKey:dateKey, idx:idx, oldName:prev.name, newName:newName, newPrice:newPrice, time:prev.time});
       return true;
@@ -1468,10 +1511,13 @@ export default function TheList() {
       finishEdit();
       return;
     }
-    // #6C-profile: changing ONLY the price of a non-recurring person who has a saved
-    // profile (a client-memory entry with a phone) asks whether it's just this
-    // appointment or their profile default. Recurring people returned above (they get
-    // the series modal). Name changes fall through to the normal path.
+    // #6C-profile: changing ONLY the price of a person who has a saved profile (a
+    // client-memory entry with a phone) asks whether it's just this appointment or their
+    // profile default. #3 (v51): this now applies to RECURRING clients too — a recurring
+    // price-only change falls through to here from above, so recurring and non-recurring
+    // get the identical price question. A person with NO profile (recurring or not) skips
+    // this and just changes the one appointment (the general write below). Name changes
+    // fall through to the normal path.
     if (prev.name && newName && newName===prev.name && newPrice!==prev.price) {
       var memNowPP = clientMemoryRef.current || [];
       var hasProfilePP = false;
@@ -1488,7 +1534,18 @@ export default function TheList() {
     if (newName!==prev.name || newPrice!==prev.price || prev.availStatus) {
       var snapshot = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
       pushUndo(snapshot);
-      slots[idx] = {...prev,name:newName,price:newPrice,availStatus:null,pending:false};
+      // #7 (v51): a name TRANSITION (typing a fresh name into a spot, or clearing a name
+      // out) must never carry over the previous occupant's "repeating"/exception flags.
+      // Before, this write spread ...prev unchanged, so emptying a recurring person by
+      // typing their name blank left a hidden recurWeeks on the slot, and the next name
+      // typed there inherited "recurring" (the 7:48 bug). Clearing these on any add/remove
+      // makes an emptied slot behave exactly like the Cancel button, and a fresh booking
+      // always starts NOT recurring. A same-name price-only change never reaches here for
+      // recurring people (handled above), so this can't accidentally un-recur anyone.
+      var isNameTransition = (!prev.name && newName) || (prev.name && !newName);
+      var writeSlot = {...prev,name:newName,price:newPrice,availStatus:null,pending:false};
+      if (isNameTransition) { writeSlot.recurWeeks = null; writeSlot.isException = false; }
+      slots[idx] = writeSlot;
       setSlots(dateKey,slots);
       if (prev.name&&!newName) { addHistoryEntry({type:"removed",time:prev.time,name:prev.name,dateKey}); flashRemoved(dateKey,idx); }
       else if (!prev.name&&newName) {
@@ -1506,26 +1563,51 @@ export default function TheList() {
     finishEdit();
   },[getSlots]);
 
-  // Apply the profile-price choice from the modal. "once" writes only this appointment;
-  // "always" writes this appointment AND updates the person's saved profile default so
-  // future bookings start there. Never touches other already-booked appointments.
+  // Apply the profile-price choice from the modal.
+  // "once" (Just this time) → changes ONLY this one appointment.
+  // "always" → #1 (v51): makes this the client's price everywhere GOING FORWARD: this
+  // appointment, every upcoming (today-or-later, not-done) appointment they already have
+  // booked, AND their saved profile default (for future new bookings). Past and checked-off
+  // appointments are left exactly as they were. Recurring and non-recurring behave the same.
   const applyProfilePrice = function(scope) {
     var m = profilePriceModal; if (!m) return;
-    var slots = [...getSlots(m.dateKey)];
-    var prev = slots[m.idx];
+    var baseSlots = getSlots(m.dateKey);
+    var prev = baseSlots[m.idx];
     if (!prev) { setProfilePriceModal(null); return; }
     var snapshot = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
     pushUndo(snapshot);
-    slots[m.idx] = {...prev, price:m.newPrice};
-    setSlots(m.dateKey, slots);
-    addHistoryEntry({type:"edited",time:prev.time,name:m.name,prevName:m.name,dateKey:m.dateKey});
     if (scope==="always") {
+      var todayKeyPP = toDateKey(new Date());
+      var lowerPP = (m.name||"").toLowerCase();
+      var newSchPP = {...schedulesRef.current};
+      Object.keys(newSchPP).forEach(function(dk){
+        var dayPP = newSchPP[dk]; if (!dayPP) return;
+        var isEditedDay = (dk===m.dateKey);
+        var isFuture = (dk >= todayKeyPP);
+        if (!isEditedDay && !isFuture) return;
+        var changedPP = false;
+        var outPP = dayPP.map(function(s, si){
+          // The appointment actually being edited always takes the new price, even if
+          // its day is in the past (correcting today's/this record).
+          if (isEditedDay && si===m.idx) { changedPP = true; return {...s, price:m.newPrice}; }
+          // Every other UPCOMING booking under this name (not yet done) is repriced too.
+          if (isFuture && s.name && s.name.toLowerCase()===lowerPP && !s.done) { changedPP = true; return {...s, price:m.newPrice}; }
+          return s;
+        });
+        if (changedPP) newSchPP[dk] = outPP;
+      });
+      setSchedules(newSchPP);
       setClientMemory(function(mem) {
-        var i = mem.findIndex(function(c){ return c.name && c.name.toLowerCase()===m.name.toLowerCase(); });
+        var i = mem.findIndex(function(c){ return c.name && c.name.toLowerCase()===lowerPP; });
         if (i>=0) { var u=[...mem]; u[i]={...u[i],price:m.newPrice}; return u; }
         return mem;
       });
+    } else {
+      var slotsOnce = [...baseSlots];
+      slotsOnce[m.idx] = {...prev, price:m.newPrice};
+      setSlots(m.dateKey, slotsOnce);
     }
+    addHistoryEntry({type:"edited",time:prev.time,name:m.name,prevName:m.name,dateKey:m.dateKey});
     setProfilePriceModal(null);
   };
 
@@ -2090,6 +2172,10 @@ export default function TheList() {
   const computeShareDays = function(windowDays) {
     var out = [];
     var today = new Date();
+    // Current clock time as absolute minutes (24h scale), used to drop already-passed
+    // times from TODAY's offerings. Recomputed on every call (every render) so it stays
+    // current as the day goes on. Future times are always kept, even a few minutes out.
+    var nowAbsShare = today.getHours() * 60 + today.getMinutes();
     var d;
     for (d = 0; d < windowDays; d++) {
       var dateObj = addDays(today, d);
@@ -2116,6 +2202,16 @@ export default function TheList() {
       }
       if (!openList.length) continue;
       openList.sort(function(a, b){ return a.abs - b.abs; });
+      // #req: on TODAY only, never offer a time that has already passed. Judged on the
+      // REAL slot minutes vs the current clock minutes (not the padded display time),
+      // same principle as the OT check. A time at the current minute or later is kept;
+      // future times are always offerable even if only a few minutes away.
+      if (d === 0) {
+        var futureOpen = [];
+        for (i = 0; i < openList.length; i++) { if (openList[i].abs >= nowAbsShare) futureOpen.push(openList[i]); }
+        openList = futureOpen;
+        if (!openList.length) continue;
+      }
       var hasBookings = bookedAbs.length > 0;
       var firstAbs = 0, lastAbs = 0;
       if (hasBookings) {
@@ -2168,7 +2264,10 @@ export default function TheList() {
 
   const openShareSheet = function() {
     var days = computeShareDays(7);
-    var seeded = seedShareMaps(days, {}, {});
+    // If Granger previously chose "Save," restore that selection; otherwise start from
+    // the smart defaults. seedShareMaps preserves the restored keys and still auto-fills
+    // any brand-new times, so a saved selection never blocks fresh smart suggestions.
+    var seeded = seedShareMaps(days, shareSavedChecks || {}, {});
     setShareChecked(seeded.checked);
     setShareOT(seeded.ot);
     setShareWindow(7);
@@ -2178,6 +2277,8 @@ export default function TheList() {
     setShareCopied(false);
     setShareDraftEditing(false);
     setShareDraftDeleteConfirm(false);
+    setShareDirty(false);
+    setShareSaveConfirm(false);
     setShowHistory(false);
     setShareModal(true);
   };
@@ -2191,7 +2292,7 @@ export default function TheList() {
     setShareWindow(next);
   };
 
-  const toggleShareChecked = function(key) { setShareChecked(function(p){ var n={...p}; n[key] = !n[key]; return n; }); };
+  const toggleShareChecked = function(key) { setShareChecked(function(p){ var n={...p}; n[key] = !n[key]; return n; }); setShareDirty(true); };
   const toggleShareOT = function(key) { setShareOT(function(p){ var n={...p}; n[key] = !n[key]; return n; }); };
   const toggleShareTimeShiftMode = function(key, mode) { setShareTimeShift(function(p){ var n={...p}; n[key] = (p[key] === mode ? "none" : mode); return n; }); };
   // Whole-day check toggle — affects ONLY the smart-picked ("auto") times for that
@@ -2215,9 +2316,44 @@ export default function TheList() {
       for (i = 0; i < day.auto.length; i++) { n[day.dateKey + "|" + day.auto[i].time] = goTo; }
       return n;
     });
+    setShareDirty(true);
   };
   const toggleShareExpand = function(dk) { setShareExpanded(function(p){ var n={...p}; n[dk] = !n[dk]; return n; }); };
   const setShareShiftMode = function(mode) { setShareShift(function(p){ return p === mode ? "none" : mode; }); };
+
+  // Live re-seed while the sheet is open: if the schedule changes and brand-new open
+  // times appear (e.g. Granger fills 9:06 and 9:28 opens up), seed those new rows with
+  // the SAME smart rules as a fresh open — gap-between-bookings / one-before-first /
+  // one-after-last get auto-checked, everything else stays an unchecked "extra." Rows
+  // the user already set are preserved (we only fill keys that are MISSING). Returns the
+  // same map object when nothing new appeared, so React bails out and there's no loop.
+  // This does NOT set shareDirty — a system-seeded time isn't a manual selection change.
+  useEffect(function() {
+    if (!shareModal) return;
+    var days = computeShareDays(shareWindow);
+    setShareChecked(function(prevC) {
+      var next = {...prevC}; var added = false; var di, si;
+      for (di = 0; di < days.length; di++) {
+        var day = days[di]; var all = day.auto.concat(day.extra);
+        for (si = 0; si < all.length; si++) {
+          var k = day.dateKey + "|" + all[si].time;
+          if (!(k in prevC)) { next[k] = day.auto.indexOf(all[si]) !== -1; added = true; }
+        }
+      }
+      return added ? next : prevC;
+    });
+    setShareOT(function(prevO) {
+      var next = {...prevO}; var added = false; var di, si;
+      for (di = 0; di < days.length; di++) {
+        var day = days[di]; var all = day.auto.concat(day.extra);
+        for (si = 0; si < all.length; si++) {
+          var k = day.dateKey + "|" + all[si].time;
+          if (!(k in prevO)) { next[k] = shareIsOTTime(all[si].time); added = true; }
+        }
+      }
+      return added ? next : prevO;
+    });
+  }, [shareModal, shareWindow, schedules]);
 
   // ── Share openings: intro drafts ─────────────────────────────────────────────
   const activeShareDraft = function() {
@@ -2310,6 +2446,28 @@ export default function TheList() {
     setShareCopied(true);
     if (shareCopyTimer.current) clearTimeout(shareCopyTimer.current);
     shareCopyTimer.current = setTimeout(function(){ setShareCopied(false); }, 2200);
+  };
+
+  // Quick messages: copy the BODY (not the title), toggle a brief "Copied ✓" on that row.
+  const copyQuickMsg = function(id, body) {
+    copyPlainText(body || "");
+    setQuickMsgCopiedId(id);
+    if (quickMsgCopyTimer.current) clearTimeout(quickMsgCopyTimer.current);
+    quickMsgCopyTimer.current = setTimeout(function(){ setQuickMsgCopiedId(null); }, 2000);
+  };
+  const updateQuickMsg = function(id, field, value) {
+    setQuickMsgs(function(prev){
+      return prev.map(function(m){ if(m.id!==id) return m; var n={...m}; n[field]=value; return n; });
+    });
+  };
+  const addQuickMsg = function() {
+    var nid = "qm" + Date.now() + Math.floor(Math.random()*1000);
+    setQuickMsgs(function(prev){ return prev.concat([{id:nid,title:"",body:""}]); });
+    setQuickMsgOpenId(nid);
+  };
+  const removeQuickMsg = function(id) {
+    setQuickMsgs(function(prev){ return prev.filter(function(m){ return m.id!==id; }); });
+    setQuickMsgOpenId(function(cur){ return cur===id?null:cur; });
   };
 
   // Build the list of times that share a slot's group on a given day (sorted by time).
@@ -2943,7 +3101,13 @@ export default function TheList() {
       var baseTime=occ.defaultBaseTime||(!wasCustom?occ.time:null);
       if (tIdx>=0 && tIdx!==occIdx && !ds[tIdx].name) {
         ds[tIdx]={...ds[tIdx],name:occ.name,price:occ.price,recurWeeks:occ.recurWeeks,isException:true,done:false,groupId:occ.groupId||null,customTime:wasCustom&&!isStillDefault,defaultBaseTime:(!wasCustom?baseTime:occ.defaultBaseTime)};
-        if (DEFAULT_TIMES.indexOf(occ.time)>=0) ds[occIdx]={time:occ.time,name:"",price:"",done:false,recurWeeks:null};
+        // #4 (v51): when the person was SHARING their old time with someone else, the
+        // freed spot must be REMOVED, not blanked — a blanked duplicate renders as a
+        // phantom empty row stacked at the shared time (the "extra slot" bug). Only a
+        // LONE default time is blanked in place (keeps that grid row); a shared time (or
+        // any custom time) is spliced out so it collapses to the remaining person.
+        var sharedOldA=ds.some(function(s,si){ return si!==occIdx && s.time===occ.time; });
+        if (DEFAULT_TIMES.indexOf(occ.time)>=0 && !sharedOldA) ds[occIdx]={time:occ.time,name:"",price:"",done:false,recurWeeks:null};
         else ds.splice(occIdx,1);
       } else {
         ds[occIdx]={...occ,time:newTime,isException:true,customTime:wasCustom&&!isStillDefault,defaultBaseTime:(!wasCustom?baseTime:occ.defaultBaseTime)};
@@ -3441,7 +3605,6 @@ export default function TheList() {
     a.href = url; a.download = "the-list-readable-" + toDateKey(now) + ".txt"; a.click();
     URL.revokeObjectURL(url);
     showBanner({type:"added",msg:"Schedule downloaded",time:null,dateKey:null});
-    armBannerTapClear();
   };
 
   const exportData = function() {
@@ -3453,7 +3616,6 @@ export default function TheList() {
     URL.revokeObjectURL(url);
     showBanner({type:"added",msg:"Backup exported",time:null,dateKey:null});
     setHistory(function(prev){ return [{type:"backup",name:"Backup exported",timestamp:new Date().toLocaleTimeString(),id:Date.now()+Math.random()},...prev].slice(0,200); });
-    armBannerTapClear();
   };
 
   // Importing a backup replaces everything, so we parse the file first and ASK before
@@ -4177,7 +4339,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v50</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v53</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -4453,7 +4615,7 @@ export default function TheList() {
           <div style={{background:"#f8f8f6",border:"1px solid #d8d8d6",borderRadius:"12px",padding:"26px 26px 22px",width:"min(360px,92vw)"}} onClick={function(e){ e.stopPropagation(); }}>
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#4a8a9a",marginBottom:"8px"}}>Price change</div>
             <div style={{fontSize:"16px",color:"#1a1a1a",marginBottom:"6px"}}>Change {profilePriceModal.name}'s price to…</div>
-            <div style={{fontSize:"12px",color:"#888",marginBottom:"20px"}}>{"\u201cAlways\u201d updates "+profilePriceModal.name+"'s saved profile so future bookings start at "+(profilePriceModal.newPrice?("$"+profilePriceModal.newPrice):"no set price")+". \u201cJust this time\u201d changes only this appointment."}</div>
+            <div style={{fontSize:"12px",color:"#888",marginBottom:"20px"}}>{"\u201cAlways\u201d sets "+profilePriceModal.name+"'s price to "+(profilePriceModal.newPrice?("$"+profilePriceModal.newPrice):"no set price")+" for this appointment, every upcoming appointment they already have, and their saved profile. \u201cJust this time\u201d changes only this appointment."}</div>
             <button onClick={function(){ applyProfilePrice("always"); }} style={{display:"block",width:"100%",padding:"12px",background:"#1a1a1a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",marginBottom:"10px"}}>Always for {profilePriceModal.name}</button>
             <button onClick={function(){ applyProfilePrice("once"); }} style={{display:"block",width:"100%",padding:"12px",background:"#ffffff",border:"1px solid #d0d0ce",borderRadius:"8px",color:"#1a1a1a",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",marginBottom:"14px"}}>Just this time</button>
             <button onClick={function(){ setProfilePriceModal(null); }} style={{display:"block",width:"100%",padding:"8px",background:"none",border:"none",color:"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>Cancel</button>
@@ -4903,6 +5065,48 @@ export default function TheList() {
         </div>
       )}
 
+      {quickMsgModal && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1250,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px"}} onClick={function(){ setQuickMsgModal(false); setQuickMsgOpenId(null); }}>
+          <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"20px",width:"min(430px,94vw)",maxHeight:"84vh",display:"flex",flexDirection:"column"}} onClick={function(e){ e.stopPropagation(); }}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"6px",flexShrink:0}}>
+              <div style={{fontSize:"15px",fontWeight:"bold",color:"#1a1a1a",fontFamily:"inherit"}}>Messages</div>
+              <button onClick={function(){ setQuickMsgModal(false); setQuickMsgOpenId(null); }} style={{background:"none",border:"none",fontSize:"22px",color:"#999",cursor:"pointer",lineHeight:1,padding:"0 4px"}}>{"×"}</button>
+            </div>
+            <div style={{fontSize:"11px",color:"#aaa",marginBottom:"12px",lineHeight:1.3,flexShrink:0}}>Tap a title to open, edit, and copy. The Copy button copies the full message, not the title.</div>
+            <div style={{overflowY:"auto",flex:"1 1 auto",minHeight:0}}>
+              {quickMsgs.length===0 && (
+                <div style={{padding:"18px 4px",textAlign:"center",fontSize:"13px",color:"#aaa",fontFamily:"Georgia,serif"}}>No saved messages yet.</div>
+              )}
+              {quickMsgs.map(function(m){
+                var open = quickMsgOpenId===m.id;
+                var copied = quickMsgCopiedId===m.id;
+                return (
+                  <div key={m.id} style={{border:"1px solid #ececea",borderRadius:"8px",marginBottom:"8px",overflow:"hidden",background:"#fafaf8"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:"8px",padding:"9px 10px"}}>
+                      <button onClick={function(){ setQuickMsgOpenId(open?null:m.id); }} style={{flex:"1 1 auto",minWidth:0,background:"none",border:"none",textAlign:"left",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",color:m.title?"#1a1a1a":"#bbb",display:"flex",alignItems:"center",gap:"6px",padding:0}}>
+                        <span style={{fontSize:"11px",color:"#c9a96e",flexShrink:0}}>{open?"▾":"▸"}</span>
+                        <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{m.title||"Untitled message"}</span>
+                      </button>
+                      <button onClick={function(){ copyQuickMsg(m.id, m.body); }} title="Copy message" style={{flexShrink:0,padding:"5px 10px",borderRadius:"6px",border:"1px solid "+(copied?"#2e7d46":"#d8d8d6"),background:copied?"#2e7d46":"#fff",color:copied?"#fff":"#666",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",display:"flex",alignItems:"center",gap:"5px"}}>{copied?"Copied ✓":(<span style={{display:"flex",alignItems:"center",gap:"5px"}}><CopyIcon size={13} color="#666"/>Copy</span>)}</button>
+                    </div>
+                    {open && (
+                      <div style={{padding:"0 10px 10px"}}>
+                        <input value={m.title} onChange={function(e){ updateQuickMsg(m.id,"title",e.target.value); }} placeholder="Short title (shows in the list)" style={{width:"100%",boxSizing:"border-box",marginBottom:"6px",padding:"7px 9px",border:"1px solid #d8d8d6",borderRadius:"6px",background:"#fff",fontFamily:"inherit",fontSize:"12px",color:"#1a1a1a",outline:"none"}}/>
+                        <textarea value={m.body} onChange={function(e){ updateQuickMsg(m.id,"body",e.target.value); }} placeholder="Full message — this is what gets copied…" style={{width:"100%",boxSizing:"border-box",minHeight:"90px",resize:"vertical",padding:"9px",border:"1px solid #d8d8d6",borderRadius:"6px",background:"#fff",fontFamily:"Georgia,serif",fontSize:"13px",color:"#1a1a1a",outline:"none",lineHeight:1.4}}/>
+                        <div style={{display:"flex",justifyContent:"flex-end",marginTop:"6px"}}>
+                          <button onClick={function(){ removeQuickMsg(m.id); }} style={{background:"none",border:"1px solid #e0b0a8",borderRadius:"6px",color:"#c0392b",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",padding:"5px 12px"}}>Remove</button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <button onClick={addQuickMsg} style={{marginTop:"12px",flexShrink:0,padding:"10px",background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>+ Add message</button>
+          </div>
+        </div>
+      )}
+
       {timeEditModal && (function(){
         var workingTime = absMinutesToTime(timeEditMinutes);
         var slot = getSlots(timeEditModal.dateKey)[timeEditModal.idx] || {};
@@ -4967,7 +5171,7 @@ export default function TheList() {
         <div onClick={function(e){ e.stopPropagation(); }} style={{position:"fixed",top:isPhone?0:(gridTopY>0?gridTopY:(listTopY>0?listTopY:"calc(env(safe-area-inset-top,0px) + 56px)")),left:isPhone?0:"auto",right:0,bottom:0,width:isPhone?"100%":"clamp(300px,34vw,460px)",background:"#fafaf8",borderLeft:isPhone?"none":"1px solid #ececea",boxShadow:"-6px 0 24px rgba(0,0,0,0.12)",zIndex:90,display:"flex",flexDirection:"column",overflow:"hidden"}}>
           <div style={{padding:"14px 16px 10px",borderBottom:"1px solid #ececea",display:"flex",justifyContent:"space-between",alignItems:"center",flexShrink:0}}>
             <div style={{fontSize:"15px",fontWeight:"bold",color:"#1a1a1a",fontFamily:"inherit"}}>Share openings</div>
-            <button onClick={function(){ setShareModal(false); setShareDraftEditing(false); }} style={{background:"none",border:"none",fontSize:"22px",color:"#999",cursor:"pointer",lineHeight:1,padding:"0 4px"}}>{"×"}</button>
+            <button onClick={function(){ if (shareDirty) { setShareSaveConfirm(true); } else { setShareModal(false); setShareDraftEditing(false); } }} style={{background:"none",border:"none",fontSize:"22px",color:"#999",cursor:"pointer",lineHeight:1,padding:"0 4px"}}>{"×"}</button>
           </div>
 
           <div style={{padding:"10px 16px",borderBottom:"1px solid #ececea",flexShrink:0}}>
@@ -5056,9 +5260,20 @@ export default function TheList() {
           </div>
 
           <div style={{padding:"10px 16px 14px",borderTop:"1px solid #ececea",flexShrink:0}}>
-            <div style={{fontSize:"11px",color:"#aaa",marginBottom:"8px",lineHeight:1.3}}>Using the "{activeShareDraft().name}" draft as your intro message.</div>
             <button onClick={doShareCopy} style={{width:"100%",padding:"12px",background:shareCopied?"#246b3a":"#2e7d46",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",fontWeight:"bold"}}>{shareCopied?"Copied to clipboard ✓":"Copy to clipboard"}</button>
           </div>
+
+          {shareSaveConfirm && (
+            <div style={{position:"absolute",top:0,left:0,right:0,bottom:0,background:"rgba(20,20,20,0.28)",zIndex:120,display:"flex",alignItems:"center",justifyContent:"center",padding:"20px"}}>
+              <div style={{width:"100%",maxWidth:"300px",background:"#fff",borderRadius:"12px",boxShadow:"0 10px 30px rgba(0,0,0,0.22)",padding:"18px 18px 14px"}}>
+                <div style={{fontSize:"14px",fontWeight:"bold",color:"#1a1a1a",marginBottom:"6px"}}>Save your openings selection?</div>
+                <div style={{fontSize:"12px",color:"#888",lineHeight:1.35,marginBottom:"14px"}}>Keep the times you checked and unchecked so they're still here next time you open this. Only the checked times are saved.</div>
+                <button onClick={function(){ setShareSavedChecks(shareChecked); setShareSaveConfirm(false); setShareDirty(false); setShareModal(false); setShareDraftEditing(false); }} style={{width:"100%",padding:"11px",marginBottom:"8px",background:"#2e7d46",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",fontWeight:"bold"}}>Save</button>
+                <button onClick={function(){ setShareSavedChecks(null); setShareSaveConfirm(false); setShareDirty(false); setShareModal(false); setShareDraftEditing(false); }} style={{width:"100%",padding:"11px",marginBottom:"8px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"8px",color:"#666",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Don't save</button>
+                <button onClick={function(){ setShareSaveConfirm(false); }} style={{width:"100%",padding:"9px",background:"none",border:"none",color:"#9a9a9a",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>Keep editing</button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -5177,7 +5392,7 @@ export default function TheList() {
               }} style={{padding:"5px 12px",fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",border:"none",borderRadius:"4px",cursor:"pointer",background:view===v?"#1a1a1a":"transparent",color:view===v?"#ffffff":"#999",fontFamily:"inherit",transition:"all 0.15s"}}>{v}</button>
             ); })}
           </div>
-          <div style={{position:"relative",flex:"1 1 auto",display:"flex",justifyContent:"center",padding:"0 14px",minWidth:0}}>
+          <div style={{position:"relative",flex:"1 1 auto",display:"flex",justifyContent:"flex-end",padding:"0 6px",minWidth:0}}>
             {!searchExpanded ? (
               <button onClick={function(){ setSearchExpanded(true); setTimeout(function(){ if(searchInputRef.current) searchInputRef.current.focus(); }, 0); }} title="Search a name" style={{...navBtn,width:"32px",padding:"0",background:"#f6f6f4",border:"1px solid #e0e0de"}}><SearchIcon size={15} color="#888"/></button>
             ) : (
@@ -5206,6 +5421,8 @@ export default function TheList() {
           </div>
           {view==="Month"&&<div style={{fontSize:"14px",color:"#1a1a1a"}}>{baseDate.toLocaleDateString("en-US",{month:"long",year:"numeric"})}</div>}
           <div style={{display:"flex",gap:"4px",alignItems:"center"}}>
+            <button onClick={openShareSheet} title="Share openings" style={{...navBtn,width:"32px",padding:"0"}}><MessageIcon size={17} color="#777"/></button>
+            <button onClick={function(){ setQuickMsgModal(true); }} title="Quick messages" style={{...navBtn,width:"32px",padding:"0"}}><CopyIcon size={16} color="#777"/></button>
             <button onClick={function(){ if(navCanBack) goBack(); }} title="Back to previous view" style={{...navBtn,fontSize:"16px",width:"32px",padding:"0",opacity:navCanBack?1:0.35,cursor:navCanBack?"pointer":"default"}}>{"←"}</button>
             <button onClick={function(){ if(navCanFwd) goFwd(); }} title="Forward to next view" style={{...navBtn,fontSize:"16px",width:"32px",padding:"0",opacity:navCanFwd?1:0.35,cursor:navCanFwd?"pointer":"default"}}>{"→"}</button>
             <div style={{width:"10px"}}/>
