@@ -4468,7 +4468,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v58</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v59</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -5398,7 +5398,11 @@ export default function TheList() {
                 <div style={{fontSize:"14px",fontWeight:"bold",color:"#1a1a1a",marginBottom:"6px"}}>Save your openings selection?</div>
                 <div style={{fontSize:"12px",color:"#888",lineHeight:1.35,marginBottom:"14px"}}>Keep the times you checked and unchecked so they're still here next time you open this. Only the checked times are saved.</div>
                 <button onClick={function(){ setShareSavedChecks(shareChecked); setShareSaveConfirm(false); setShareDirty(false); setShareModal(false); setShareDraftEditing(false); }} style={{width:"100%",padding:"11px",marginBottom:"8px",background:"#2e7d46",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",fontWeight:"bold"}}>Save</button>
-                <button onClick={function(){ setShareSavedChecks(null); setShareSaveConfirm(false); setShareDirty(false); setShareModal(false); setShareDraftEditing(false); }} style={{width:"100%",padding:"11px",marginBottom:"8px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"8px",color:"#666",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Don't save</button>
+                {/* v59: "Don't save" discards ONLY this session's unsaved edits. It must NOT
+                    touch shareSavedChecks — leaving the last saved selection intact so the
+                    next open reseeds from it (via openShareSheet). Previously this nulled the
+                    saved selection, which wiped the last save and reset back to defaults. */}
+                <button onClick={function(){ setShareSaveConfirm(false); setShareDirty(false); setShareModal(false); setShareDraftEditing(false); }} style={{width:"100%",padding:"11px",marginBottom:"8px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"8px",color:"#666",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Don't save</button>
                 <button onClick={function(){ setShareSaveConfirm(false); }} style={{width:"100%",padding:"9px",background:"none",border:"none",color:"#9a9a9a",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>Keep editing</button>
               </div>
             </div>
