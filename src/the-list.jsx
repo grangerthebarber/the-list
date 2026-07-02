@@ -638,7 +638,7 @@ export default function TheList() {
   // deliberately NOT part of this — only the checkboxes. (Persisting/syncing this
   // across restarts and devices means touching the Firebase payload — a separate,
   // isolated future job, noted in the handoff.)
-  const [shareSavedChecks, setShareSavedChecks] = useState(null);
+  const [shareSavedChecks, setShareSavedChecks] = useState(function() { return loadFromStorage("tl_sharedchecks", null); });
   // True once Granger manually checks/unchecks a time this open — gates the prompt so
   // we only ask when the SELECTION actually changed by hand (never for auto-seeded
   // times or for OT/+5/-5/surcharge/message tweaks).
@@ -778,6 +778,10 @@ export default function TheList() {
   shareDraftsRef.current = shareDrafts;
   const shareActiveDraftIdRef = useRef(shareActiveDraftId);
   shareActiveDraftIdRef.current = shareActiveDraftId;
+  const quickMsgsRef = useRef(quickMsgs);
+  quickMsgsRef.current = quickMsgs;
+  const shareSavedChecksRef = useRef(shareSavedChecks);
+  shareSavedChecksRef.current = shareSavedChecks;
   const lastSyncRef = useRef(null);
   const saveTimer = useRef(null);
 
@@ -832,6 +836,7 @@ export default function TheList() {
   useEffect(function() { try { localStorage.setItem("tl_history", JSON.stringify(history)); } catch(e) {} }, [history]);
   useEffect(function() { try { localStorage.setItem("tl_daynotes", JSON.stringify(dayNotes)); } catch(e) {} }, [dayNotes]);
   useEffect(function() { try { localStorage.setItem("tl_quickmsgs", JSON.stringify(quickMsgs)); } catch(e) {} }, [quickMsgs]);
+  useEffect(function() { try { localStorage.setItem("tl_sharedchecks", JSON.stringify(shareSavedChecks)); } catch(e) {} }, [shareSavedChecks]);
   useEffect(function() { try { localStorage.setItem("tl_accounting", JSON.stringify(accounting)); } catch(e) {} }, [accounting]);
   useEffect(function() { try { localStorage.setItem("tl_sharedrafts", JSON.stringify(shareDrafts)); } catch(e) {} }, [shareDrafts]);
   useEffect(function() { try { localStorage.setItem("tl_sharedraftid", JSON.stringify(shareActiveDraftId)); } catch(e) {} }, [shareActiveDraftId]);
@@ -854,17 +859,17 @@ export default function TheList() {
         if (first) {
           first = false;
           var seedSch = migrateSchedules(schedulesRef.current || {});
-          var seeded = {schedules:seedSch, clients:clientMemoryRef.current, holidays:customHolidaysRef.current, history:historyRef.current, dayNotes:dayNotesRef.current, accounting:accountingRef.current, shareDrafts:shareDraftsRef.current, shareActiveDraftId:shareActiveDraftIdRef.current};
+          var seeded = {schedules:seedSch, clients:clientMemoryRef.current, holidays:customHolidaysRef.current, history:historyRef.current, dayNotes:dayNotesRef.current, accounting:accountingRef.current, shareDrafts:shareDraftsRef.current, shareActiveDraftId:shareActiveDraftIdRef.current, quickMsgs:quickMsgsRef.current, shareSavedChecks:shareSavedChecksRef.current};
           lastSyncRef.current = JSON.stringify(seeded);
           recentWritesRef.current.push(lastSyncRef.current);
-          try { setDoc(userDoc, {schedules:seedSch, clients:seeded.clients, holidays:seeded.holidays, history:seeded.history, dayNotes:seeded.dayNotes, accounting:seeded.accounting, shareDrafts:seeded.shareDrafts, shareActiveDraftId:seeded.shareActiveDraftId, updatedAt:serverTimestamp()}, {merge:true}); } catch(e) {}
+          try { setDoc(userDoc, {schedules:seedSch, clients:seeded.clients, holidays:seeded.holidays, history:seeded.history, dayNotes:seeded.dayNotes, accounting:seeded.accounting, shareDrafts:seeded.shareDrafts, shareActiveDraftId:seeded.shareActiveDraftId, quickMsgs:seeded.quickMsgs, shareSavedChecks:seeded.shareSavedChecks, updatedAt:serverTimestamp()}, {merge:true}); } catch(e) {}
           setHydrated(true);
         }
         return;
       }
       var data = snap.data() || {};
       var migrated = migrateSchedules(data.schedules || {});
-      var applied = {schedules:migrated, clients:data.clients||[], holidays:data.holidays||[], history:data.history||[], dayNotes:data.dayNotes||{}, accounting:data.accounting||{}, shareDrafts:(data.shareDrafts&&data.shareDrafts.length?data.shareDrafts:DEFAULT_SHARE_DRAFTS), shareActiveDraftId:data.shareActiveDraftId||"full"};
+      var applied = {schedules:migrated, clients:data.clients||[], holidays:data.holidays||[], history:data.history||[], dayNotes:data.dayNotes||{}, accounting:data.accounting||{}, shareDrafts:(data.shareDrafts&&data.shareDrafts.length?data.shareDrafts:DEFAULT_SHARE_DRAFTS), shareActiveDraftId:data.shareActiveDraftId||"full", quickMsgs:(data.quickMsgs&&data.quickMsgs.length?data.quickMsgs:quickMsgsRef.current), shareSavedChecks:(data.shareSavedChecks!==undefined?data.shareSavedChecks:shareSavedChecksRef.current)};
       var json = JSON.stringify(applied);
       if (recentWritesRef.current.indexOf(json) >= 0) { lastSyncRef.current = json; return; }
       if (!first && json === lastSyncRef.current) return;
@@ -878,6 +883,8 @@ export default function TheList() {
       setAccounting(applied.accounting);
       setShareDrafts(applied.shareDrafts);
       setShareActiveDraftId(applied.shareActiveDraftId);
+      setQuickMsgs(applied.quickMsgs);
+      setShareSavedChecks(applied.shareSavedChecks);
       setHydrated(true);
     }, function(err) { setHydrated(true); });
     return function() { try { unsub(); } catch(e) {} };
@@ -885,7 +892,7 @@ export default function TheList() {
 
   useEffect(function() {
     if (!hydrated || !authUser) return;
-    var payload = {schedules:schedules, clients:clientMemory, holidays:customHolidays, history:history, dayNotes:dayNotes, accounting:accounting, shareDrafts:shareDrafts, shareActiveDraftId:shareActiveDraftId};
+    var payload = {schedules:schedules, clients:clientMemory, holidays:customHolidays, history:history, dayNotes:dayNotes, accounting:accounting, shareDrafts:shareDrafts, shareActiveDraftId:shareActiveDraftId, quickMsgs:quickMsgs, shareSavedChecks:shareSavedChecks};
     var json = JSON.stringify(payload);
     if (json === lastSyncRef.current) return;
     lastSyncRef.current = json;
@@ -894,9 +901,9 @@ export default function TheList() {
     if (saveTimer.current) clearTimeout(saveTimer.current);
     var uid = authUser.uid;
     saveTimer.current = setTimeout(function() {
-      try { setDoc(doc(fbDb, "users", uid), {schedules:payload.schedules, clients:payload.clients, holidays:payload.holidays, history:payload.history, dayNotes:payload.dayNotes, accounting:payload.accounting, shareDrafts:payload.shareDrafts, shareActiveDraftId:payload.shareActiveDraftId, updatedAt:serverTimestamp()}, {merge:true}); } catch(e) {}
+      try { setDoc(doc(fbDb, "users", uid), {schedules:payload.schedules, clients:payload.clients, holidays:payload.holidays, history:payload.history, dayNotes:payload.dayNotes, accounting:payload.accounting, shareDrafts:payload.shareDrafts, shareActiveDraftId:payload.shareActiveDraftId, quickMsgs:payload.quickMsgs, shareSavedChecks:payload.shareSavedChecks, updatedAt:serverTimestamp()}, {merge:true}); } catch(e) {}
     }, 600);
-  }, [schedules, clientMemory, customHolidays, history, dayNotes, accounting, shareDrafts, shareActiveDraftId, hydrated, authUser]);
+  }, [schedules, clientMemory, customHolidays, history, dayNotes, accounting, shareDrafts, shareActiveDraftId, quickMsgs, shareSavedChecks, hydrated, authUser]);
 
   // Stop the whole page from bouncing/scrolling when there is nothing under the
   // list. iOS standalone PWAs ignore CSS overscroll-behavior, so the only thing
@@ -1454,6 +1461,53 @@ export default function TheList() {
     }, 50);
   };
 
+  // v56: shared price->profile sync. If the name has a saved profile (a client-memory
+  // entry that carries a phone number), a price edit becomes their new STANDING price:
+  // it saves onto the profile default AND re-prices every UPCOMING (today-or-later,
+  // not-yet-done) booking already on the book under that name. Past and checked-off
+  // appointments keep whatever was actually charged. This is the exact same rule the
+  // "change only the price" path (#6C) already runs — this helper just lets every OTHER
+  // way of setting a price (penciling someone in, changing a name+price together, a
+  // two-slot double booking) do the same thing, so a price now sticks the same way no
+  // matter how it was entered. A person with NO phone has no profile to attach to, so
+  // this returns false and nothing is swept (their appointment stays a one-off). An
+  // empty/blank price also does nothing — a price only propagates when a real number is
+  // entered, so penciling a name with no price never wipes a saved price. Callers write
+  // the edited slot themselves first and snapshot their own undo; this never pushes undo.
+  var syncProfilePrice = function(name, newPrice) {
+    if (!name) return false;
+    if (newPrice == null || String(newPrice).trim()==="") return false;
+    var lowerSP = name.toLowerCase();
+    var memSP = clientMemoryRef.current || [];
+    var hasProfileSP = false;
+    for (var iSP=0; iSP<memSP.length; iSP++) {
+      var cSP = memSP[iSP];
+      if (cSP && cSP.name && cSP.name.toLowerCase()===lowerSP && cSP.phone && String(cSP.phone).trim()) { hasProfileSP = true; break; }
+    }
+    if (!hasProfileSP) return false;
+    var todayKeySP = toDateKey(new Date());
+    setSchedules(function(prev){
+      var nextSP = {...prev};
+      Object.keys(nextSP).forEach(function(dk){
+        if (dk < todayKeySP) return;
+        var daySP = nextSP[dk]; if (!daySP) return;
+        var changedSP = false;
+        var outSP = daySP.map(function(s){
+          if (s.name && s.name.toLowerCase()===lowerSP && !s.done && s.price!==newPrice) { changedSP = true; return {...s, price:newPrice}; }
+          return s;
+        });
+        if (changedSP) nextSP[dk] = outSP;
+      });
+      return nextSP;
+    });
+    setClientMemory(function(mem){
+      var jSP = mem.findIndex(function(c){ return c.name && c.name.toLowerCase()===lowerSP; });
+      if (jSP>=0) { var uSP=[...mem]; uSP[jSP]={...uSP[jSP],price:newPrice}; return uSP; }
+      return mem;
+    });
+    return true;
+  };
+
   const doCommit = useCallback(function(dateKey, idx, values, keepActive) {
     // #1 tap-away saves: when committing a snapshot from a cell we already left
     // (the live edit has moved to a different cell), keepActive is true so we write
@@ -1589,7 +1643,7 @@ export default function TheList() {
           // added on the profile card. Existing (phoned) profiles above still update.
           return mem;
         });
-      } else if (prev.name&&newName) addHistoryEntry({type:"edited",time:slots[idx].time,name:newName,prevName:prev.name,dateKey});
+      } else if (prev.name&&newName) { addHistoryEntry({type:"edited",time:slots[idx].time,name:newName,prevName:prev.name,dateKey}); syncProfilePrice(newName, newPrice); }
     }
     finishEdit();
   },[getSlots]);
@@ -1678,6 +1732,7 @@ export default function TheList() {
         return mem;
       });
     }
+    syncProfilePrice(newName, newPrice);
     addHistoryEntry({type:"added",time:prev.time,name:newName,price:newPrice,dateKey,bannerType:"penciled"});
     finishEdit();
   };
@@ -1920,6 +1975,7 @@ export default function TheList() {
         slots[nextIdx] = {...slots[nextIdx],name:newName,price:newPrice,groupId:gid};
         setSlots(dateKey,slots);
         addHistoryEntry({type:"added",time:slots[idx].time,name:newName,price:newPrice,dateKey});
+        syncProfilePrice(newName, newPrice);
         editingRef.current=null; setEditingCell(null); setEditingOccupied(false);
         setTimeout(function(){ startEdit(dateKey,nextIdx); },80);
       } else if (nextFilled) {
@@ -1931,6 +1987,7 @@ export default function TheList() {
         slots[nextIdx] = {...slots[nextIdx],groupId:gid2};
         setSlots(dateKey,slots);
         addHistoryEntry({type:"added",time:slots[idx].time,name:newName,price:newPrice,dateKey});
+        syncProfilePrice(newName, newPrice);
         editingRef.current=null; setEditingCell(null); setEditingOccupied(false);
         setTimeout(function(){ startEdit(dateKey,nextIdx); },80);
       } else {
@@ -1938,6 +1995,7 @@ export default function TheList() {
         slots[idx] = {...curSlot,name:newName,price:newPrice};
         setSlots(dateKey,slots);
         addHistoryEntry({type:"added",time:slots[idx].time,name:newName,price:newPrice,dateKey});
+        syncProfilePrice(newName, newPrice);
         editingRef.current=null; setEditingCell(null); setEditingOccupied(false);
       }
     } else if (e.key==="Enter") {
@@ -3648,7 +3706,7 @@ export default function TheList() {
   };
 
   const exportData = function() {
-    var data = {schedules:schedulesRef.current, clients:clientMemory, holidays:customHolidays, history:history, dayNotes:dayNotes, accounting:accountingRef.current, shareDrafts:shareDraftsRef.current, shareActiveDraftId:shareActiveDraftIdRef.current, exportedAt:new Date().toISOString()};
+    var data = {schedules:schedulesRef.current, clients:clientMemory, holidays:customHolidays, history:history, dayNotes:dayNotes, accounting:accountingRef.current, shareDrafts:shareDraftsRef.current, shareActiveDraftId:shareActiveDraftIdRef.current, quickMsgs:quickMsgs, shareSavedChecks:shareSavedChecks, exportedAt:new Date().toISOString()};
     var blob = new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
     var url = URL.createObjectURL(blob);
     var a = document.createElement("a");
@@ -3692,6 +3750,8 @@ export default function TheList() {
     if (data.accounting) setAccounting(data.accounting);
     if (data.shareDrafts && data.shareDrafts.length) setShareDrafts(data.shareDrafts);
     if (data.shareActiveDraftId) setShareActiveDraftId(data.shareActiveDraftId);
+    if (data.quickMsgs) setQuickMsgs(data.quickMsgs);
+    if (data.shareSavedChecks!==undefined) setShareSavedChecks(data.shareSavedChecks);
     setImportConfirm(null);
     showBanner({type:"added",msg:"Backup restored",time:null,dateKey:null});
   };
@@ -4379,7 +4439,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v55</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v57</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
