@@ -685,6 +685,14 @@ export default function TheList() {
   const dragPosRef = useRef({x:0,y:0});
   const dragOverRef = useRef(null);
   const dragStateRef = useRef(null);
+  // v58: tracks whether a live drag actually MOVED. A hold that's released
+  // without moving is a "peek the profile" gesture, not a reschedule.
+  const dragMovedRef = useRef(false);
+  const dragStartPosRef = useRef(null);
+  // Floating name chip rides centered under the fingertip — a hair below the
+  // touch point so the finger doesn't cover the name. Bump CHIP_DROP to nudge.
+  var CHIP_DROP = 18;
+  var dragChipTransform = function(x, y) { return "translate(calc(" + x + "px - 50%), " + (y + CHIP_DROP) + "px)"; };
   // Persistent element + pointer id used to pointer-capture a live drag so that
   // switching views mid-drag (which unmounts the source row) can't abort the
   // gesture. Capture is taken on the app root, which never unmounts.
@@ -4053,8 +4061,12 @@ export default function TheList() {
 
   useEffect(function() {
     if (!isLiveDragging) return;
+    // A fresh live drag starts "not yet moved": a still hold+release opens the
+    // profile; real finger movement past the threshold commits to a reschedule.
+    dragMovedRef.current = false;
+    dragStartPosRef.current = {x: dragPosRef.current.x, y: dragPosRef.current.y};
     if (dragChipRef.current) {
-      dragChipRef.current.style.transform = "translate(" + (dragPosRef.current.x + 14) + "px," + (dragPosRef.current.y - 22) + "px)";
+      dragChipRef.current.style.transform = dragChipTransform(dragPosRef.current.x, dragPosRef.current.y);
     }
     var findDropKey = function(x, y) {
       var el = document.elementFromPoint(x, y);
@@ -4098,7 +4110,10 @@ export default function TheList() {
       if (!mine(e)) return;
       var px = e.clientX; var py = e.clientY;
       dragPosRef.current = {x:px, y:py};
-      if (dragChipRef.current) dragChipRef.current.style.transform = "translate(" + (px + 14) + "px," + (py - 22) + "px)";
+      if (!dragMovedRef.current && dragStartPosRef.current) {
+        if (Math.abs(px - dragStartPosRef.current.x) > 10 || Math.abs(py - dragStartPosRef.current.y) > 10) dragMovedRef.current = true;
+      }
+      if (dragChipRef.current) dragChipRef.current.style.transform = dragChipTransform(px, py);
       // Hovering a view tab while dragging jumps into that view so off-screen days
       // become reachable. Pointer capture keeps the gesture alive across the switch.
       var vt = findViewTab(px, py);
@@ -4115,6 +4130,17 @@ export default function TheList() {
       var ds = dragStateRef.current;
       var px = (e.clientX!=null) ? e.clientX : (dragPosRef.current ? dragPosRef.current.x : null);
       var py = (e.clientY!=null) ? e.clientY : (dragPosRef.current ? dragPosRef.current.y : null);
+      // Held and let go without dragging: treat as "open this person's profile",
+      // not a move. (Single pickup only — a multi/group hold just cancels cleanly.)
+      if (!dragMovedRef.current) {
+        var heldName = (ds && !ds.multi && ds.clients && ds.clients[0]) ? ds.clients[0].name : null;
+        releaseDragPointer();
+        setIsLiveDragging(false);
+        dragOverRef.current = null; setDragOverKey(null);
+        setDragState(null);
+        if (heldName) openClientProfile(heldName);
+        return;
+      }
       var landed = false;
       if (ds && ds.multi) {
         var anyKey = dragOverRef.current || (px!=null ? findAnyRowKey(px, py) : null);
@@ -4173,6 +4199,9 @@ export default function TheList() {
       dragOverRef.current = null; setDragOverKey(null);
       var ds = dragStateRef.current;
       if (!ds) return;
+      // A hold that never moved, then got cancelled by the OS: just drop the
+      // pickup cleanly — don't fall into move/place mode.
+      if (!dragMovedRef.current) { setDragState(null); return; }
       if (ds.multi) {
         setDragCalOpen(true); setDragCalMonth(new Date()); setDragCalHover(true);
       } else {
@@ -4439,7 +4468,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v57</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v58</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -4462,7 +4491,7 @@ export default function TheList() {
 
       {isLiveDragging && dragState && (
         <div ref={dragChipRef}
-          style={{position:"fixed",left:0,top:0,zIndex:3000,pointerEvents:"none",background:"#1a1a1a",color:"#fff",padding:"8px 14px",borderRadius:"9px",fontSize:"14px",fontFamily:"Georgia,serif",boxShadow:"0 8px 24px rgba(0,0,0,0.35)",whiteSpace:"nowrap",transform:"translate(" + (dragPosRef.current.x + 14) + "px," + (dragPosRef.current.y - 22) + "px)"}}>
+          style={{position:"fixed",left:0,top:0,zIndex:3000,pointerEvents:"none",background:"#1a1a1a",color:"#fff",padding:"8px 14px",borderRadius:"9px",fontSize:"14px",fontFamily:"Georgia,serif",boxShadow:"0 8px 24px rgba(0,0,0,0.35)",whiteSpace:"nowrap",transform:dragChipTransform(dragPosRef.current.x, dragPosRef.current.y)}}>
           {dragState.clients.length>1 ? (dragState.clients.length+" appointments") : dragState.clients[0].name}
         </div>
       )}
