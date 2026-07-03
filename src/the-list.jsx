@@ -329,6 +329,11 @@ const VIEWS = ["Day","3-Day","Wknd","Week","Month"];
 // surcharge number at copy time, independent of which draft is active. "full" is
 // word-for-word the original always-on intro; "short" skips the OT explainer for
 // people who already know the deal.
+// #9: a day with zero bookings pre-offers these three (whichever are actually open).
+// The instant any slot on that day gets filled, the regular one-either-side rule takes
+// over (that path is keyed on hasBookings in computeShareDays).
+var ZERO_DAY_DEFAULTS = ["9:06","9:28","9:51"];
+
 const DEFAULT_SHARE_DRAFTS = [
   {id:"full", name:"Full", text:"Hello! All my current openings are listed below.\n\n\"OT (Overtime)\" indicates appointments outside of my regular schedule. (I offer to come in early or stay late to accommodate, for an additional ${{OT_AMT}})\n\n(All the unmarked times are during regular hours, and are therefore regular price)"},
   {id:"short", name:"Short", text:"Hello! Here are my current openings:"}
@@ -621,6 +626,30 @@ export default function TheList() {
   // Brief "Copied" confirmation on the copy button.
   const [shareCopied, setShareCopied] = useState(false);
   const shareCopyTimer = useRef(null);
+  // #5: one-off "hide all OT" for a single copy (never saved, resets on close). When on,
+  // any OT time is dropped from the built message entirely.
+  const [shareHideOT, setShareHideOT] = useState(false);
+  // #7: per-day incremental reveal counts for the +AM / +PM buttons. Shape:
+  // {dateKey: {earlier:N, later:M}}. Session-only, resets on close.
+  const [shareReveal, setShareReveal] = useState({});
+  // #10: per-day "possibly earlier / later" tags appended to that day's line in the
+  // message. Shape {dateKey:{earlier:bool, later:bool}}. Session-only, resets on close.
+  const [shareEarlierLater, setShareEarlierLater] = useState({});
+  // #6: per-day memory of the last set of times that were checked when the whole day was
+  // toggled off, so toggling the day back on restores exactly that set. {dateKey:[times]}.
+  // Session-only (resets on close) so it never touches the Firebase payload.
+  const [shareDayMemory, setShareDayMemory] = useState({});
+  // #3: undo/redo for the share sheet. History lives in refs (source of truth) with a
+  // version counter in state purely to force a re-render so the buttons enable/disable.
+  // Each entry snapshots the SELECTION-shaping state (checks, OT, nudges, global pad,
+  // reveals, early/late tags, hide-OT) — not the typed message or the $ amount.
+  const shareHistRef = useRef([]);
+  const shareHistIdxRef = useRef(0);
+  const [shareHistVer, setShareHistVer] = useState(0);
+  // Bumped by every user action that should create an undo step. A useEffect keyed on
+  // this records a snapshot AFTER the action's state has committed. System reseeding
+  // never bumps it, so auto-filled times don't pollute the undo history.
+  const [shareActionSeq, setShareActionSeq] = useState(0);
   // Saved intro-message drafts (the text that precedes the times). Syncs to Firebase
   // like everything else. Each draft is {id, name, text}; text may contain the
   // literal token {{OT_AMT}}, which is swapped for the live OT surcharge number at
@@ -2261,6 +2290,25 @@ export default function TheList() {
     if (offset < 7) return parseDateKey(dateKey).toLocaleDateString("en-US", {weekday:"long"});
     return friendlyDate(dateKey);
   };
+  // #8: MESSAGE-ONLY time format — same clock math as shareFmtTime but with no AM/PM.
+  // Used solely by buildShareText; the on-screen sheet keeps shareFmtTime (with AM/PM).
+  const shareFmtTimeMsg = function(time, delta) {
+    var base = timeToAbsMinutes(time) + (delta || 0);
+    if (base < 0) base = 0;
+    var realH = Math.floor(base / 60);
+    var realM = base % 60;
+    var h12 = realH % 12; if (h12 === 0) h12 = 12;
+    var mm = realM < 10 ? ("0" + realM) : ("" + realM);
+    return h12 + ":" + mm;
+  };
+  // #8: MESSAGE-ONLY day label — shortens the weekday name (Thursday -> Thu) for the
+  // 2..6-day range. "Today"/"Tomorrow" stay; 7+ days out already uses a short weekday.
+  const shareDayLabelMsg = function(offset, dateKey) {
+    if (offset === 0) return "Today";
+    if (offset === 1) return "Tomorrow";
+    if (offset < 7) return parseDateKey(dateKey).toLocaleDateString("en-US", {weekday:"short"});
+    return friendlyDate(dateKey);
+  };
   // Sanitize the OT amount to a bare number string for display in the message.
   const shareAmtClean = function() {
     var d = (shareAmt || "").replace(/[^0-9]/g, "");
@@ -2341,10 +2389,32 @@ export default function TheList() {
           if (o.abs > firstAbs && o.abs < lastAbs) isAuto = true;       // gap in the middle
           else if (beforeAbs !== null && o.abs === beforeAbs) isAuto = true; // one before first
           else if (afterAbs !== null && o.abs === afterAbs) isAuto = true;   // one after last
+        } else {
+          // #9: no bookings yet -> pre-offer the three fixed defaults, but only the ones
+          // that are actually open. The moment a slot is filled, hasBookings flips true
+          // and this branch is skipped entirely (regular one-either-side rule resumes).
+          if (ZERO_DAY_DEFAULTS.indexOf(o.time) !== -1) isAuto = true;
         }
         if (isAuto) auto.push(o); else extra.push(o);
       }
-      out.push({dateKey:dk, label:shareDayLabel(d, dk), hasBookings:hasBookings, auto:auto, extra:extra});
+      // #7: split the non-auto opens into those EARLIER than the auto block and those
+      // LATER, each ordered nearest-to-the-block first, so +AM / +PM can hand one over
+      // at a time. With no auto block to anchor on, everything counts as "later."
+      var autoMin = null, autoMax = null;
+      for (i = 0; i < auto.length; i++) {
+        if (autoMin === null || auto[i].abs < autoMin) autoMin = auto[i].abs;
+        if (autoMax === null || auto[i].abs > autoMax) autoMax = auto[i].abs;
+      }
+      var extraEarlier = []; var extraLater = [];
+      for (i = 0; i < extra.length; i++) {
+        var ex = extra[i];
+        if (autoMin === null) extraLater.push(ex);
+        else if (ex.abs < autoMin) extraEarlier.push(ex);
+        else extraLater.push(ex);
+      }
+      extraEarlier.sort(function(a, b){ return b.abs - a.abs; }); // nearest-earlier first
+      extraLater.sort(function(a, b){ return a.abs - b.abs; });   // nearest-later first
+      out.push({dateKey:dk, offset:d, label:shareDayLabel(d, dk), hasBookings:hasBookings, auto:auto, extra:extra, extraEarlier:extraEarlier, extraLater:extraLater});
     }
     return out;
   };
@@ -2386,21 +2456,79 @@ export default function TheList() {
     setShareDirty(false);
     setShareSaveConfirm(false);
     setShowHistory(false);
+    // #5/#6/#7/#10: clear the session-only extras every fresh open.
+    setShareHideOT(false);
+    setShareReveal({});
+    setShareEarlierLater({});
+    setShareDayMemory({});
+    // #3: seed undo history with the freshly computed starting state (index 0). Snapshot
+    // fields must line up with applyShareSnapshot / the recorder effect below.
+    shareHistRef.current = [{checked:seeded.checked, ot:seeded.ot, timeShift:{}, shift:"none", reveal:{}, earlierLater:{}, hideOT:false}];
+    shareHistIdxRef.current = 0;
+    setShareHistVer(function(v){ return v + 1; });
+    setShareActionSeq(0);
     setShareModal(true);
   };
 
+  // #3: apply a snapshot to every tracked piece of state at once (undo/redo). Does NOT
+  // bump shareActionSeq, so it never records itself as a new history step.
+  const applyShareSnapshot = function(snap) {
+    setShareChecked(snap.checked);
+    setShareOT(snap.ot);
+    setShareTimeShift(snap.timeShift);
+    setShareShift(snap.shift);
+    setShareReveal(snap.reveal);
+    setShareEarlierLater(snap.earlierLater);
+    setShareHideOT(snap.hideOT);
+    setShareCopied(false);
+  };
+  // #3: mark a user action. setShareCopied(false) here covers #1 (any real change flips
+  // the copy button back to "Copy to clipboard") for every action that routes through here.
+  const bumpShareAction = function() {
+    setShareActionSeq(function(n){ return n + 1; });
+    setShareCopied(false);
+  };
+  const shareUndo = function() {
+    if (shareHistIdxRef.current <= 0) return;
+    shareHistIdxRef.current = shareHistIdxRef.current - 1;
+    applyShareSnapshot(shareHistRef.current[shareHistIdxRef.current]);
+    setShareHistVer(function(v){ return v + 1; });
+  };
+  const shareRedo = function() {
+    if (shareHistIdxRef.current >= shareHistRef.current.length - 1) return;
+    shareHistIdxRef.current = shareHistIdxRef.current + 1;
+    applyShareSnapshot(shareHistRef.current[shareHistIdxRef.current]);
+    setShareHistVer(function(v){ return v + 1; });
+  };
+
   const loadMoreShareDays = function() {
-    var next = shareWindow + 7;
+    var next = shareWindow + 1; // #2: one calendar day at a time
     var days = computeShareDays(next);
     var seeded = seedShareMaps(days, shareChecked, shareOT);
     setShareChecked(seeded.checked);
     setShareOT(seeded.ot);
     setShareWindow(next);
+    bumpShareAction();
   };
 
-  const toggleShareChecked = function(key) { setShareChecked(function(p){ var n={...p}; n[key] = !n[key]; return n; }); setShareDirty(true); };
-  const toggleShareOT = function(key) { setShareOT(function(p){ var n={...p}; n[key] = !n[key]; return n; }); };
-  const toggleShareTimeShiftMode = function(key, mode) { setShareTimeShift(function(p){ var n={...p}; n[key] = (p[key] === mode ? "none" : mode); return n; }); };
+  const toggleShareChecked = function(key) { setShareChecked(function(p){ var n={...p}; n[key] = !n[key]; return n; }); setShareDirty(true); bumpShareAction(); };
+  const toggleShareOT = function(key) { setShareOT(function(p){ var n={...p}; n[key] = !n[key]; return n; }); bumpShareAction(); };
+  const toggleShareTimeShiftMode = function(key, mode) { setShareTimeShift(function(p){ var n={...p}; n[key] = (p[key] === mode ? "none" : mode); return n; }); bumpShareAction(); };
+  // #5: one-off hide-all-OT toggle for the current copy only.
+  const toggleShareHideOT = function() { setShareHideOT(function(v){ return !v; }); bumpShareAction(); };
+  // #7: reveal one more open time earlier (+AM) or later (+PM) than the current block.
+  const revealShareEarlier = function(dk) { setShareReveal(function(p){ var n={...p}; var cur=n[dk]||{earlier:0,later:0}; n[dk]={earlier:cur.earlier+1, later:cur.later}; return n; }); bumpShareAction(); };
+  const revealShareLater = function(dk) { setShareReveal(function(p){ var n={...p}; var cur=n[dk]||{earlier:0,later:0}; n[dk]={earlier:cur.earlier, later:cur.later+1}; return n; }); bumpShareAction(); };
+  // #10: toggle the per-day "possibly earlier" / "possibly later" message tag.
+  const toggleShareEL = function(dk, which) {
+    setShareEarlierLater(function(p){
+      var n={...p}; var cur=n[dk]||{earlier:false, later:false};
+      if (which === "earlier") n[dk]={earlier:!cur.earlier, later:cur.later};
+      else n[dk]={earlier:cur.earlier, later:!cur.later};
+      return n;
+    });
+    bumpShareAction();
+  };
   // Whole-day check toggle — affects ONLY the smart-picked ("auto") times for that
   // day, never the tucked-away extras. "all" -> every auto row is checked, "none"
   // -> none are, "some" -> a mix (tapping from "some" checks the rest).
@@ -2425,7 +2553,45 @@ export default function TheList() {
     setShareDirty(true);
   };
   const toggleShareExpand = function(dk) { setShareExpanded(function(p){ var n={...p}; n[dk] = !n[dk]; return n; }); };
-  const setShareShiftMode = function(mode) { setShareShift(function(p){ return p === mode ? "none" : mode; }); };
+  const setShareShiftMode = function(mode) { setShareShift(function(p){ return p === mode ? "none" : mode; }); bumpShareAction(); };
+
+  // #6: a day's box is "active" (checked) whenever ANY of its currently-shown times is
+  // checked. shownTimes = the auto rows plus whatever extras have been revealed via +AM/+PM.
+  const shareDayActive = function(dk, shownTimes) {
+    var i;
+    for (i = 0; i < shownTimes.length; i++) { if (shareChecked[dk + "|" + shownTimes[i].time]) return true; }
+    return false;
+  };
+  // #6: tap the day box. If the day is active -> remember exactly which shown times are
+  // checked, then clear the whole day. If inactive -> restore that remembered set if we
+  // have one; otherwise (never toggled this day) fall back to its normal default = the
+  // auto rows.
+  const toggleShareDayCheck = function(day, shownTimes) {
+    var dk = day.dateKey;
+    var i;
+    if (shareDayActive(dk, shownTimes)) {
+      var mem = [];
+      for (i = 0; i < shownTimes.length; i++) { var tt = shownTimes[i].time; if (shareChecked[dk + "|" + tt]) mem.push(tt); }
+      setShareDayMemory(function(p){ var n={...p}; n[dk] = mem; return n; });
+      setShareChecked(function(p){ var n={...p}; var j; for (j = 0; j < shownTimes.length; j++) { n[dk + "|" + shownTimes[j].time] = false; } return n; });
+    } else {
+      var hasMem = Object.prototype.hasOwnProperty.call(shareDayMemory, dk);
+      var memSet = {};
+      if (hasMem) { var m = shareDayMemory[dk] || []; for (i = 0; i < m.length; i++) { memSet[m[i]] = true; } }
+      var autoSet = {};
+      for (i = 0; i < day.auto.length; i++) { autoSet[day.auto[i].time] = true; }
+      setShareChecked(function(p){
+        var n={...p}; var j;
+        for (j = 0; j < shownTimes.length; j++) {
+          var t2 = shownTimes[j].time;
+          n[dk + "|" + t2] = hasMem ? !!memSet[t2] : !!autoSet[t2];
+        }
+        return n;
+      });
+    }
+    setShareDirty(true);
+    bumpShareAction();
+  };
 
   // Live re-seed while the sheet is open: if the schedule changes and brand-new open
   // times appear (e.g. Granger fills 9:06 and 9:28 opens up), seed those new rows with
@@ -2461,13 +2627,27 @@ export default function TheList() {
     });
   }, [shareModal, shareWindow, schedules]);
 
+  // #3: record an undo step whenever a user action bumps shareActionSeq. Runs AFTER the
+  // action's state updates have committed, so the snapshot reflects the post-action
+  // selection. seq===0 is the initial/reset state (already seeded in history), so skip it.
+  useEffect(function() {
+    if (!shareModal) return;
+    if (shareActionSeq === 0) return;
+    var snap = {checked:shareChecked, ot:shareOT, timeShift:shareTimeShift, shift:shareShift, reveal:shareReveal, earlierLater:shareEarlierLater, hideOT:shareHideOT};
+    var h = shareHistRef.current.slice(0, shareHistIdxRef.current + 1);
+    h.push(snap);
+    shareHistRef.current = h;
+    shareHistIdxRef.current = h.length - 1;
+    setShareHistVer(function(v){ return v + 1; });
+  }, [shareActionSeq]);
+
   // ── Share openings: intro drafts ─────────────────────────────────────────────
   const activeShareDraft = function() {
     var i;
     for (i = 0; i < shareDrafts.length; i++) { if (shareDrafts[i].id === shareActiveDraftId) return shareDrafts[i]; }
     return shareDrafts[0] || {id:"full", name:"Full", text:""};
   };
-  const selectShareDraft = function(id) { setShareActiveDraftId(id); setShareDraftEditing(false); setShareDraftDeleteConfirm(false); };
+  const selectShareDraft = function(id) { setShareActiveDraftId(id); setShareDraftEditing(false); setShareDraftDeleteConfirm(false); setShareCopied(false); };
   const startEditShareDraft = function() { setShareDraftEditText(activeShareDraft().text); setShareDraftEditing(true); setShareDraftDeleteConfirm(false); };
   const cancelEditShareDraft = function() { setShareDraftEditing(false); setShareDraftDeleteConfirm(false); };
   const saveShareDraftEdit = function() {
@@ -2475,6 +2655,7 @@ export default function TheList() {
     setShareDrafts(function(p){ return p.map(function(d){ return d.id === id ? {...d, text:shareDraftEditText} : d; }); });
     setShareDraftEditing(false);
     setShareDraftDeleteConfirm(false);
+    setShareCopied(false);
   };
   const renameShareDraft = function(id, name) {
     setShareDrafts(function(p){ return p.map(function(d){ return d.id === id ? {...d, name:name} : d; }); });
@@ -2514,11 +2695,20 @@ export default function TheList() {
         var time = all[si].time;
         var key = day.dateKey + "|" + time;
         if (!shareChecked[key]) continue;
-        var label = shareFmtTime(time, effectiveShareDelta(key));
+        if (shareHideOT && shareOT[key]) continue; // #5: this copy hides OT times outright
+        var label = shareFmtTimeMsg(time, effectiveShareDelta(key)); // #8: no AM/PM
         if (shareOT[key]) label = label + " (OT: +$" + amt + ")";
         parts.push(label);
       }
-      if (parts.length) lines.push(day.label + ": " + parts.join(", "));
+      if (parts.length) {
+        // #10: append the per-day "possibly earlier / later" tag if set.
+        var elFlag = shareEarlierLater[day.dateKey] || {earlier:false, later:false};
+        var elSuffix = "";
+        if (elFlag.earlier && elFlag.later) elSuffix = " (and possibly earlier and later, if needed)";
+        else if (elFlag.earlier) elSuffix = " (and possibly earlier, if needed)";
+        else if (elFlag.later) elSuffix = " (and possibly later, if needed)";
+        lines.push(shareDayLabelMsg(day.offset, day.dateKey) + ": " + parts.join(", ") + elSuffix); // #8: short day label
+      }
     }
     if (!lines.length) return header + "(no openings selected)";
     return header + lines.join("\n\n");
@@ -4468,7 +4658,7 @@ export default function TheList() {
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
           TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v59</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v60</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -5333,13 +5523,18 @@ export default function TheList() {
           <div style={{padding:"10px 16px",borderBottom:"1px solid #ececea",display:"flex",flexWrap:"wrap",gap:"14px",alignItems:"center",flexShrink:0}}>
             <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
               <span style={{fontSize:"12px",color:"#666"}}>OT surcharge $</span>
-              <input value={shareAmt} inputMode="numeric" onChange={function(e){ setShareAmt(e.target.value.replace(/[^0-9]/g,"")); }} style={{width:"50px",padding:"5px 7px",border:"1px solid #d8d8d6",borderRadius:"5px",background:"#fff",fontFamily:"inherit",fontSize:"13px",color:"#1a1a1a",outline:"none"}}/>
+              <input value={shareAmt} inputMode="numeric" onChange={function(e){ setShareAmt(e.target.value.replace(/[^0-9]/g,"")); setShareCopied(false); }} style={{width:"50px",padding:"5px 7px",border:"1px solid #d8d8d6",borderRadius:"5px",background:"#fff",fontFamily:"inherit",fontSize:"13px",color:"#1a1a1a",outline:"none"}}/>
             </div>
             <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
               <span style={{fontSize:"12px",color:"#666"}}>Pad all</span>
               <button onClick={function(){ setShareShiftMode("plus"); }} style={{padding:"5px 10px",borderRadius:"6px",border:shareShift==="plus"?"1px solid #2e7d46":"1px solid #d8d8d6",background:shareShift==="plus"?"#2e7d46":"#fff",color:shareShift==="plus"?"#fff":"#777",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",fontWeight:"bold"}}>+5</button>
               <button onClick={function(){ setShareShiftMode("minus"); }} style={{padding:"5px 10px",borderRadius:"6px",border:shareShift==="minus"?"1px solid #2e7d46":"1px solid #d8d8d6",background:shareShift==="minus"?"#2e7d46":"#fff",color:shareShift==="minus"?"#fff":"#777",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",fontWeight:"bold"}}>-5</button>
             </div>
+            <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
+              <button onClick={shareUndo} disabled={!(shareHistIdxRef.current>0)} title="Undo" style={{padding:"5px 10px",borderRadius:"6px",border:"1px solid #d8d8d6",background:"#fff",color:(shareHistIdxRef.current>0)?"#555":"#ccc",cursor:(shareHistIdxRef.current>0)?"pointer":"default",fontFamily:"inherit",fontSize:"13px",fontWeight:"bold"}}>{"↶"}</button>
+              <button onClick={shareRedo} disabled={!(shareHistIdxRef.current<shareHistRef.current.length-1)} title="Redo" style={{padding:"5px 10px",borderRadius:"6px",border:"1px solid #d8d8d6",background:"#fff",color:(shareHistIdxRef.current<shareHistRef.current.length-1)?"#555":"#ccc",cursor:(shareHistIdxRef.current<shareHistRef.current.length-1)?"pointer":"default",fontFamily:"inherit",fontSize:"13px",fontWeight:"bold"}}>{"↷"}</button>
+            </div>
+            <button onClick={toggleShareHideOT} title="Hide all OT times from this one copy (doesn't change your saved draft)" style={{padding:"5px 10px",borderRadius:"6px",border:shareHideOT?"1px solid #c9852e":"1px solid #d8d8d6",background:shareHideOT?"#f6e6cf":"#fff",color:shareHideOT?"#9a5e12":"#777",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",fontWeight:"bold"}}>{shareHideOT?"OT hidden ✓":"Hide OT"}</button>
           </div>
 
           <div style={{flex:"1 1 auto",overflowY:"auto",padding:"4px 0",WebkitOverflowScrolling:"touch"}}>
@@ -5349,8 +5544,15 @@ export default function TheList() {
                 return <div style={{padding:"28px 16px",fontSize:"13px",color:"#999",textAlign:"center"}}>No open times in this stretch.</div>;
               }
               return days.map(function(day){
-                var expanded = !!shareExpanded[day.dateKey];
-                var allState = shareDayAllState(day);
+                var dk = day.dateKey;
+                var rev = shareReveal[dk] || {earlier:0, later:0};
+                var shownEarlier = day.extraEarlier.slice(0, rev.earlier);
+                var shownLater = day.extraLater.slice(0, rev.later);
+                var shownTimes = shownEarlier.concat(day.auto).concat(shownLater).slice().sort(function(a,b){ return a.abs - b.abs; });
+                var dayActive = shareDayActive(dk, shownTimes);
+                var canEarlier = rev.earlier < day.extraEarlier.length;
+                var canLater = rev.later < day.extraLater.length;
+                var el = shareEarlierLater[dk] || {earlier:false, later:false};
                 var renderRow = function(o){
                   var key = day.dateKey + "|" + o.time;
                   var checked = !!shareChecked[key];
@@ -5368,23 +5570,29 @@ export default function TheList() {
                   );
                 };
                 return (
-                  <div key={day.dateKey} style={{borderBottom:"1px solid #f0f0ee"}}>
+                  <div key={dk} style={{borderBottom:"1px solid #f0f0ee"}}>
                     <div style={{display:"flex",alignItems:"center",gap:"8px",padding:"8px 16px 2px"}}>
-                      <button onClick={function(){ toggleShareDayAll(day); }} title="Check/uncheck all of this day's suggested times" style={{width:"16px",height:"16px",flexShrink:0,borderRadius:"4px",border:allState==="all"?"1.5px solid #2e7d46":(allState==="some"?"1.5px solid #9a9a3a":"1.5px solid #c4c4c2"),background:allState==="all"?"#2e7d46":(allState==="some"?"#e8e2b8":"#fff"),cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",padding:0}}>{allState==="all"?<span style={{color:"#fff",fontSize:"10px",lineHeight:1}}>{"✓"}</span>:(allState==="some"?<span style={{color:"#7a7a2a",fontSize:"10px",lineHeight:1}}>{"–"}</span>:null)}</button>
+                      <button onClick={function(){ toggleShareDayCheck(day, shownTimes); }} title="Check or clear this whole day" style={{width:"16px",height:"16px",flexShrink:0,borderRadius:"4px",border:dayActive?"1.5px solid #2e7d46":"1.5px solid #c4c4c2",background:dayActive?"#2e7d46":"#fff",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",padding:0}}>{dayActive?<span style={{color:"#fff",fontSize:"10px",lineHeight:1}}>{"✓"}</span>:null}</button>
                       <span style={{fontSize:"12px",letterSpacing:"0.08em",textTransform:"uppercase",color:"#888",fontWeight:"bold"}}>{day.label}</span>
-                      {!day.hasBookings&&<span style={{fontSize:"10px",color:"#bbb",letterSpacing:"0.04em",marginLeft:"auto"}}>no bookings</span>}
+                      {!day.hasBookings&&<span style={{fontSize:"10px",color:"#bbb",letterSpacing:"0.04em"}}>no bookings</span>}
+                      <div style={{marginLeft:"auto",display:"flex",gap:"5px"}}>
+                        <button onClick={function(){ toggleShareEL(dk,"earlier"); }} title="Add a 'possibly earlier, if needed' note to this day's line" style={{padding:"2px 7px",borderRadius:"10px",border:el.earlier?"1px solid #4a8a9a":"1px solid #d8d8d6",background:el.earlier?"#e3eef0":"#fff",color:el.earlier?"#2c5a66":"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"10px",letterSpacing:"0.04em"}}>{"+early"}</button>
+                        <button onClick={function(){ toggleShareEL(dk,"later"); }} title="Add a 'possibly later, if needed' note to this day's line" style={{padding:"2px 7px",borderRadius:"10px",border:el.later?"1px solid #4a8a9a":"1px solid #d8d8d6",background:el.later?"#e3eef0":"#fff",color:el.later?"#2c5a66":"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"10px",letterSpacing:"0.04em"}}>{"+late"}</button>
+                      </div>
                     </div>
-                    {day.auto.map(renderRow)}
-                    {expanded&&day.extra.map(renderRow)}
-                    {day.extra.length>0&&(
-                      <button onClick={function(){ toggleShareExpand(day.dateKey); }} style={{margin:"2px 16px 8px",background:"none",border:"none",color:"#4a8a9a",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",padding:"3px 0"}}>{expanded?"Hide extra times":("+ "+day.extra.length+" more open "+(day.extra.length===1?"time":"times"))}</button>
+                    {shownTimes.map(renderRow)}
+                    {(canEarlier||canLater)&&(
+                      <div style={{display:"flex",gap:"8px",margin:"2px 16px 8px"}}>
+                        {canEarlier&&<button onClick={function(){ revealShareEarlier(dk); }} title="Show one more open time earlier" style={{background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#4a8a9a",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",padding:"4px 12px"}}>{"+AM"}</button>}
+                        {canLater&&<button onClick={function(){ revealShareLater(dk); }} title="Show one more open time later" style={{background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#4a8a9a",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",padding:"4px 12px"}}>{"+PM"}</button>}
+                      </div>
                     )}
                   </div>
                 );
               });
             })()}
             <div style={{padding:"10px 16px 16px",textAlign:"center"}}>
-              <button onClick={loadMoreShareDays} style={{background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#777",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",padding:"7px 16px"}}>Load more days</button>
+              <button onClick={loadMoreShareDays} style={{background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#777",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",padding:"7px 16px"}}>{"Load next " + addDays(new Date(), shareWindow).toLocaleDateString("en-US",{weekday:"long"})}</button>
             </div>
           </div>
 
