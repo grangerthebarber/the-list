@@ -296,12 +296,41 @@ function migrateSchedules(raw) {
   return result;
 }
 
+// One family per banner/flash type so the banner color and the row flash color
+// can never drift apart. added -> green, canceled -> red, edited/moved -> gold.
+function bannerFamily(type) {
+  if (type==="added"||type==="slot_added"||type==="unblocked"||type==="checkoff") return "green";
+  if (type==="removed"||type==="slot_removed"||type==="blocked") return "red";
+  if (type==="rescheduled"||type==="edited"||type==="recurring_set"||type==="penciled") return "gold";
+  return "neutral";
+}
 function getBannerColor(type) {
-  if (type==="penciled") return "#a07830";
-  if (type==="added"||type==="slot_added"||type==="unblocked"||type==="checkoff") return "#2a7a2a";
-  if (type==="removed"||type==="slot_removed"||type==="blocked") return "#c0392b";
-  if (type==="rescheduled") return "#2a4fd6";
+  var f = bannerFamily(type);
+  if (f==="green") return "#2a7a2a";
+  if (f==="red") return "#c0392b";
+  if (f==="gold") return "#a07830";
   return "#555";
+}
+// Flash (row pulse) styling per family. tint = the light resting background that
+// sits under the dark row text; anim = the keyframe that pulses strong<->tint;
+// bar = the left accent stripe. Same family as the banner, so colors always agree.
+function flashTintFor(fam) {
+  if (fam==="green") return "#e0f4e0";
+  if (fam==="red") return "#f6dbd6";
+  if (fam==="gold") return "#f1e6c6";
+  return "#ececec";
+}
+function flashAnimFor(fam) {
+  if (fam==="green") return "tlFlashG";
+  if (fam==="red") return "tlFlashR";
+  if (fam==="gold") return "tlFlashD";
+  return "tlFlashN";
+}
+function flashBarFor(fam) {
+  if (fam==="green") return "#2a7a2a";
+  if (fam==="red") return "#c0392b";
+  if (fam==="gold") return "#a07830";
+  return "#888";
 }
 
 function describeBanner(entry) {
@@ -325,6 +354,12 @@ function describeBanner(entry) {
 }
 
 const VIEWS = ["Day","3-Day","Wknd","Week","Month"];
+
+// When the iPad is in Split View and our app is at least this wide (CSS px), the
+// change banner rides inline in the header gap (covers the ~3/4 layout). Below it,
+// the header is too cramped so the banner falls back to floating. Tune this one
+// number if it flips inline at the wrong split size on the actual iPad.
+var SPLIT_INLINE_MIN_W = 900;
 // Default "Share openings" intro drafts. {{OT_AMT}} is replaced with the live OT
 // surcharge number at copy time, independent of which draft is active. "full" is
 // word-for-word the original always-on intro; "short" skips the OT explainer for
@@ -335,8 +370,8 @@ const VIEWS = ["Day","3-Day","Wknd","Week","Month"];
 var ZERO_DAY_DEFAULTS = ["9:06","9:28","9:51"];
 
 const DEFAULT_SHARE_DRAFTS = [
-  {id:"full", name:"Full", text:"Hello! All my current openings are listed below.\n\n\"OT (Overtime)\" indicates appointments outside of my regular schedule. (I offer to come in early or stay late to accommodate, for an additional ${{OT_AMT}})\n\n(All the unmarked times are during regular hours, and are therefore regular price)"},
-  {id:"short", name:"Short", text:"Hello! Here are my current openings:"}
+  {id:"full", name:"Full", text:"Hello! All my current openings are listed below.\n\n\"OT (Overtime)\" indicates appointments outside of my regular schedule. (I offer to come in early or stay late to accommodate, for an additional ${{OT_AMT}})\n\n(All the unmarked times are during regular hours, and are therefore regular price)", footer:""},
+  {id:"short", name:"Short", text:"Hello! Here are my current openings:", footer:""}
 ];
 
 // Compare two schedule snapshots and return the single most salient slot that
@@ -525,6 +560,7 @@ function absMinutesToTime(min) {
 export default function TheList() {
   const [view, setView] = useState(function() { try { return (typeof window!=="undefined" && window.innerWidth<=430) ? "Day" : "3-Day"; } catch(e) { return "3-Day"; } });
   const [isSplitView, setIsSplitView] = useState(false);
+  const [splitBannerRoom, setSplitBannerRoom] = useState(false);
   const [isPhone, setIsPhone] = useState(function() { try { return typeof window!=="undefined" && window.innerWidth<=430; } catch(e) { return false; } });
   const [baseDate, setBaseDate] = useState(new Date());
   const [schedules, setSchedules] = useState(function() {
@@ -542,6 +578,10 @@ export default function TheList() {
   const [redoStack, setRedoStack] = useState([]);
   const [showHistory, setShowHistory] = useState(false);
   const [recentlyRemoved, setRecentlyRemoved] = useState({});
+  // B1: green twin of recentlyRemoved. A just-LANDED spot (a move's destination)
+  // glows green for 8s, mirroring the way a just-VACATED spot glows red. Keyed the
+  // same way (dateKey-idx). Purely visual; no payload, no move logic.
+  const [recentlyPlaced, setRecentlyPlaced] = useState({});
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [swipedSlot, setSwipedSlot] = useState(null);
   const [recurringModal, setRecurringModal] = useState(null);
@@ -573,6 +613,9 @@ export default function TheList() {
   const [noteModal, setNoteModal] = useState(null);
   const [noteDraft, setNoteDraft] = useState("");
   const [noteKind, setNoteKind] = useState(null); // null | "personal" | "business" — colors the note (blue / gold)
+  const [noteRepeat, setNoteRepeat] = useState(0); // v63: 0 once | 1 weekly | 2/3/4 every N weeks (selected interval in the day-note modal)
+  const [noteWasRepeat, setNoteWasRepeat] = useState(false); // v63: true if the opened day-note is governed by a repeat rule
+  const [noteScopeAsk, setNoteScopeAsk] = useState(null); // v63: null | "save" | "clear" — pending action awaiting "this day / all repeats"
   const [dayNotes, setDayNotes] = useState(function() { return loadFromStorage("tl_daynotes", {}); });
   // #13 accounting: per-day takings keyed by dateKey -> {cash,venmo,applepay,square,services,hours}.
   // Rides the same Firebase sync as the other data fields (added as the LAST key in the
@@ -639,6 +682,16 @@ export default function TheList() {
   // toggled off, so toggling the day back on restores exactly that set. {dateKey:[times]}.
   // Session-only (resets on close) so it never touches the Firebase payload.
   const [shareDayMemory, setShareDayMemory] = useState({});
+  // D + cloud: explicit list of times a user has ADDED beyond the auto set via +AM/+PM,
+  // per day. {dateKey:[times]}. Includes both real open extras and off-calendar grid
+  // times. Replaces the old count-based shareReveal in the UI (shareReveal kept dormant).
+  // Added times arrive CHECKED. This is part of the saved DAYS bundle.
+  const [shareRevealed, setShareRevealed] = useState({});
+  // Cloud: the SAVED snapshot of the whole DAYS area — {checked, ot, earlierLater,
+  // dayMemory, revealed} or null. Syncs across devices (new Firebase field, kept BESIDE
+  // the legacy shareSavedChecks so older data/devices never break). Written only when
+  // Granger taps Save; restored+reconciled on open.
+  const [shareSavedState, setShareSavedState] = useState(function() { return loadFromStorage("tl_sharedstate", null); });
   // #3: undo/redo for the share sheet. History lives in refs (source of truth) with a
   // version counter in state purely to force a re-render so the buttons enable/disable.
   // Each entry snapshots the SELECTION-shaping state (checks, OT, nudges, global pad,
@@ -659,6 +712,8 @@ export default function TheList() {
   const [shareActiveDraftId, setShareActiveDraftId] = useState(function() { return loadFromStorage("tl_sharedraftid", "full"); });
   const [shareDraftEditing, setShareDraftEditing] = useState(false);
   const [shareDraftEditText, setShareDraftEditText] = useState("");
+  // #4: the footer (message ending, after the times) being edited.
+  const [shareDraftEditFooter, setShareDraftEditFooter] = useState("");
   const [shareDraftDeleteConfirm, setShareDraftDeleteConfirm] = useState(false);
   // ── Share openings: save-on-close of the SELECTION only (which times are checked) ──
   // Fresh opens reseed from the smart defaults. If Granger hand-picks times and chooses
@@ -694,6 +749,12 @@ export default function TheList() {
   const searchInputRef = useRef(null);
   const [searchHit, setSearchHit] = useState(null);
   const searchHitTimer = useRef(null);
+  // Momentary "here's the change" pulse fired by tapping the banner or by undo/redo.
+  // Shape: {type, keys:{"dateKey|time":true,...}} or null. Cells matching a key pulse
+  // in the banner's family color, then clear. Keyed by time (not row index) so it
+  // survives slot reordering.
+  const [flashCells, setFlashCells] = useState(null);
+  const flashTimer = useRef(null);
   // Delete-a-client guards shown inside the profile: a block message (when they still
   // have upcoming bookings) and a confirm step (when it's safe to remove).
   const [clientDeleteMsg, setClientDeleteMsg] = useState("");
@@ -819,6 +880,8 @@ export default function TheList() {
   quickMsgsRef.current = quickMsgs;
   const shareSavedChecksRef = useRef(shareSavedChecks);
   shareSavedChecksRef.current = shareSavedChecks;
+  const shareSavedStateRef = useRef(shareSavedState);
+  shareSavedStateRef.current = shareSavedState;
   const lastSyncRef = useRef(null);
   const saveTimer = useRef(null);
 
@@ -874,6 +937,7 @@ export default function TheList() {
   useEffect(function() { try { localStorage.setItem("tl_daynotes", JSON.stringify(dayNotes)); } catch(e) {} }, [dayNotes]);
   useEffect(function() { try { localStorage.setItem("tl_quickmsgs", JSON.stringify(quickMsgs)); } catch(e) {} }, [quickMsgs]);
   useEffect(function() { try { localStorage.setItem("tl_sharedchecks", JSON.stringify(shareSavedChecks)); } catch(e) {} }, [shareSavedChecks]);
+  useEffect(function() { try { localStorage.setItem("tl_sharedstate", JSON.stringify(shareSavedState)); } catch(e) {} }, [shareSavedState]);
   useEffect(function() { try { localStorage.setItem("tl_accounting", JSON.stringify(accounting)); } catch(e) {} }, [accounting]);
   useEffect(function() { try { localStorage.setItem("tl_sharedrafts", JSON.stringify(shareDrafts)); } catch(e) {} }, [shareDrafts]);
   useEffect(function() { try { localStorage.setItem("tl_sharedraftid", JSON.stringify(shareActiveDraftId)); } catch(e) {} }, [shareActiveDraftId]);
@@ -896,17 +960,17 @@ export default function TheList() {
         if (first) {
           first = false;
           var seedSch = migrateSchedules(schedulesRef.current || {});
-          var seeded = {schedules:seedSch, clients:clientMemoryRef.current, holidays:customHolidaysRef.current, history:historyRef.current, dayNotes:dayNotesRef.current, accounting:accountingRef.current, shareDrafts:shareDraftsRef.current, shareActiveDraftId:shareActiveDraftIdRef.current, quickMsgs:quickMsgsRef.current, shareSavedChecks:shareSavedChecksRef.current};
+          var seeded = {schedules:seedSch, clients:clientMemoryRef.current, holidays:customHolidaysRef.current, history:historyRef.current, dayNotes:dayNotesRef.current, accounting:accountingRef.current, shareDrafts:shareDraftsRef.current, shareActiveDraftId:shareActiveDraftIdRef.current, quickMsgs:quickMsgsRef.current, shareSavedChecks:shareSavedChecksRef.current, shareSavedState:shareSavedStateRef.current};
           lastSyncRef.current = JSON.stringify(seeded);
           recentWritesRef.current.push(lastSyncRef.current);
-          try { setDoc(userDoc, {schedules:seedSch, clients:seeded.clients, holidays:seeded.holidays, history:seeded.history, dayNotes:seeded.dayNotes, accounting:seeded.accounting, shareDrafts:seeded.shareDrafts, shareActiveDraftId:seeded.shareActiveDraftId, quickMsgs:seeded.quickMsgs, shareSavedChecks:seeded.shareSavedChecks, updatedAt:serverTimestamp()}, {merge:true}); } catch(e) {}
+          try { setDoc(userDoc, {schedules:seedSch, clients:seeded.clients, holidays:seeded.holidays, history:seeded.history, dayNotes:seeded.dayNotes, accounting:seeded.accounting, shareDrafts:seeded.shareDrafts, shareActiveDraftId:seeded.shareActiveDraftId, quickMsgs:seeded.quickMsgs, shareSavedChecks:seeded.shareSavedChecks, shareSavedState:seeded.shareSavedState, updatedAt:serverTimestamp()}, {merge:true}); } catch(e) {}
           setHydrated(true);
         }
         return;
       }
       var data = snap.data() || {};
       var migrated = migrateSchedules(data.schedules || {});
-      var applied = {schedules:migrated, clients:data.clients||[], holidays:data.holidays||[], history:data.history||[], dayNotes:data.dayNotes||{}, accounting:data.accounting||{}, shareDrafts:(data.shareDrafts&&data.shareDrafts.length?data.shareDrafts:DEFAULT_SHARE_DRAFTS), shareActiveDraftId:data.shareActiveDraftId||"full", quickMsgs:(data.quickMsgs&&data.quickMsgs.length?data.quickMsgs:quickMsgsRef.current), shareSavedChecks:(data.shareSavedChecks!==undefined?data.shareSavedChecks:shareSavedChecksRef.current)};
+      var applied = {schedules:migrated, clients:data.clients||[], holidays:data.holidays||[], history:data.history||[], dayNotes:data.dayNotes||{}, accounting:data.accounting||{}, shareDrafts:(data.shareDrafts&&data.shareDrafts.length?data.shareDrafts:DEFAULT_SHARE_DRAFTS), shareActiveDraftId:data.shareActiveDraftId||"full", quickMsgs:(data.quickMsgs&&data.quickMsgs.length?data.quickMsgs:quickMsgsRef.current), shareSavedChecks:(data.shareSavedChecks!==undefined?data.shareSavedChecks:shareSavedChecksRef.current), shareSavedState:(data.shareSavedState!==undefined?data.shareSavedState:shareSavedStateRef.current)};
       var json = JSON.stringify(applied);
       if (recentWritesRef.current.indexOf(json) >= 0) { lastSyncRef.current = json; return; }
       if (!first && json === lastSyncRef.current) return;
@@ -922,6 +986,7 @@ export default function TheList() {
       setShareActiveDraftId(applied.shareActiveDraftId);
       setQuickMsgs(applied.quickMsgs);
       setShareSavedChecks(applied.shareSavedChecks);
+      setShareSavedState(applied.shareSavedState);
       setHydrated(true);
     }, function(err) { setHydrated(true); });
     return function() { try { unsub(); } catch(e) {} };
@@ -929,7 +994,7 @@ export default function TheList() {
 
   useEffect(function() {
     if (!hydrated || !authUser) return;
-    var payload = {schedules:schedules, clients:clientMemory, holidays:customHolidays, history:history, dayNotes:dayNotes, accounting:accounting, shareDrafts:shareDrafts, shareActiveDraftId:shareActiveDraftId, quickMsgs:quickMsgs, shareSavedChecks:shareSavedChecks};
+    var payload = {schedules:schedules, clients:clientMemory, holidays:customHolidays, history:history, dayNotes:dayNotes, accounting:accounting, shareDrafts:shareDrafts, shareActiveDraftId:shareActiveDraftId, quickMsgs:quickMsgs, shareSavedChecks:shareSavedChecks, shareSavedState:shareSavedState};
     var json = JSON.stringify(payload);
     if (json === lastSyncRef.current) return;
     lastSyncRef.current = json;
@@ -938,9 +1003,9 @@ export default function TheList() {
     if (saveTimer.current) clearTimeout(saveTimer.current);
     var uid = authUser.uid;
     saveTimer.current = setTimeout(function() {
-      try { setDoc(doc(fbDb, "users", uid), {schedules:payload.schedules, clients:payload.clients, holidays:payload.holidays, history:payload.history, dayNotes:payload.dayNotes, accounting:payload.accounting, shareDrafts:payload.shareDrafts, shareActiveDraftId:payload.shareActiveDraftId, quickMsgs:payload.quickMsgs, shareSavedChecks:payload.shareSavedChecks, updatedAt:serverTimestamp()}, {merge:true}); } catch(e) {}
+      try { setDoc(doc(fbDb, "users", uid), {schedules:payload.schedules, clients:payload.clients, holidays:payload.holidays, history:payload.history, dayNotes:payload.dayNotes, accounting:payload.accounting, shareDrafts:payload.shareDrafts, shareActiveDraftId:payload.shareActiveDraftId, quickMsgs:payload.quickMsgs, shareSavedChecks:payload.shareSavedChecks, shareSavedState:payload.shareSavedState, updatedAt:serverTimestamp()}, {merge:true}); } catch(e) {}
     }, 600);
-  }, [schedules, clientMemory, customHolidays, history, dayNotes, accounting, shareDrafts, shareActiveDraftId, quickMsgs, shareSavedChecks, hydrated, authUser]);
+  }, [schedules, clientMemory, customHolidays, history, dayNotes, accounting, shareDrafts, shareActiveDraftId, quickMsgs, shareSavedChecks, shareSavedState, hydrated, authUser]);
 
   // Stop the whole page from bouncing/scrolling when there is nothing under the
   // list. iOS standalone PWAs ignore CSS overscroll-behavior, so the only thing
@@ -1017,7 +1082,9 @@ export default function TheList() {
     var check = function() {
       var touch = (navigator.maxTouchPoints||0) > 0 || ("ontouchstart" in window);
       var sw = (window.screen && window.screen.width) ? window.screen.width : window.innerWidth;
-      setIsSplitView(touch && window.innerWidth < (sw - 20));
+      var splitNow = touch && window.innerWidth < (sw - 20);
+      setIsSplitView(splitNow);
+      setSplitBannerRoom(splitNow && window.innerWidth >= SPLIT_INLINE_MIN_W);
       setIsPhone(window.innerWidth <= 430);
     };
     check();
@@ -1083,9 +1150,13 @@ export default function TheList() {
   // saved number or one you just entered is never overwritten. The estimate lands in the
   // editable draft: delete it and type your own, or just tap Done to accept it. Emptying
   // a field and saving lets it be re-estimated next time; typing a number locks it in.
+  // TODAY is the exception (B4): the current day is NOT pre-filled here — its estimate is
+  // shown live in the render (counting every booked name) and only sticks when you type,
+  // so it keeps updating through the day instead of freezing on the first open/close.
   useEffect(function(){
     if (!acctModal) return;
     var dk = acctModal.dateKey;
+    if (dk === toDateKey(new Date())) return; // B4: today handled live in render, never pre-filled/persisted here
     var rec = acctFor(dk);
     var est = acctAutoEstimate(dk);
     if (!est.any) return;
@@ -1197,6 +1268,7 @@ export default function TheList() {
   }, []);
 
   const showBanner = function(entry, overrideType) {
+    if (bannerTapClear.current) bannerTapClear.current();
     if (bannerTimer.current) clearTimeout(bannerTimer.current);
     var displayEntry = overrideType ? {...entry, type:overrideType} : entry;
     setBannerSwipeY(0);
@@ -1205,9 +1277,42 @@ export default function TheList() {
   };
   // Dismiss helper shared by the swipe gesture and any programmatic close.
   const dismissBanner = function() {
+    if (bannerTapClear.current) bannerTapClear.current();
     if (bannerTimer.current) clearTimeout(bannerTimer.current);
     setBannerSwipeY(0);
     setBanner(null);
+  };
+  // Restart the standard auto-dismiss countdown (used when a banner tap keeps it up).
+  const restartBannerTimer = function() {
+    if (bannerTimer.current) clearTimeout(bannerTimer.current);
+    bannerTimer.current = setTimeout(function(){ setBanner(null); }, 10000);
+  };
+  // Pulse the given spots ([{dateKey,time},...]) in the banner family's color, then clear.
+  const flashSpots = function(type, targets) {
+    if (!targets || !targets.length) return;
+    var keys = {};
+    targets.forEach(function(t){ if (t && t.dateKey && t.time) keys[t.dateKey + "|" + t.time] = true; });
+    if (!Object.keys(keys).length) return;
+    if (flashTimer.current) clearTimeout(flashTimer.current);
+    setFlashCells({type: type || "neutral", keys: keys});
+    flashTimer.current = setTimeout(function(){ setFlashCells(null); }, 1700);
+  };
+  // Which spots a banner points at: an explicit list (group moves) or its own dateKey+time.
+  const bannerFlashTargets = function(b) {
+    if (!b) return [];
+    if (b.flashTargets && b.flashTargets.length) return b.flashTargets;
+    if (b.dateKey && b.time) return [{dateKey: b.dateKey, time: b.time}];
+    return [];
+  };
+  // Tapping the banner: jump to the change (if off-screen), flash it, and keep the
+  // banner up with a fresh countdown. Banners with no spot (exports, info) just dismiss.
+  const onBannerTap = function() {
+    var b = bannerRef.current;
+    var targets = bannerFlashTargets(b);
+    if (!targets.length) { dismissBanner(); return; }
+    if (targets[0].dateKey) goToDateKeyIfHidden(targets[0].dateKey);
+    flashSpots(b.type, targets);
+    restartBannerTimer();
   };
 
   // After an export on the iPad, the download/share sheet takes over the screen.
@@ -1358,6 +1463,30 @@ export default function TheList() {
     setTimeout(function(){ setRecentlyRemoved(function(r){ var n={...r}; delete n[fk]; return n; }); }, 8000);
   };
 
+  // B1: glow a just-LANDED slot green for 8 seconds (the destination of a move),
+  // the green counterpart to flashRemoved's red. Same 8s window so a move reads as
+  // one paired gesture: red where they left, green where they arrived.
+  var flashPlaced = function(dateKey, idx) {
+    var fk = dateKey + "-" + idx;
+    setRecentlyPlaced(function(r){ var n={...r}; n[fk]=true; return n; });
+    setTimeout(function(){ setRecentlyPlaced(function(r){ var n={...r}; delete n[fk]; return n; }); }, 8000);
+  };
+
+  // B1: paint the red/green pair for a completed move. Landing spot -> green.
+  // Vacated spot -> red, but only when it was blanked in place (a shared-time
+  // "paired" slot is spliced out on vacate, so its old index no longer refers to
+  // the emptied spot -- we skip red there rather than redden the wrong row).
+  // Indices are re-resolved from the FINAL arrays by time, so a same-day collapse
+  // that shifts indices can't misplace either color.
+  var flashMovePair = function(srcDK, srcArr, vacTime, vacShared, tgtDK, tgtArr, landTime) {
+    var li = findSlotIdxByTime(tgtArr, landTime);
+    if (li >= 0) flashPlaced(tgtDK, li);
+    if (!vacShared && vacTime) {
+      var vi = findSlotIdxByTime(srcArr, vacTime);
+      if (vi >= 0 && !srcArr[vi].name) flashRemoved(srcDK, vi);
+    }
+  };
+
   const pushUndo = function(snapshot) {
     setUndoStack(function(prev){ return [...prev, snapshot].slice(-50); });
     setRedoStack([]);
@@ -1445,6 +1574,7 @@ export default function TheList() {
     setSchedules(snapshot.schedules);
     if (diff && diff.dateKey) goToDateKeyIfHidden(diff.dateKey);
     showBanner({type:"undo", name:(diff&&diff.name)?diff.name:"last change", time:(diff&&diff.hasName)?diff.time:null, dateKey:(diff&&diff.dateKey)?diff.dateKey:null});
+    if (diff && diff.dateKey && diff.time) flashSpots("undo", [{dateKey:diff.dateKey, time:diff.time}]);
   };
 
   const handleRedo = function() {
@@ -1456,6 +1586,7 @@ export default function TheList() {
     setSchedules(snapshot.schedules);
     if (diff && diff.dateKey) goToDateKeyIfHidden(diff.dateKey);
     showBanner({type:"redo", name:(diff&&diff.name)?diff.name:"last change", time:(diff&&diff.hasName)?diff.time:null, dateKey:(diff&&diff.dateKey)?diff.dateKey:null});
+    if (diff && diff.dateKey && diff.time) flashSpots("redo", [{dateKey:diff.dateKey, time:diff.time}]);
   };
 
   const snapshotAndChange = function(changeFn, historyEntry) {
@@ -1474,6 +1605,7 @@ export default function TheList() {
     // focused input — which is what summons the iOS AutoFill callout.
     var rmKey = dateKey + "-" + idx;
     setRecentlyRemoved(function(r){ if(!r[rmKey]) return r; var n={...r}; delete n[rmKey]; return n; });
+    setRecentlyPlaced(function(r){ if(!r[rmKey]) return r; var n={...r}; delete n[rmKey]; return n; }); // B1: green clears on edit too
     editingRef.current = {dateKey,idx};
     setEditingCell({dateKey,idx});
     setEditValues({name:slot.name||"",price:slot.price||""});
@@ -2156,9 +2288,11 @@ export default function TheList() {
     // be captured and survive on the iPad (request #3 — the missing piece).
     var renderHalf = function(s, i) {
       var hsh = searchHit && s.name && s.name.toLowerCase()===searchHit.name && dateKey===searchHit.dateKey;
+      var hshFlash = flashCells && flashCells.keys[dateKey+"|"+s.time];
+      var hshFam = hshFlash ? bannerFamily(flashCells.type) : null;
       return (
         <div data-droprow={dateKey+"-"+i} data-dropfilled="1"
-          style={{flex:"1 1 0px",minWidth:0,display:"flex",alignItems:"center",gap:"6px",padding:"0 6px",background:hsh?"#bfe9bf":(s.done?"#f4faf4":"transparent"),cursor:"pointer",userSelect:"none",WebkitUserSelect:"none"}}
+          style={{flex:"1 1 0px",minWidth:0,display:"flex",alignItems:"center",gap:"6px",padding:"0 6px",background:hshFlash?flashTintFor(hshFam):(hsh?"#bfe9bf":(s.done?"#f4faf4":"transparent")),animation:hshFlash?(flashAnimFor(hshFam)+" 1.6s ease-out"):"none",cursor:"pointer",userSelect:"none",WebkitUserSelect:"none"}}
           onClick={function(){ if(s.done) handleDoneRowTap(dateKey,i); else openClientProfile(s.name); }}
           onPointerDown={function(e){ dragPointerId.current=e.pointerId; }}
           onMouseDown={function(){ if(!s.done) startDragLongPress(dateKey,i,0,0); }}
@@ -2414,7 +2548,7 @@ export default function TheList() {
       }
       extraEarlier.sort(function(a, b){ return b.abs - a.abs; }); // nearest-earlier first
       extraLater.sort(function(a, b){ return a.abs - b.abs; });   // nearest-later first
-      out.push({dateKey:dk, offset:d, label:shareDayLabel(d, dk), hasBookings:hasBookings, auto:auto, extra:extra, extraEarlier:extraEarlier, extraLater:extraLater});
+      out.push({dateKey:dk, offset:d, label:shareDayLabel(d, dk), hasBookings:hasBookings, auto:auto, extra:extra, extraEarlier:extraEarlier, extraLater:extraLater, bookedAbs:bookedAbs, minGridAbs:(d===0?nowAbsShare:0)});
     }
     return out;
   };
@@ -2438,32 +2572,136 @@ export default function TheList() {
     return {checked:checked, ot:ot};
   };
 
+  // D/cloud: the times shown for a day = its auto set PLUS anything added via +AM/+PM
+  // (shareRevealed), deduped by clock and sorted. Revealed entries are plain time
+  // strings; auto entries carry their abs already.
+  const shareShownTimes = function(day) {
+    var map = {}; var i;
+    for (i = 0; i < day.auto.length; i++) { map[day.auto[i].abs] = {time:day.auto[i].time, abs:day.auto[i].abs}; }
+    var rev = shareRevealed[day.dateKey] || [];
+    for (i = 0; i < rev.length; i++) { var ab = timeToAbsMinutes(rev[i]); map[ab] = {time:rev[i], abs:ab}; }
+    var arr = Object.keys(map).map(function(k){ return map[k]; });
+    arr.sort(function(a, b){ return a.abs - b.abs; });
+    return arr;
+  };
+  // D: a shown time is "off-calendar" (custom) if it isn't one of the day's real open
+  // slots (auto or extra). Those get a small marker and are offered even though no slot
+  // exists yet.
+  const shareIsCustomTime = function(day, time) {
+    var i;
+    for (i = 0; i < day.auto.length; i++) { if (day.auto[i].time === time) return false; }
+    for (i = 0; i < day.extra.length; i++) { if (day.extra[i].time === time) return false; }
+    return true;
+  };
+  // D: the next grid time to hand over in a direction — steps ALL_TIMES past the current
+  // block, skipping booked slots, already-shown times, and (on today) times already past.
+  // Returns {time,abs} or null when there's nothing left that way.
+  const shareGridCandidate = function(day, shownTimes, dir) {
+    if (!shownTimes.length) return null;
+    var i, minA = null, maxA = null;
+    for (i = 0; i < shownTimes.length; i++) { var a = shownTimes[i].abs; if (minA === null || a < minA) minA = a; if (maxA === null || a > maxA) maxA = a; }
+    var shownSet = {}; for (i = 0; i < shownTimes.length; i++) { shownSet[shownTimes[i].abs] = true; }
+    var bookedSet = {}; var bk = day.bookedAbs || []; for (i = 0; i < bk.length; i++) { bookedSet[bk[i]] = true; }
+    var best = null;
+    for (i = 0; i < ALL_TIMES.length; i++) {
+      var t = ALL_TIMES[i]; var ab = timeToAbsMinutes(t);
+      if (ab < (day.minGridAbs || 0)) continue;
+      if (bookedSet[ab]) continue;
+      if (shownSet[ab]) continue;
+      if (dir === "earlier") { if (ab < minA && (best === null || ab > best.abs)) best = {time:t, abs:ab}; }
+      else { if (ab > maxA && (best === null || ab < best.abs)) best = {time:t, abs:ab}; }
+    }
+    return best;
+  };
+  // Cloud (Q3): restore a saved DAYS bundle but reconcile it with the LIVE calendar —
+  // keep every still-valid saved pick, DROP anything that got booked/removed, and give
+  // brand-new openings the normal auto treatment. Only days in the current window are
+  // reconciled; saved keys for other dates are preserved untouched.
+  const reconcileShareDays = function(days, base) {
+    var checked = {...(base.checked || {})};
+    var ot = {...(base.ot || {})};
+    var revealed = base.revealed || {};
+    var dayInfo = {};
+    days.forEach(function(day){
+      var openTimes = day.auto.concat(day.extra);
+      var validSet = {}; var autoSet = {};
+      day.auto.forEach(function(o){ autoSet[o.time] = true; });
+      openTimes.forEach(function(o){ validSet[o.time] = true; });
+      (revealed[day.dateKey] || []).forEach(function(tm){ validSet[tm] = true; });
+      dayInfo[day.dateKey] = {validSet:validSet, autoSet:autoSet, openTimes:openTimes};
+    });
+    Object.keys(checked).forEach(function(key){
+      var idx = key.indexOf("|"); if (idx < 0) return;
+      var dk = key.slice(0, idx); var tm = key.slice(idx + 1);
+      var info = dayInfo[dk]; if (!info) return; // date not in window -> leave alone
+      if (!info.validSet[tm]) { delete checked[key]; delete ot[key]; }
+    });
+    days.forEach(function(day){
+      var info = dayInfo[day.dateKey];
+      info.openTimes.forEach(function(o){
+        var key = day.dateKey + "|" + o.time;
+        if (!(key in checked)) { checked[key] = !!info.autoSet[o.time]; ot[key] = shareIsOTTime(o.time); }
+      });
+    });
+    return {checked:checked, ot:ot};
+  };
+  // Cloud: bundle the current DAYS state for saving, and compare against what's saved so
+  // the Save button can show "Saved ✓" when nothing's changed since the last save.
+  const shareDaysBundle = function() {
+    return {checked:shareChecked, ot:shareOT, earlierLater:shareEarlierLater, dayMemory:shareDayMemory, revealed:shareRevealed};
+  };
+  const commitShareSave = function() {
+    setShareSavedState(shareDaysBundle());
+    setShareDirty(false);
+  };
+
   const openShareSheet = function() {
     var days = computeShareDays(7);
-    // If Granger previously chose "Save," restore that selection; otherwise start from
-    // the smart defaults. seedShareMaps preserves the restored keys and still auto-fills
-    // any brand-new times, so a saved selection never blocks fresh smart suggestions.
-    var seeded = seedShareMaps(days, shareSavedChecks || {}, {});
-    setShareChecked(seeded.checked);
-    setShareOT(seeded.ot);
+    // Cloud: restore the whole DAYS area from the last SAVE and reconcile it against the
+    // live calendar. base comes from shareSavedState; if only the legacy shareSavedChecks
+    // exists (data saved before this version), migrate it into the new shape. With no
+    // saved state at all, fall back to fresh smart defaults.
+    var base = null;
+    if (shareSavedState) { base = shareSavedState; }
+    else if (shareSavedChecks) { base = {checked:shareSavedChecks, ot:{}, earlierLater:{}, dayMemory:{}, revealed:{}}; }
+    var startChecked, startOT, startEL, startMem, startRevealed;
+    if (base) {
+      var recon = reconcileShareDays(days, base);
+      startChecked = recon.checked; startOT = recon.ot;
+      startEL = base.earlierLater || {};
+      startMem = base.dayMemory || {};
+      startRevealed = base.revealed || {};
+    } else {
+      var seeded = seedShareMaps(days, {}, {});
+      startChecked = seeded.checked; startOT = seeded.ot;
+      startEL = {}; startMem = {}; startRevealed = {};
+    }
+    setShareChecked(startChecked);
+    setShareOT(startOT);
+    setShareEarlierLater(startEL);
+    setShareDayMemory(startMem);
+    setShareRevealed(startRevealed);
     setShareWindow(7);
     setShareExpanded({});
+    // MENU resets every open (never persisted): draft choice -> first draft, OT surcharge
+    // -> default, padding (global + per-row) -> off, hide-OT -> off.
+    setShareActiveDraftId((shareDrafts[0] && shareDrafts[0].id) || "full");
+    setShareAmt("22");
     setShareShift("none");
     setShareTimeShift({});
+    setShareHideOT(false);
+    setShareReveal({});
     setShareCopied(false);
     setShareDraftEditing(false);
     setShareDraftDeleteConfirm(false);
-    setShareDirty(false);
     setShareSaveConfirm(false);
     setShowHistory(false);
-    // #5/#6/#7/#10: clear the session-only extras every fresh open.
-    setShareHideOT(false);
-    setShareReveal({});
-    setShareEarlierLater({});
-    setShareDayMemory({});
-    // #3: seed undo history with the freshly computed starting state (index 0). Snapshot
-    // fields must line up with applyShareSnapshot / the recorder effect below.
-    shareHistRef.current = [{checked:seeded.checked, ot:seeded.ot, timeShift:{}, shift:"none", reveal:{}, earlierLater:{}, hideOT:false}];
+    // Restored state IS the saved baseline (reconciliation is automatic, not a user edit),
+    // so we open "clean": no unsaved changes, button reads "Saved ✓", close won't nag.
+    setShareDirty(false);
+    // #3: seed undo history with the restored starting state (index 0). Snapshot fields
+    // must line up with applyShareSnapshot / the recorder effect below.
+    shareHistRef.current = [{checked:startChecked, ot:startOT, timeShift:{}, shift:"none", revealed:startRevealed, earlierLater:startEL, dayMemory:startMem, hideOT:false}];
     shareHistIdxRef.current = 0;
     setShareHistVer(function(v){ return v + 1; });
     setShareActionSeq(0);
@@ -2477,8 +2715,9 @@ export default function TheList() {
     setShareOT(snap.ot);
     setShareTimeShift(snap.timeShift);
     setShareShift(snap.shift);
-    setShareReveal(snap.reveal);
-    setShareEarlierLater(snap.earlierLater);
+    setShareRevealed(snap.revealed || {});
+    setShareEarlierLater(snap.earlierLater || {});
+    setShareDayMemory(snap.dayMemory || {});
     setShareHideOT(snap.hideOT);
     setShareCopied(false);
   };
@@ -2502,23 +2741,67 @@ export default function TheList() {
   };
 
   const loadMoreShareDays = function() {
-    var next = shareWindow + 1; // #2: one calendar day at a time
+    var prevWindow = shareWindow;
+    var next = prevWindow + 1; // #2: one calendar day at a time
     var days = computeShareDays(next);
-    var seeded = seedShareMaps(days, shareChecked, shareOT);
-    setShareChecked(seeded.checked);
-    setShareOT(seeded.ot);
+    // A: guarantee the newly-added day(s) come in with their auto times CHECKED and
+    // extras unchecked. Only touch days at offset >= the old window; everything already
+    // on screen keeps whatever state it had.
+    setShareChecked(function(prevC){
+      var n = {...prevC}; var di, si;
+      for (di = 0; di < days.length; di++) {
+        var day = days[di];
+        if (day.offset < prevWindow) continue;
+        var all = day.auto.concat(day.extra);
+        for (si = 0; si < all.length; si++) { var k = day.dateKey + "|" + all[si].time; n[k] = day.auto.indexOf(all[si]) !== -1; }
+      }
+      return n;
+    });
+    setShareOT(function(prevO){
+      var n = {...prevO}; var di, si;
+      for (di = 0; di < days.length; di++) {
+        var day = days[di];
+        if (day.offset < prevWindow) continue;
+        var all = day.auto.concat(day.extra);
+        for (si = 0; si < all.length; si++) { var k = day.dateKey + "|" + all[si].time; if (!(k in n)) n[k] = shareIsOTTime(all[si].time); }
+      }
+      return n;
+    });
     setShareWindow(next);
     bumpShareAction();
   };
 
+  // E: drop the last day currently shown (steps the window back). Keeps at least one day.
+  const removeLastShareDay = function() {
+    var days = computeShareDays(shareWindow);
+    if (days.length <= 1) return;
+    var lastOffset = days[days.length - 1].offset;
+    var newWindow = lastOffset < 1 ? 1 : lastOffset; // scan 0..lastOffset-1, dropping the last shown day
+    setShareWindow(newWindow);
+    bumpShareAction();
+  };
+
   const toggleShareChecked = function(key) { setShareChecked(function(p){ var n={...p}; n[key] = !n[key]; return n; }); setShareDirty(true); bumpShareAction(); };
-  const toggleShareOT = function(key) { setShareOT(function(p){ var n={...p}; n[key] = !n[key]; return n; }); bumpShareAction(); };
+  const toggleShareOT = function(key) { setShareOT(function(p){ var n={...p}; n[key] = !n[key]; return n; }); setShareDirty(true); bumpShareAction(); };
   const toggleShareTimeShiftMode = function(key, mode) { setShareTimeShift(function(p){ var n={...p}; n[key] = (p[key] === mode ? "none" : mode); return n; }); bumpShareAction(); };
   // #5: one-off hide-all-OT toggle for the current copy only.
   const toggleShareHideOT = function() { setShareHideOT(function(v){ return !v; }); bumpShareAction(); };
-  // #7: reveal one more open time earlier (+AM) or later (+PM) than the current block.
-  const revealShareEarlier = function(dk) { setShareReveal(function(p){ var n={...p}; var cur=n[dk]||{earlier:0,later:0}; n[dk]={earlier:cur.earlier+1, later:cur.later}; return n; }); bumpShareAction(); };
-  const revealShareLater = function(dk) { setShareReveal(function(p){ var n={...p}; var cur=n[dk]||{earlier:0,later:0}; n[dk]={earlier:cur.earlier, later:cur.later+1}; return n; }); bumpShareAction(); };
+  // D: +AM/+PM add the next grid time earlier/later than the current block (stepping
+  // ALL_TIMES past the real openings when needed). Added time arrives CHECKED and, if
+  // before the OT cutoff, pre-flagged OT. This is a DAYS change (persists on Save).
+  const revealShareAdd = function(day, dir) {
+    var shown = shareShownTimes(day);
+    var cand = shareGridCandidate(day, shown, dir);
+    if (!cand) return;
+    var dk = day.dateKey; var key = dk + "|" + cand.time;
+    setShareRevealed(function(p){ var n={...p}; var arr = (n[dk] || []).slice(); arr.push(cand.time); n[dk] = arr; return n; });
+    setShareChecked(function(p){ var n={...p}; n[key] = true; return n; });
+    setShareOT(function(p){ var n={...p}; if (!(key in n)) n[key] = shareIsOTTime(cand.time); return n; });
+    setShareDirty(true);
+    bumpShareAction();
+  };
+  const revealShareEarlier = function(day) { revealShareAdd(day, "earlier"); };
+  const revealShareLater = function(day) { revealShareAdd(day, "later"); };
   // #10: toggle the per-day "possibly earlier" / "possibly later" message tag.
   const toggleShareEL = function(dk, which) {
     setShareEarlierLater(function(p){
@@ -2527,6 +2810,7 @@ export default function TheList() {
       else n[dk]={earlier:cur.earlier, later:!cur.later};
       return n;
     });
+    setShareDirty(true);
     bumpShareAction();
   };
   // Whole-day check toggle — affects ONLY the smart-picked ("auto") times for that
@@ -2633,7 +2917,7 @@ export default function TheList() {
   useEffect(function() {
     if (!shareModal) return;
     if (shareActionSeq === 0) return;
-    var snap = {checked:shareChecked, ot:shareOT, timeShift:shareTimeShift, shift:shareShift, reveal:shareReveal, earlierLater:shareEarlierLater, hideOT:shareHideOT};
+    var snap = {checked:shareChecked, ot:shareOT, timeShift:shareTimeShift, shift:shareShift, revealed:shareRevealed, earlierLater:shareEarlierLater, dayMemory:shareDayMemory, hideOT:shareHideOT};
     var h = shareHistRef.current.slice(0, shareHistIdxRef.current + 1);
     h.push(snap);
     shareHistRef.current = h;
@@ -2648,11 +2932,11 @@ export default function TheList() {
     return shareDrafts[0] || {id:"full", name:"Full", text:""};
   };
   const selectShareDraft = function(id) { setShareActiveDraftId(id); setShareDraftEditing(false); setShareDraftDeleteConfirm(false); setShareCopied(false); };
-  const startEditShareDraft = function() { setShareDraftEditText(activeShareDraft().text); setShareDraftEditing(true); setShareDraftDeleteConfirm(false); };
+  const startEditShareDraft = function() { setShareDraftEditText(activeShareDraft().text); setShareDraftEditFooter(activeShareDraft().footer || ""); setShareDraftEditing(true); setShareDraftDeleteConfirm(false); };
   const cancelEditShareDraft = function() { setShareDraftEditing(false); setShareDraftDeleteConfirm(false); };
   const saveShareDraftEdit = function() {
     var id = shareActiveDraftId;
-    setShareDrafts(function(p){ return p.map(function(d){ return d.id === id ? {...d, text:shareDraftEditText} : d; }); });
+    setShareDrafts(function(p){ return p.map(function(d){ return d.id === id ? {...d, text:shareDraftEditText, footer:shareDraftEditFooter} : d; }); });
     setShareDraftEditing(false);
     setShareDraftDeleteConfirm(false);
     setShareCopied(false);
@@ -2662,10 +2946,11 @@ export default function TheList() {
   };
   const addShareDraft = function() {
     var id = "draft" + Date.now();
-    var fresh = {id:id, name:"New draft", text:"Hello! Here are my current openings:"};
+    var fresh = {id:id, name:"New draft", text:"Hello! Here are my current openings:", footer:""};
     setShareDrafts(function(p){ return p.concat([fresh]); });
     setShareActiveDraftId(id);
     setShareDraftEditText(fresh.text);
+    setShareDraftEditFooter("");
     setShareDraftEditing(true);
     setShareDraftDeleteConfirm(false);
   };
@@ -2684,12 +2969,13 @@ export default function TheList() {
     var amt = shareAmtClean();
     var draftText = activeShareDraft().text.split("{{OT_AMT}}").join(amt);
     var header = draftText + "\n\n";
+    var footerRaw = (activeShareDraft().footer || "").split("{{OT_AMT}}").join(amt);
     var days = computeShareDays(shareWindow);
     var lines = [];
     var di, si;
     for (di = 0; di < days.length; di++) {
       var day = days[di];
-      var all = day.auto.concat(day.extra).slice().sort(function(a, b){ return a.abs - b.abs; });
+      var all = shareShownTimes(day); // auto + added (real or off-calendar), sorted
       var parts = [];
       for (si = 0; si < all.length; si++) {
         var time = all[si].time;
@@ -2710,8 +2996,10 @@ export default function TheList() {
         lines.push(shareDayLabelMsg(day.offset, day.dateKey) + ": " + parts.join(", ") + elSuffix); // #8: short day label
       }
     }
-    if (!lines.length) return header + "(no openings selected)";
-    return header + lines.join("\n\n");
+    var body = lines.length ? (header + lines.join("\n\n")) : (header + "(no openings selected)");
+    // #4: message ending, separated from the times by a blank line.
+    if (footerRaw && footerRaw.length) body = body + "\n\n" + footerRaw;
+    return body;
   };
 
   // Copy synchronously inside the tap gesture (iOS PWA requirement): try the async
@@ -3232,8 +3520,11 @@ export default function TheList() {
   };
   var acctSetField = function(dateKey, field, value){ var r={...acctFor(dateKey)}; r[field]=acctNum(value); acctCommit(dateKey,r); };
   var acctAddTo = function(dateKey, method, amount){ var amt=acctNum(amount); if(!amt) return; var r={...acctFor(dateKey)}; r[method]=acctNum(r[method])+amt; acctCommit(dateKey,r); };
-  // End-of-day estimate from the checked-off appointments, used to PRE-FILL the popup.
-  // Services: each done person with no price counts as 1 (base rate); everyone with a
+  // End-of-day estimate from the day's appointments, used to PRE-FILL the popup. With
+  // allNames set it counts EVERY booked name (not just checked-off) — that mode drives the
+  // live day-of estimate in the acctModal render, which recomputes each open and is never
+  // persisted until you type your own number (see the acctModal render + the open effect).
+  // Services: each counted person with no price counts as 1 (base rate); everyone with a
   // price has their prices summed and divided by 44 (so a $66 = 1.5 services). Hours:
   // first person's start to (last person's start + one 23-min appointment), plus 30 min
   // for arriving early / closing up. Returns clean strings; any:false means no done
@@ -3241,12 +3532,12 @@ export default function TheList() {
   var ACCT_APPT_MIN = 23;   // one appointment's length (matches the default slot spacing)
   var ACCT_PAD_MIN = 30;    // 15 min early + 15 min to close up
   var acctFmt = function(n){ var r=Math.round(n*100)/100; if(r===Math.round(r)) return String(Math.round(r)); return String(r); };
-  var acctAutoEstimate = function(dateKey){
+  var acctAutoEstimate = function(dateKey, allNames){
     var slots = getSlots(dateKey);
     var noPrice=0, customSum=0, firstAbs=null, lastAbs=null, any=false, i, s, p, ab;
     for (i=0;i<slots.length;i++){
       s = slots[i];
-      if (!s || !s.name || !s.done) continue;
+      if (!s || !s.name || (!allNames && !s.done)) continue;
       any = true;
       p = acctNum(s.price);
       if (p>0) customSum += p; else noPrice += 1;
@@ -3274,14 +3565,110 @@ export default function TheList() {
   // Day notes can be a legacy plain string OR a {text,kind} object (kind: "personal"
   // | "business", for blue/gold coloring). These accessors read both shapes so no
   // data migration is needed; the writer always stores the new object shape.
-  var dayNoteText = function(dk){ var v=dayNotes[dk]; if(!v) return ""; return (typeof v==="string")?v:(v.text||""); };
-  var dayNoteKind = function(dk){ var v=dayNotes[dk]; if(!v||typeof v==="string") return null; return v.kind||null; };
   var setDayNoteRecord = function(dk, text, kind){
     setDayNotes(function(prev){
       var n={...prev}; var t=(text||"").trim();
       if(t){ n[dk] = kind ? {text:t,kind:kind} : {text:t}; } else { delete n[dk]; }
       return n;
     });
+  };
+  // --- v63 recurring day-notes -------------------------------------------------
+  // Repeat rules live INSIDE the already-synced dayNotes object under a reserved
+  // key prefix, so nothing new is added to the Firebase payload. A dayNotes value
+  // can be:
+  //   "text"                              legacy plain note
+  //   {text,kind}                         one-off note (also used as a per-day override)
+  //   {skip:true}                         per-day suppression of a repeat ("this day only" delete)
+  //   {sinceKey,rpt,text,kind}  (under "@rpt:" key)  a repeat RULE
+  // A rule fires on the same weekday every rpt weeks from sinceKey (rpt 1 = weekly).
+  // A concrete note on a date always wins over a rule for that date.
+  var DN_RULE_PREFIX = "@rpt:";
+  var dnIsRuleKey = function(k){ return k.indexOf(DN_RULE_PREFIX)===0; };
+  var dnRuleMatches = function(rule, dk){
+    if(!rule || !rule.text || !rule.rpt || !rule.sinceKey) return false;
+    var dkD=parseDateKey(dk); var sD=parseDateKey(rule.sinceKey);
+    if(dkD.getDay()!==sD.getDay()) return false;
+    var diff=dkD.getTime()-sD.getTime(); if(diff<0) return false;
+    var days=Math.round(diff/86400000); if(days%7!==0) return false;
+    return (days/7)%rule.rpt===0;
+  };
+  var resolveDayNote = function(dk){
+    var rec = dayNotes[dk];
+    if (rec && typeof rec==="object" && rec.skip) return {text:"",kind:null,repeating:false,rpt:0,ruleKey:null};
+    if (rec){
+      if (typeof rec==="string") return {text:rec,kind:null,repeating:false,rpt:0,ruleKey:null};
+      if (rec.text) return {text:rec.text,kind:rec.kind||null,repeating:false,rpt:0,ruleKey:null};
+    }
+    var keys=Object.keys(dayNotes);
+    for(var i=0;i<keys.length;i++){
+      var k=keys[i]; if(!dnIsRuleKey(k)) continue;
+      var rule=dayNotes[k];
+      if(dnRuleMatches(rule,dk)) return {text:rule.text,kind:rule.kind||null,repeating:true,rpt:rule.rpt,ruleKey:k};
+    }
+    return {text:"",kind:null,repeating:false,rpt:0,ruleKey:null};
+  };
+  var dayNoteText = function(dk){ return resolveDayNote(dk).text; };
+  var dayNoteKind = function(dk){ var r=resolveDayNote(dk); return r.text?r.kind:null; };
+  var dayNoteRepeating = function(dk){ return resolveDayNote(dk).repeating; };
+  var dayNoteRepeatN = function(dk){ return resolveDayNote(dk).rpt; };
+  // Writers.
+  var dnSetRepeat = function(dk, text, kind, nWk){
+    setDayNotes(function(prev){
+      var n={...prev}; var t=(text||"").trim();
+      if(!t){ return n; }
+      delete n[dk]; // let the rule govern the start day
+      n[DN_RULE_PREFIX+dk] = kind ? {sinceKey:dk,rpt:nWk,text:t,kind:kind} : {sinceKey:dk,rpt:nWk,text:t};
+      return n;
+    });
+  };
+  var dnEditRule = function(ruleKey, text, kind, nWk){
+    setDayNotes(function(prev){
+      var n={...prev}; var t=(text||"").trim(); var old=prev[ruleKey];
+      if(!old){ return n; }
+      if(!t){ delete n[ruleKey]; return n; }
+      var since=old.sinceKey;
+      n[ruleKey] = kind ? {sinceKey:since,rpt:nWk,text:t,kind:kind} : {sinceKey:since,rpt:nWk,text:t};
+      return n;
+    });
+  };
+  var dnDeleteRule = function(ruleKey){
+    setDayNotes(function(prev){ var n={...prev}; delete n[ruleKey]; return n; });
+  };
+  var dnWriteToday = function(dk, text, kind, hasGovRepeat){
+    setDayNotes(function(prev){
+      var n={...prev}; var t=(text||"").trim();
+      if(t){ n[dk] = kind ? {text:t,kind:kind} : {text:t}; }
+      else { if(hasGovRepeat){ n[dk]={skip:true}; } else { delete n[dk]; } }
+      return n;
+    });
+  };
+  var dnCloseNoteModal = function(){ setNoteModal(null); setNoteDraft(""); setNoteKind(null); setNoteRepeat(0); setNoteWasRepeat(false); setNoteScopeAsk(null); };
+  // Commit from the day-note modal. If the note is already a repeat, defer to the
+  // "this day / all repeats" prompt; otherwise write straight through.
+  var dnCommitDayNote = function(action){
+    var nm=noteModal; if(!nm||!nm.isDay) return;
+    if(noteWasRepeat){ setNoteScopeAsk(action); return; }
+    if(action==="clear"){ dnWriteToday(nm.dayKey,"",null,false); dnCloseNoteModal(); return; }
+    if(noteRepeat>0){ dnSetRepeat(nm.dayKey,noteDraft,noteKind,noteRepeat); }
+    else { dnWriteToday(nm.dayKey,noteDraft,noteKind,false); }
+    dnCloseNoteModal();
+  };
+  var dnApplyScope = function(scope){
+    var nm=noteModal; if(!nm||!nm.isDay){ setNoteScopeAsk(null); return; }
+    var action=noteScopeAsk; var rk=nm.ruleKey;
+    if(action==="clear"){
+      if(scope==="all"){ if(rk) dnDeleteRule(rk); }
+      else { dnWriteToday(nm.dayKey,"",null,true); }
+    } else {
+      if(scope==="all"){
+        if(noteRepeat>0 && rk){ dnEditRule(rk,noteDraft,noteKind,noteRepeat); }
+        else if(noteRepeat>0 && !rk){ dnSetRepeat(nm.dayKey,noteDraft,noteKind,noteRepeat); }
+        else { if(rk) dnDeleteRule(rk); dnWriteToday(nm.dayKey,noteDraft,noteKind,false); }
+      } else {
+        dnWriteToday(nm.dayKey,noteDraft,noteKind,true);
+      }
+    }
+    dnCloseNoteModal();
   };
   // Note color by kind: personal -> signature blue, business -> gold, otherwise dark.
   var noteColorFor = function(kind){ return kind==="personal"?TODAY_BLUE:(kind==="business"?"#a07830":"#1a1a1a"); };
@@ -3556,13 +3943,19 @@ export default function TheList() {
       if (tslot && !tslot.name && !tslot.blocked) {
         tgt[m.targetIdx]={...tslot,name:m.name,price:m.price,recurWeeks:m.recurWeeks,isException:true,done:false,groupId:null,pending:!!m.pending};
         if (m.targetDateKey===m.dateKey) {
+          var sVacTime = tgt[m.idx] ? tgt[m.idx].time : null;
+          var sVacShared=false; for (var svi=0; svi<tgt.length; svi++){ if (svi!==m.idx && tgt[svi] && tgt[svi].time===sVacTime) { sVacShared=true; break; } }
           tgt=vacateSlotCollapsing(tgt,m.idx);
           setSlots(m.targetDateKey,tgt);
+          flashMovePair(m.targetDateKey, tgt, sVacTime, sVacShared, m.targetDateKey, tgt, tslot.time);
         } else {
           setSlots(m.targetDateKey,tgt);
           var src=[...getSlots(m.dateKey)];
+          var sVacTimeX = src[m.idx] ? src[m.idx].time : null;
+          var sVacSharedX=false; for (var sxi=0; sxi<src.length; sxi++){ if (sxi!==m.idx && src[sxi] && src[sxi].time===sVacTimeX) { sVacSharedX=true; break; } }
           src=vacateSlotCollapsing(src,m.idx);
           setSlots(m.dateKey,src);
+          flashMovePair(m.dateKey, src, sVacTimeX, sVacSharedX, m.targetDateKey, tgt, tslot.time);
         }
         addHistoryEntry({type:"rescheduled",time:m.newTime,name:m.name,price:m.price,dateKey:m.targetDateKey});
       }
@@ -3901,16 +4294,18 @@ export default function TheList() {
     a.href = url; a.download = "the-list-readable-" + toDateKey(now) + ".txt"; a.click();
     URL.revokeObjectURL(url);
     showBanner({type:"added",msg:"Schedule downloaded",time:null,dateKey:null});
+    armBannerTapClear();
   };
 
   const exportData = function() {
-    var data = {schedules:schedulesRef.current, clients:clientMemory, holidays:customHolidays, history:history, dayNotes:dayNotes, accounting:accountingRef.current, shareDrafts:shareDraftsRef.current, shareActiveDraftId:shareActiveDraftIdRef.current, quickMsgs:quickMsgs, shareSavedChecks:shareSavedChecks, exportedAt:new Date().toISOString()};
+    var data = {schedules:schedulesRef.current, clients:clientMemory, holidays:customHolidays, history:history, dayNotes:dayNotes, accounting:accountingRef.current, shareDrafts:shareDraftsRef.current, shareActiveDraftId:shareActiveDraftIdRef.current, quickMsgs:quickMsgs, shareSavedChecks:shareSavedChecks, shareSavedState:shareSavedState, exportedAt:new Date().toISOString()};
     var blob = new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
     var url = URL.createObjectURL(blob);
     var a = document.createElement("a");
     a.href=url; a.download="the-list-backup-"+(new Date().toISOString().split("T")[0])+".json"; a.click();
     URL.revokeObjectURL(url);
     showBanner({type:"added",msg:"Backup exported",time:null,dateKey:null});
+    armBannerTapClear();
     setHistory(function(prev){ return [{type:"backup",name:"Backup exported",timestamp:new Date().toLocaleTimeString(),id:Date.now()+Math.random()},...prev].slice(0,200); });
   };
 
@@ -3950,8 +4345,10 @@ export default function TheList() {
     if (data.shareActiveDraftId) setShareActiveDraftId(data.shareActiveDraftId);
     if (data.quickMsgs) setQuickMsgs(data.quickMsgs);
     if (data.shareSavedChecks!==undefined) setShareSavedChecks(data.shareSavedChecks);
+    if (data.shareSavedState!==undefined) setShareSavedState(data.shareSavedState);
     setImportConfirm(null);
     showBanner({type:"added",msg:"Backup restored",time:null,dateKey:null});
+    armBannerTapClear();
   };
 
   const handleTouchStart = function(e,dateKey,idx) { touchStart.current={x:e.touches[0].clientX,dateKey,idx}; };
@@ -4087,15 +4484,21 @@ export default function TheList() {
     if (client.originalDateKey === targetDateKey) {
       var arr = [...getSlots(targetDateKey)];
       arr[targetIdx] = {...arr[targetIdx],name:client.name,price:client.price,recurWeeks:client.recurWeeks,isException:true,done:false};
+      var pVacTime = arr[client.originalIdx] ? arr[client.originalIdx].time : null;
+      var pVacShared = false; for (var pvi=0; pvi<arr.length; pvi++){ if (pvi!==client.originalIdx && arr[pvi] && arr[pvi].time===pVacTime) { pVacShared=true; break; } }
       arr = vacateSlotCollapsing(arr, client.originalIdx);
       setSlots(targetDateKey, arr);
+      flashMovePair(targetDateKey, arr, pVacTime, pVacShared, targetDateKey, arr, targetSlot.time);
     } else {
       var ts = [...getSlots(targetDateKey)];
       ts[targetIdx] = {...ts[targetIdx],name:client.name,price:client.price,recurWeeks:client.recurWeeks,isException:true,done:false};
       setSlots(targetDateKey, ts);
       var os = [...getSlots(client.originalDateKey)];
+      var pVacTimeX = os[client.originalIdx] ? os[client.originalIdx].time : null;
+      var pVacSharedX = false; for (var pxi=0; pxi<os.length; pxi++){ if (pxi!==client.originalIdx && os[pxi] && os[pxi].time===pVacTimeX) { pVacSharedX=true; break; } }
       os = vacateSlotCollapsing(os, client.originalIdx);
       setSlots(client.originalDateKey, os);
+      flashMovePair(client.originalDateKey, os, pVacTimeX, pVacSharedX, targetDateKey, ts, targetSlot.time);
     }
     addHistoryEntry({type:"rescheduled",time:targetSlot.time,name:client.name,price:client.price,dateKey:targetDateKey});
     setPlacingClient(null);
@@ -4125,24 +4528,32 @@ export default function TheList() {
       var arr = [...getSlots(targetDateKey)];
       var srcGidSame = arr[client.originalIdx] ? arr[client.originalIdx].groupId : null;
       arr[targetIdx] = {...arr[targetIdx],name:client.name,price:client.price,recurWeeks:client.recurWeeks,isException:true,done:false,groupId:null};
+      // B1: capture the vacated time + whether it was a shared slot BEFORE the
+      // vacate splices/blanks it, so the red lands on the right (final) row.
+      var vacTimeSame = arr[client.originalIdx] ? arr[client.originalIdx].time : null;
+      var vacSharedSame = false; for (var vsi=0; vsi<arr.length; vsi++){ if (vsi!==client.originalIdx && arr[vsi] && arr[vsi].time===vacTimeSame) { vacSharedSame=true; break; } }
       arr = vacateSlotCollapsing(arr, client.originalIdx);
       if (srcGidSame) {
         var remSame = arr.filter(function(x){ return x.groupId===srcGidSame && x.name; });
         if (remSame.length===1) { var riSame = arr.findIndex(function(x){ return x.groupId===srcGidSame && x.name; }); if (riSame>=0) arr[riSame]={...arr[riSame],groupId:null}; }
       }
       setSlots(targetDateKey, arr);
+      flashMovePair(targetDateKey, arr, vacTimeSame, vacSharedSame, targetDateKey, arr, targetSlot.time);
     } else {
       var ts = [...getSlots(targetDateKey)];
       ts[targetIdx] = {...ts[targetIdx],name:client.name,price:client.price,recurWeeks:client.recurWeeks,isException:true,done:false,groupId:null};
       setSlots(targetDateKey, ts);
       var os = [...getSlots(client.originalDateKey)];
       var srcGidX = os[client.originalIdx] ? os[client.originalIdx].groupId : null;
+      var vacTimeX = os[client.originalIdx] ? os[client.originalIdx].time : null;
+      var vacSharedX = false; for (var vxi=0; vxi<os.length; vxi++){ if (vxi!==client.originalIdx && os[vxi] && os[vxi].time===vacTimeX) { vacSharedX=true; break; } }
       os = vacateSlotCollapsing(os, client.originalIdx);
       if (srcGidX) {
         var remX = os.filter(function(x){ return x.groupId===srcGidX && x.name; });
         if (remX.length===1) { var riX = os.findIndex(function(x){ return x.groupId===srcGidX && x.name; }); if (riX>=0) os[riX]={...os[riX],groupId:null}; }
       }
       setSlots(client.originalDateKey, os);
+      flashMovePair(client.originalDateKey, os, vacTimeX, vacSharedX, targetDateKey, ts, targetSlot.time);
     }
     addHistoryEntry({type:"rescheduled",time:targetSlot.time,name:client.name,price:client.price,dateKey:targetDateKey});
     return true;
@@ -4160,14 +4571,16 @@ export default function TheList() {
     var newSch = {...schedulesRef.current};
     var getDay = function(dk){ return newSch[dk] ? [...newSch[dk]] : DEFAULT_TIMES.map(function(t){ return {time:t,name:"",price:"",done:false,recurWeeks:null}; }); };
     // First lift everyone off their original slot so same-day moves don't collide with themselves.
+    var vacListMulti = [];
     clients.forEach(function(c){
       var od = getDay(c.originalDateKey);
       if (od[c.originalIdx] && od[c.originalIdx].name===c.name) {
+        vacListMulti.push({dateKey:c.originalDateKey, time:od[c.originalIdx].time}); // B1: remember where to paint red
         od[c.originalIdx] = {...od[c.originalIdx],name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null};
         newSch[c.originalDateKey] = od;
       }
     });
-    var placed = 0; var conflicts = [];
+    var placed = 0; var conflicts = []; var flashT = [];
     clients.forEach(function(c){
       var day = getDay(targetDateKey);
       var targetTime = (c.originalTime||c.time);
@@ -4176,12 +4589,18 @@ export default function TheList() {
       if (ti >= 0 && !day[ti].name && !day[ti].blocked) {
         day[ti] = {...day[ti],name:c.name,price:c.price,recurWeeks:c.recurWeeks,isException:true,done:false};
         newSch[targetDateKey] = day;
+        flashT.push({dateKey:targetDateKey, time:day[ti].time});
         placed++;
       } else {
         conflicts.push(c);
       }
     });
     setSchedules(newSch);
+    // B1: green on each landing spot, red on each vacated spot. Final indices are
+    // re-resolved by time from newSch so nothing mis-lands; the !name guard skips
+    // red on any slot a person actually landed back into.
+    flashT.forEach(function(ft){ var d=newSch[ft.dateKey]; if(d){ var i=findSlotIdxByTime(d,ft.time); if(i>=0) flashPlaced(ft.dateKey,i); } });
+    vacListMulti.forEach(function(vt){ var d=newSch[vt.dateKey]; if(d){ var i=findSlotIdxByTime(d,vt.time); if(i>=0 && !d[i].name) flashRemoved(vt.dateKey,i); } });
     setSelectMode(false); setSelectedSlots({});
     if (conflicts.length > 0) {
       var first = conflicts[0]; var rest = conflicts.slice(1);
@@ -4191,7 +4610,7 @@ export default function TheList() {
     } else {
       var mvNames = clients.map(function(c){ return c.name; }).filter(function(n){ return !!n; });
       var mvLabel = mvNames.length<=2 ? mvNames.join(" & ") : (mvNames.slice(0,-1).join(", ")+" & "+mvNames[mvNames.length-1]);
-      showBanner({type:"rescheduled",msg:(mvLabel||(placed+" appointment"+(placed!==1?"s":"")))+" rescheduled",time:null,dateKey:null});
+      showBanner({type:"rescheduled",msg:(mvLabel||(placed+" appointment"+(placed!==1?"s":"")))+" rescheduled",time:null,dateKey:null,flashTargets:flashT});
     }
     return true;
   };
@@ -4212,9 +4631,11 @@ export default function TheList() {
     var newSch = {...schedulesRef.current};
     var getDay = function(dk){ return newSch[dk] ? [...newSch[dk]] : DEFAULT_TIMES.map(function(t){ return {time:t,name:"",price:"",done:false,recurWeeks:null}; }); };
     // Lift everyone off first so their old slots become available to repack into.
+    var vacListGroup = [];
     clients.forEach(function(c){
       var od = getDay(c.originalDateKey);
       if (od[c.originalIdx] && od[c.originalIdx].name===c.name) {
+        vacListGroup.push({dateKey:c.originalDateKey, time:od[c.originalIdx].time}); // B1: remember where to paint red
         od[c.originalIdx] = {...od[c.originalIdx],name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null};
         newSch[c.originalDateKey] = od;
       }
@@ -4222,11 +4643,12 @@ export default function TheList() {
     var gid = clients.length > 1 ? newGroupId() : null;
     var day = getDay(targetDateKey);
     var cursor = targetIdx;
-    var placed = 0; var conflicts = [];
+    var placed = 0; var conflicts = []; var flashT2 = [];
     clients.forEach(function(c){
       while (cursor < day.length && (day[cursor].name || day[cursor].blocked)) cursor++;
       if (cursor < day.length) {
         day[cursor] = {...day[cursor],name:c.name,price:c.price,recurWeeks:c.recurWeeks,isException:true,done:false,groupId:gid};
+        flashT2.push({dateKey:targetDateKey, time:day[cursor].time});
         cursor++;
         placed++;
       } else {
@@ -4235,6 +4657,10 @@ export default function TheList() {
     });
     newSch[targetDateKey] = day;
     setSchedules(newSch);
+    // B1: green on each landing spot, red on each vacated spot (indices re-resolved
+    // by time; red skipped on any slot repacked into on this same day).
+    flashT2.forEach(function(ft){ var d=newSch[ft.dateKey]; if(d){ var i=findSlotIdxByTime(d,ft.time); if(i>=0) flashPlaced(ft.dateKey,i); } });
+    vacListGroup.forEach(function(vt){ var d=newSch[vt.dateKey]; if(d){ var i=findSlotIdxByTime(d,vt.time); if(i>=0 && !d[i].name) flashRemoved(vt.dateKey,i); } });
     setSelectMode(false); setSelectedSlots({});
     if (conflicts.length > 0) {
       var first = conflicts[0]; var rest = conflicts.slice(1);
@@ -4244,7 +4670,7 @@ export default function TheList() {
     } else {
       var mvNames2 = clients.map(function(c){ return c.name; }).filter(function(n){ return !!n; });
       var mvLabel2 = mvNames2.length<=2 ? mvNames2.join(" & ") : (mvNames2.slice(0,-1).join(", ")+" & "+mvNames2[mvNames2.length-1]);
-      showBanner({type:"rescheduled",msg:(mvLabel2||(placed+" appointment"+(placed!==1?"s":"")))+" rescheduled",time:null,dateKey:null});
+      showBanner({type:"rescheduled",msg:(mvLabel2||(placed+" appointment"+(placed!==1?"s":"")))+" rescheduled",time:null,dateKey:null,flashTargets:flashT2});
     }
     return true;
   };
@@ -4575,6 +5001,7 @@ export default function TheList() {
     );
   };
 
+  var bannerInline = !!banner && !isPhone && splitBannerRoom;
   var canUndo = undoStack.length>0;
   var canRedo = redoStack.length>0;
 
@@ -4656,21 +5083,20 @@ export default function TheList() {
         swipeNavStart.current = null;
       }}>
 
-      {/* Build stamp — lets the deploy be verified at a glance. Bump on each push.
-          TEMP (v16): tap it to show/hide the measurement readout. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v60</div>
+      {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v66</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
           still allows normal one-finger panning and two-finger pinch-zoom. */}
-      <style>{"html,body,#root{height:100%;margin:0;padding:0}body{overflow:hidden}html,body,#root,*{touch-action:manipulation;-webkit-text-size-adjust:100%}@keyframes tlInRight{from{transform:translateX(42px);opacity:0.35}to{transform:translateX(0);opacity:1}}@keyframes tlInLeft{from{transform:translateX(-42px);opacity:0.35}to{transform:translateX(0);opacity:1}}"}</style>
+      <style>{"html,body,#root{height:100%;margin:0;padding:0}body{overflow:hidden}html,body,#root,*{touch-action:manipulation;-webkit-text-size-adjust:100%}@keyframes tlInRight{from{transform:translateX(42px);opacity:0.35}to{transform:translateX(0);opacity:1}}@keyframes tlInLeft{from{transform:translateX(-42px);opacity:0.35}to{transform:translateX(0);opacity:1}}@keyframes tlFlashG{0%{background-color:#9ed69e}35%{background-color:#e0f4e0}70%{background-color:#9ed69e}100%{background-color:#e0f4e0}}@keyframes tlFlashR{0%{background-color:#e6a49b}35%{background-color:#f6dbd6}70%{background-color:#e6a49b}100%{background-color:#f6dbd6}}@keyframes tlFlashD{0%{background-color:#dcc07a}35%{background-color:#f1e6c6}70%{background-color:#dcc07a}100%{background-color:#f1e6c6}}@keyframes tlFlashN{0%{background-color:#c8c8c8}35%{background-color:#ececec}70%{background-color:#c8c8c8}100%{background-color:#ececec}}"}</style>
 
-      {banner && (
+      {banner && !bannerInline && (
         <div
           onTouchStart={function(e){ if(e.touches&&e.touches.length===1){ bannerTouchStart.current=e.touches[0].clientY; } }}
           onTouchMove={function(e){ if(bannerTouchStart.current==null||!e.touches||!e.touches.length) return; var dy=e.touches[0].clientY-bannerTouchStart.current; setBannerSwipeY(Math.min(0,dy)); }}
           onTouchEnd={function(){ var dy=bannerSwipeY; bannerTouchStart.current=null; if(dy<-30){ dismissBanner(); } else { setBannerSwipeY(0); } }}
-          onClick={function(){ dismissBanner(); }}
+          onClick={function(){ onBannerTap(); }}
           style={{position:"fixed",left:"50%",top:isPhone?"auto":(gridTopY>0?(gridTopY/2+"px"):listTopY>0?(listTopY/2+"px"):"calc(env(safe-area-inset-top,0px) + 8px)"),bottom:isPhone?"calc(env(safe-area-inset-bottom,0px) + 18px)":"auto",transform:((!isPhone&&(gridTopY>0||listTopY>0))?"translate(-50%,-50%)":"translateX(-50%)")+" translateY("+bannerSwipeY+"px)",opacity:Math.max(0.2,1+bannerSwipeY/80),transition:bannerSwipeY===0?"transform 0.2s ease, opacity 0.2s ease":"none",zIndex:2000,background:getBannerColor(banner.type),color:"#fff",padding:"6px 14px",borderRadius:"20px",fontSize:"12px",letterSpacing:"0.04em",boxShadow:"0 2px 12px rgba(0,0,0,0.2)",display:"flex",alignItems:"center",gap:"10px",maxWidth:"90vw",pointerEvents:"auto",touchAction:"none"}}>
           <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{describeBanner(banner)}</span>
           {(banner.type!=="undo"&&banner.type!=="redo"&&canUndo)&&(
@@ -5274,6 +5700,19 @@ export default function TheList() {
         var draftVal=function(key){ return acctAdd[key]!==undefined?acctAdd[key]:(rec[key]?String(rec[key]):""); };
         var liveAmt=function(key){ return acctAdd[key]!==undefined?acctNum(acctAdd[key]):acctNum(rec[key]); };
         var liveTh=liveAmt("cash")+liveAmt("venmo")+liveAmt("applepay")+liveAmt("square");
+        // B4: on the CURRENT day only, a live estimate (counting every booked name) fills the
+        // services/hours fields as a preview. It is NOT in acctAdd, so it never persists on
+        // its own — commitAll/onFieldBlur only write a field you actually typed. The moment
+        // you type a number it lands in acctAdd, persists, and that field freezes (per-field:
+        // editing services leaves hours still estimating, and vice-versa).
+        var isTodayAcct = dk===toDateKey(new Date());
+        var estToday = isTodayAcct ? acctAutoEstimate(dk, true) : null;
+        // Displayed services/hours (typed > stored > today-estimate > 0), used for the two
+        // read-only cross-check numbers so they track whatever the fields are showing.
+        var svcDisp = acctAdd.services!==undefined ? acctNum(acctAdd.services) : (acctNum(rec.services)>0 ? acctNum(rec.services) : (estToday&&estToday.any ? acctNum(estToday.services) : 0));
+        var hrsDisp = acctAdd.hours!==undefined ? acctNum(acctAdd.hours) : (acctNum(rec.hours)>0 ? acctNum(rec.hours) : (estToday&&estToday.any ? acctNum(estToday.hours) : 0));
+        var dpsVal = svcDisp>0 ? liveTh/svcDisp : null;   // dollars per service
+        var sphVal = hrsDisp>0 ? svcDisp/hrsDisp : null;  // services per hour
         var rowWrap={display:"flex",alignItems:"center",gap:"12px",marginBottom:"9px"};
         var rowLabel={width:"96px",flexShrink:0,fontSize:"15px",color:"#1a1a1a"};
         var symLabel={width:"96px",flexShrink:0,fontSize:"18px",color:"#a07830",fontFamily:"Georgia,serif"};
@@ -5325,12 +5764,24 @@ export default function TheList() {
             </div>
             <div style={rowWrap}>
               <div style={symLabel}>{"#"}</div>
-              <input type="text" inputMode="decimal" value={acctAdd.services!==undefined?acctAdd.services:(rec.services?String(rec.services):"")} onChange={onFieldChange("services")} onBlur={onFieldBlur("services")} onKeyDown={onFieldKey} placeholder="services" style={fieldInp}/>
+              <input type="text" inputMode="decimal" value={acctAdd.services!==undefined?acctAdd.services:(rec.services?String(rec.services):(estToday&&estToday.any?estToday.services:""))} onChange={onFieldChange("services")} onBlur={onFieldBlur("services")} onKeyDown={onFieldKey} placeholder="services" style={fieldInp}/>
             </div>
             <div style={{...rowWrap,marginBottom:"18px"}}>
               <div style={symLabel}>{":"}</div>
-              <input type="text" inputMode="decimal" value={acctAdd.hours!==undefined?acctAdd.hours:(rec.hours?String(rec.hours):"")} onChange={onFieldChange("hours")} onBlur={onFieldBlur("hours")} onKeyDown={onFieldKey} placeholder="hours" style={fieldInp}/>
+              <input type="text" inputMode="decimal" value={acctAdd.hours!==undefined?acctAdd.hours:(rec.hours?String(rec.hours):(estToday&&estToday.any?estToday.hours:""))} onChange={onFieldChange("hours")} onBlur={onFieldBlur("hours")} onKeyDown={onFieldKey} placeholder="hours" style={fieldInp}/>
             </div>
+            {(dpsVal!==null||sphVal!==null)&&(
+              <div style={{padding:"10px 0 4px",marginTop:"-6px",marginBottom:"14px",borderTop:"1px dashed #ece4d4"}}>
+                <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",marginBottom:"5px"}}>
+                  <span style={{fontSize:"12px",color:"#b0a68e",letterSpacing:"0.04em",fontFamily:"Georgia,serif"}}>{"$ / service"}</span>
+                  <span style={{fontSize:"15px",color:"#a07830",fontFamily:"Georgia,serif"}}>{dpsVal!==null?("$"+Math.round(dpsVal)):"—"}</span>
+                </div>
+                <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between"}}>
+                  <span style={{fontSize:"12px",color:"#b0a68e",letterSpacing:"0.04em",fontFamily:"Georgia,serif"}}>{"services / hour"}</span>
+                  <span style={{fontSize:"15px",color:"#a07830",fontFamily:"Georgia,serif"}}>{sphVal!==null?(Math.round(sphVal*10)/10).toFixed(1):"—"}</span>
+                </div>
+              </div>
+            )}
             <button onClick={closeAcct} style={{display:"block",width:"100%",padding:"11px",background:"#1a1a1a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Done</button>
           </div>
         </div>
@@ -5338,48 +5789,66 @@ export default function TheList() {
       })()}
 
       {noteModal && (
-        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px"}} onClick={function(){ setNoteModal(null); setNoteKind(null); }}>
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px"}} onClick={function(){ dnCloseNoteModal(); }}>
           <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"24px",width:"min(360px,92vw)"}} onClick={function(e){ e.stopPropagation(); }}>
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#a07830",marginBottom:"8px"}}>{noteModal.isDay?"Day Note":"Note"}</div>
             <div style={{fontSize:"16px",color:"#1a1a1a",marginBottom:"14px"}}>{noteModal.name}</div>
-            <textarea autoFocus value={noteDraft} onChange={function(e){ setNoteDraft(e.target.value); }} onKeyDown={function(e){ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); var nm=noteModal; if(nm.isDay){ setDayNoteRecord(nm.dayKey,noteDraft,noteKind); } else { var slots=[...getSlots(nm.dateKey)]; var s=slots[nm.idx]; slots[nm.idx]={...s,note:noteDraft.trim(),noteKind:noteDraft.trim()?noteKind:null}; setSlots(nm.dateKey,slots); } setNoteModal(null); setNoteDraft(""); setNoteKind(null); } }} placeholder={noteModal.isDay?"":"Add a note for this appointment..."} style={{width:"100%",boxSizing:"border-box",minHeight:"96px",resize:"vertical",background:"#efefed",border:"1px solid #d8d8d6",borderRadius:"6px",padding:"10px",fontSize:"14px",fontFamily:"Georgia,serif",color:noteColorFor(noteKind),outline:"none",marginBottom:"12px"}}/>
+            <textarea autoFocus value={noteDraft} onChange={function(e){ setNoteDraft(e.target.value); }} onKeyDown={function(e){ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); var nm=noteModal; if(nm.isDay){ dnCommitDayNote("save"); } else { var slots=[...getSlots(nm.dateKey)]; var s=slots[nm.idx]; slots[nm.idx]={...s,note:noteDraft.trim(),noteKind:noteDraft.trim()?noteKind:null}; setSlots(nm.dateKey,slots); setNoteModal(null); setNoteDraft(""); setNoteKind(null); } } }} placeholder={noteModal.isDay?"":"Add a note for this appointment..."} style={{width:"100%",boxSizing:"border-box",minHeight:"96px",resize:"vertical",background:"#efefed",border:"1px solid #d8d8d6",borderRadius:"6px",padding:"10px",fontSize:"14px",fontFamily:"Georgia,serif",color:noteColorFor(noteKind),outline:"none",marginBottom:"12px"}}/>
             <div style={{display:"flex",alignItems:"center",gap:"8px",marginBottom:"14px"}}>
               <button onClick={function(){ setNoteKind(noteKind==="personal"?null:"personal"); }} style={{flex:1,padding:"8px",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",letterSpacing:"0.06em",border:"1px solid "+TODAY_BLUE,background:noteKind==="personal"?TODAY_BLUE:"transparent",color:noteKind==="personal"?"#fff":TODAY_BLUE}}>Personal</button>
               <button onClick={function(){ setNoteKind(noteKind==="business"?null:"business"); }} style={{flex:1,padding:"8px",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",letterSpacing:"0.06em",border:"1px solid #a07830",background:noteKind==="business"?"#a07830":"transparent",color:noteKind==="business"?"#fff":"#a07830"}}>Business</button>
             </div>
+            {noteModal.isDay && (
+              <div style={{display:"flex",alignItems:"center",gap:"6px",marginBottom:"14px",flexWrap:"wrap"}}>
+                <span style={{fontSize:"10px",letterSpacing:"0.12em",color:"#a07830",marginRight:"2px"}}>{"REPEAT"}</span>
+                {[[0,"Once"],[1,"Weekly"],[2,"2 wks"],[3,"3 wks"],[4,"4 wks"]].map(function(opt){
+                  var v=opt[0]; var lbl=opt[1]; var on=noteRepeat===v;
+                  return (<button key={"rpt"+v} onClick={function(){ setNoteRepeat(v); }} style={{padding:"5px 9px",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",border:"1px solid "+(on?"#c9a96e":"#e0e0de"),background:on?"#c9a96e":"transparent",color:on?"#fff":"#999"}}>{lbl}</button>);
+                })}
+              </div>
+            )}
             {noteModal.isDay && (
               <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:"8px",marginBottom:"14px"}}>
                 <button onClick={function(){ addSlotToBeginning(noteModal.dayKey); }} style={{padding:"4px 10px",background:"transparent",border:"1px solid #e6e6e4",borderRadius:"6px",color:"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.04em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#f4f4f2"; }} onMouseLeave={function(e){ e.currentTarget.style.background="transparent"; }}>+AM</button>
                 <button onClick={function(){ addSlotToEnd(noteModal.dayKey); }} style={{padding:"4px 10px",background:"transparent",border:"1px solid #e6e6e4",borderRadius:"6px",color:"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.04em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#f4f4f2"; }} onMouseLeave={function(e){ e.currentTarget.style.background="transparent"; }}>+PM</button>
               </div>
             )}
-            <div style={{display:"flex",gap:"8px"}}>
-              <button onClick={function(){
-                var nm=noteModal;
-                if (nm.isDay) {
-                  setDayNoteRecord(nm.dayKey,noteDraft,noteKind);
-                } else {
-                  var slots=[...getSlots(nm.dateKey)]; var s=slots[nm.idx];
-                  slots[nm.idx]={...s,note:noteDraft.trim(),noteKind:noteDraft.trim()?noteKind:null};
-                  setSlots(nm.dateKey,slots);
-                }
-                setNoteModal(null); setNoteDraft(""); setNoteKind(null);
-              }} style={{flex:1,padding:"10px",background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Save note</button>
-              {noteModal && (function(){ if(noteModal.isDay) return !!dayNoteText(noteModal.dayKey); var s=getSlots(noteModal.dateKey)[noteModal.idx]; return s&&s.note; })() && (
+            {noteModal.isDay && noteScopeAsk ? (
+              <div>
+                <div style={{fontSize:"12px",color:"#777",marginBottom:"10px"}}>{noteScopeAsk==="clear"?"Remove this repeating note…":"Apply your change…"}</div>
+                <div style={{display:"flex",gap:"8px"}}>
+                  <button onClick={function(){ dnApplyScope("today"); }} style={{flex:1,padding:"10px",background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>This day only</button>
+                  <button onClick={function(){ dnApplyScope("all"); }} style={{flex:1,padding:"10px",background:"#c9a96e",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>All repeats</button>
+                  <button onClick={function(){ setNoteScopeAsk(null); }} style={{padding:"10px 14px",background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Back</button>
+                </div>
+              </div>
+            ) : (
+              <div style={{display:"flex",gap:"8px"}}>
                 <button onClick={function(){
                   var nm=noteModal;
-                  if (nm.isDay) {
-                    setDayNoteRecord(nm.dayKey,"",null);
-                  } else {
+                  if (nm.isDay) { dnCommitDayNote("save"); }
+                  else {
                     var slots=[...getSlots(nm.dateKey)]; var s=slots[nm.idx];
-                    slots[nm.idx]={...s,note:"",noteKind:null};
+                    slots[nm.idx]={...s,note:noteDraft.trim(),noteKind:noteDraft.trim()?noteKind:null};
                     setSlots(nm.dateKey,slots);
+                    setNoteModal(null); setNoteDraft(""); setNoteKind(null);
                   }
-                  setNoteModal(null); setNoteDraft(""); setNoteKind(null);
-                }} style={{padding:"10px 14px",background:"none",border:"1px solid #e0b0a8",borderRadius:"6px",color:"#c0392b",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Clear</button>
-              )}
-              <button onClick={function(){ setNoteModal(null); setNoteDraft(""); setNoteKind(null); }} style={{padding:"10px 14px",background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Cancel</button>
-            </div>
+                }} style={{flex:1,padding:"10px",background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Save note</button>
+                {noteModal && (function(){ if(noteModal.isDay) return !!dayNoteText(noteModal.dayKey); var s=getSlots(noteModal.dateKey)[noteModal.idx]; return s&&s.note; })() && (
+                  <button onClick={function(){
+                    var nm=noteModal;
+                    if (nm.isDay) { dnCommitDayNote("clear"); }
+                    else {
+                      var slots=[...getSlots(nm.dateKey)]; var s=slots[nm.idx];
+                      slots[nm.idx]={...s,note:"",noteKind:null};
+                      setSlots(nm.dateKey,slots);
+                      setNoteModal(null); setNoteDraft(""); setNoteKind(null);
+                    }
+                  }} style={{padding:"10px 14px",background:"none",border:"1px solid #e0b0a8",borderRadius:"6px",color:"#c0392b",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Clear</button>
+                )}
+                <button onClick={function(){ dnCloseNoteModal(); }} style={{padding:"10px 14px",background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Cancel</button>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -5488,7 +5957,7 @@ export default function TheList() {
 
       {shareModal && (
         <div onClick={function(e){ e.stopPropagation(); }} style={{position:"fixed",top:isPhone?0:(gridTopY>0?gridTopY:(listTopY>0?listTopY:"calc(env(safe-area-inset-top,0px) + 56px)")),left:isPhone?0:"auto",right:0,bottom:0,width:isPhone?"100%":"clamp(300px,34vw,460px)",background:"#fafaf8",borderLeft:isPhone?"none":"1px solid #ececea",boxShadow:"-6px 0 24px rgba(0,0,0,0.12)",zIndex:90,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-          <div style={{padding:"14px 16px 10px",borderBottom:"1px solid #ececea",display:"flex",justifyContent:"space-between",alignItems:"center",flexShrink:0}}>
+          <div style={{padding:isPhone?"calc(env(safe-area-inset-top, 0px) + 14px) 16px 10px":"14px 16px 10px",borderBottom:"1px solid #ececea",display:"flex",justifyContent:"space-between",alignItems:"center",flexShrink:0}}>
             <div style={{fontSize:"15px",fontWeight:"bold",color:"#1a1a1a",fontFamily:"inherit"}}>Share openings</div>
             <button onClick={function(){ if (shareDirty) { setShareSaveConfirm(true); } else { setShareModal(false); setShareDraftEditing(false); } }} style={{background:"none",border:"none",fontSize:"22px",color:"#999",cursor:"pointer",lineHeight:1,padding:"0 4px"}}>{"×"}</button>
           </div>
@@ -5509,6 +5978,9 @@ export default function TheList() {
                 <input value={activeShareDraft().name} onChange={function(e){ renameShareDraft(shareActiveDraftId, e.target.value); }} placeholder="Draft name" style={{width:"100%",boxSizing:"border-box",marginBottom:"6px",padding:"6px 8px",border:"1px solid #d8d8d6",borderRadius:"5px",background:"#fff",fontFamily:"inherit",fontSize:"12px",color:"#1a1a1a",outline:"none"}}/>
                 <textarea value={shareDraftEditText} onChange={function(e){ setShareDraftEditText(e.target.value); }} placeholder="Hello! Here are my current openings..." style={{width:"100%",boxSizing:"border-box",minHeight:"110px",resize:"vertical",padding:"8px",border:"1px solid #d8d8d6",borderRadius:"5px",background:"#fff",fontFamily:"Georgia,serif",fontSize:"13px",color:"#1a1a1a",outline:"none"}}/>
                 <div style={{fontSize:"10px",color:"#aaa",margin:"4px 0 8px",lineHeight:1.3}}>Type {"{{OT_AMT}}"} anywhere you want the OT surcharge dollar amount to appear — it stays live even if you change drafts or the amount below.</div>
+                <div style={{fontSize:"11px",color:"#888",fontWeight:"bold",margin:"2px 0 4px"}}>Ending (after the times)</div>
+                <textarea value={shareDraftEditFooter} onChange={function(e){ setShareDraftEditFooter(e.target.value); }} placeholder="e.g. Text me back to grab one!" style={{width:"100%",boxSizing:"border-box",minHeight:"70px",resize:"vertical",padding:"8px",border:"1px solid #d8d8d6",borderRadius:"5px",background:"#fff",fontFamily:"Georgia,serif",fontSize:"13px",color:"#1a1a1a",outline:"none"}}/>
+                <div style={{fontSize:"10px",color:"#aaa",margin:"4px 0 8px",lineHeight:1.3}}>Optional — added to the very end of the message, after your times. Leave blank for none.</div>
                 <div style={{display:"flex",gap:"8px"}}>
                   <button onClick={saveShareDraftEdit} style={{flex:1,padding:"8px",background:"#2e7d46",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",fontWeight:"bold"}}>Save</button>
                   <button onClick={cancelEditShareDraft} style={{flex:1,padding:"8px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#666",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>Cancel</button>
@@ -5531,8 +6003,8 @@ export default function TheList() {
               <button onClick={function(){ setShareShiftMode("minus"); }} style={{padding:"5px 10px",borderRadius:"6px",border:shareShift==="minus"?"1px solid #2e7d46":"1px solid #d8d8d6",background:shareShift==="minus"?"#2e7d46":"#fff",color:shareShift==="minus"?"#fff":"#777",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",fontWeight:"bold"}}>-5</button>
             </div>
             <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
-              <button onClick={shareUndo} disabled={!(shareHistIdxRef.current>0)} title="Undo" style={{padding:"5px 10px",borderRadius:"6px",border:"1px solid #d8d8d6",background:"#fff",color:(shareHistIdxRef.current>0)?"#555":"#ccc",cursor:(shareHistIdxRef.current>0)?"pointer":"default",fontFamily:"inherit",fontSize:"13px",fontWeight:"bold"}}>{"↶"}</button>
-              <button onClick={shareRedo} disabled={!(shareHistIdxRef.current<shareHistRef.current.length-1)} title="Redo" style={{padding:"5px 10px",borderRadius:"6px",border:"1px solid #d8d8d6",background:"#fff",color:(shareHistIdxRef.current<shareHistRef.current.length-1)?"#555":"#ccc",cursor:(shareHistIdxRef.current<shareHistRef.current.length-1)?"pointer":"default",fontFamily:"inherit",fontSize:"13px",fontWeight:"bold"}}>{"↷"}</button>
+              <button onClick={shareUndo} disabled={!(shareHistIdxRef.current>0)} title="Undo" style={{...navBtnSm,width:"26px",padding:"0",background:(shareHistIdxRef.current>0)?"#f0f0ee":"#f8f8f6",border:"1px solid #d8d8d6"}}><UndoIcon size={14} color={(shareHistIdxRef.current>0)?"#555":"#ccc"}/></button>
+              <button onClick={shareRedo} disabled={!(shareHistIdxRef.current<shareHistRef.current.length-1)} title="Redo" style={{...navBtnSm,width:"26px",padding:"0",background:(shareHistIdxRef.current<shareHistRef.current.length-1)?"#f0f0ee":"#f8f8f6",border:"1px solid #d8d8d6"}}><RedoIcon size={14} color={(shareHistIdxRef.current<shareHistRef.current.length-1)?"#555":"#ccc"}/></button>
             </div>
             <button onClick={toggleShareHideOT} title="Hide all OT times from this one copy (doesn't change your saved draft)" style={{padding:"5px 10px",borderRadius:"6px",border:shareHideOT?"1px solid #c9852e":"1px solid #d8d8d6",background:shareHideOT?"#f6e6cf":"#fff",color:shareHideOT?"#9a5e12":"#777",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",fontWeight:"bold"}}>{shareHideOT?"OT hidden ✓":"Hide OT"}</button>
           </div>
@@ -5545,13 +6017,10 @@ export default function TheList() {
               }
               return days.map(function(day){
                 var dk = day.dateKey;
-                var rev = shareReveal[dk] || {earlier:0, later:0};
-                var shownEarlier = day.extraEarlier.slice(0, rev.earlier);
-                var shownLater = day.extraLater.slice(0, rev.later);
-                var shownTimes = shownEarlier.concat(day.auto).concat(shownLater).slice().sort(function(a,b){ return a.abs - b.abs; });
+                var shownTimes = shareShownTimes(day);
                 var dayActive = shareDayActive(dk, shownTimes);
-                var canEarlier = rev.earlier < day.extraEarlier.length;
-                var canLater = rev.later < day.extraLater.length;
+                var canEarlier = shareGridCandidate(day, shownTimes, "earlier") !== null;
+                var canLater = shareGridCandidate(day, shownTimes, "later") !== null;
                 var el = shareEarlierLater[dk] || {earlier:false, later:false};
                 var renderRow = function(o){
                   var key = day.dateKey + "|" + o.time;
@@ -5559,10 +6028,12 @@ export default function TheList() {
                   var isOT = !!shareOT[key];
                   var rowDelta = effectiveShareDelta(key);
                   var rowOverride = shareTimeShift[key];
+                  var isCustom = shareIsCustomTime(day, o.time); // D: off-calendar add
                   return (
                     <div key={key} style={{display:"flex",alignItems:"center",gap:"6px",padding:"6px 16px"}}>
                       <button onClick={function(){ toggleShareChecked(key); }} style={{width:"20px",height:"20px",flexShrink:0,borderRadius:"5px",border:checked?"1.5px solid #2e7d46":"1.5px solid #c4c4c2",background:checked?"#2e7d46":"#fff",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",padding:0}}>{checked?<span style={{color:"#fff",fontSize:"12px",lineHeight:1}}>{"✓"}</span>:null}</button>
                       <span style={{flex:"0 0 auto",minWidth:"66px",fontSize:"13px",color:checked?"#1a1a1a":"#9a9a9a",fontFamily:"Georgia,serif",fontVariantNumeric:"tabular-nums"}}>{shareFmtTime(o.time, rowDelta)}</span>
+                      {isCustom&&<span title="Not on your calendar yet — add the slot by hand if it's booked" style={{flex:"0 0 auto",fontSize:"9px",color:"#b0894a",background:"#f7efe0",border:"1px solid #e6d3ad",borderRadius:"8px",padding:"1px 6px",letterSpacing:"0.03em",whiteSpace:"nowrap"}}>{"not on calendar"}</span>}
                       <button onClick={function(){ toggleShareTimeShiftMode(key,"plus"); }} title="Nudge this time 5 min earlier" style={{width:"20px",height:"20px",flexShrink:0,padding:0,borderRadius:"4px",border:rowOverride==="plus"?"1px solid #4a8a9a":"1px solid #d8d8d6",background:rowOverride==="plus"?"#e3eef0":"#fff",color:rowOverride==="plus"?"#2c5a66":"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",lineHeight:1}}>{"+5"}</button>
                       <button onClick={function(){ toggleShareTimeShiftMode(key,"minus"); }} title="Nudge this time 5 min later" style={{width:"20px",height:"20px",flexShrink:0,padding:0,borderRadius:"4px",border:rowOverride==="minus"?"1px solid #4a8a9a":"1px solid #d8d8d6",background:rowOverride==="minus"?"#e3eef0":"#fff",color:rowOverride==="minus"?"#2c5a66":"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",lineHeight:1}}>{"-5"}</button>
                       <button onClick={function(){ toggleShareOT(key); }} style={{marginLeft:"auto",flexShrink:0,padding:"3px 9px",borderRadius:"12px",border:isOT?"1px solid #c9852e":"1px solid #d8d8d6",background:isOT?"#f6e6cf":"#fff",color:isOT?"#9a5e12":"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.04em"}}>{isOT?"OT ✓":"OT"}</button>
@@ -5583,29 +6054,36 @@ export default function TheList() {
                     {shownTimes.map(renderRow)}
                     {(canEarlier||canLater)&&(
                       <div style={{display:"flex",gap:"8px",margin:"2px 16px 8px"}}>
-                        {canEarlier&&<button onClick={function(){ revealShareEarlier(dk); }} title="Show one more open time earlier" style={{background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#4a8a9a",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",padding:"4px 12px"}}>{"+AM"}</button>}
-                        {canLater&&<button onClick={function(){ revealShareLater(dk); }} title="Show one more open time later" style={{background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#4a8a9a",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",padding:"4px 12px"}}>{"+PM"}</button>}
+                        {canEarlier&&<button onClick={function(){ revealShareEarlier(day); }} title="Add one more time earlier (steps your grid past real openings if needed)" style={{background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#4a8a9a",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",padding:"4px 12px"}}>{"+AM"}</button>}
+                        {canLater&&<button onClick={function(){ revealShareLater(day); }} title="Add one more time later (steps your grid past real openings if needed)" style={{background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#4a8a9a",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",padding:"4px 12px"}}>{"+PM"}</button>}
                       </div>
                     )}
                   </div>
                 );
               });
             })()}
-            <div style={{padding:"10px 16px 16px",textAlign:"center"}}>
+            <div style={{padding:"10px 16px 16px",display:"flex",justifyContent:"center",gap:"8px"}}>
+              {(function(){
+                var d2 = computeShareDays(shareWindow);
+                if (d2.length <= 1) return null;
+                var lastLbl = d2[d2.length - 1].label;
+                return <button onClick={removeLastShareDay} title="Remove the last day shown" style={{background:"none",border:"1px solid #e0b0a8",borderRadius:"6px",color:"#b06a5a",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",padding:"7px 16px"}}>{"Remove " + lastLbl}</button>;
+              })()}
               <button onClick={loadMoreShareDays} style={{background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#777",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",padding:"7px 16px"}}>{"Load next " + addDays(new Date(), shareWindow).toLocaleDateString("en-US",{weekday:"long"})}</button>
             </div>
           </div>
 
           <div style={{padding:"10px 16px 14px",borderTop:"1px solid #ececea",flexShrink:0}}>
+            <button onClick={function(){ if (shareDirty) commitShareSave(); }} disabled={!shareDirty} title={shareDirty?"Save everything in the days below (syncs across your devices)":"Everything you're seeing is already saved"} style={{width:"100%",padding:"9px",marginBottom:"8px",background:shareDirty?"#fff":"#eef4ef",border:shareDirty?"1px solid #2e7d46":"1px solid #cfe3d4",borderRadius:"8px",color:shareDirty?"#2e7d46":"#5a8a68",cursor:shareDirty?"pointer":"default",fontFamily:"inherit",fontSize:"13px",fontWeight:"bold"}}>{shareDirty?"Save":"Saved ✓"}</button>
             <button onClick={doShareCopy} style={{width:"100%",padding:"12px",background:shareCopied?"#246b3a":"#2e7d46",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",fontWeight:"bold"}}>{shareCopied?"Copied to clipboard ✓":"Copy to clipboard"}</button>
           </div>
 
           {shareSaveConfirm && (
             <div style={{position:"absolute",top:0,left:0,right:0,bottom:0,background:"rgba(20,20,20,0.28)",zIndex:120,display:"flex",alignItems:"center",justifyContent:"center",padding:"20px"}}>
               <div style={{width:"100%",maxWidth:"300px",background:"#fff",borderRadius:"12px",boxShadow:"0 10px 30px rgba(0,0,0,0.22)",padding:"18px 18px 14px"}}>
-                <div style={{fontSize:"14px",fontWeight:"bold",color:"#1a1a1a",marginBottom:"6px"}}>Save your openings selection?</div>
-                <div style={{fontSize:"12px",color:"#888",lineHeight:1.35,marginBottom:"14px"}}>Keep the times you checked and unchecked so they're still here next time you open this. Only the checked times are saved.</div>
-                <button onClick={function(){ setShareSavedChecks(shareChecked); setShareSaveConfirm(false); setShareDirty(false); setShareModal(false); setShareDraftEditing(false); }} style={{width:"100%",padding:"11px",marginBottom:"8px",background:"#2e7d46",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",fontWeight:"bold"}}>Save</button>
+                <div style={{fontSize:"14px",fontWeight:"bold",color:"#1a1a1a",marginBottom:"6px"}}>Save your openings?</div>
+                <div style={{fontSize:"12px",color:"#888",lineHeight:1.35,marginBottom:"14px"}}>Save everything in the days below — checked times, OT tags, earlier/later notes, and any times you added — so they're here next time and on your other device. This replaces your last saved version.</div>
+                <button onClick={function(){ commitShareSave(); setShareSaveConfirm(false); setShareModal(false); setShareDraftEditing(false); }} style={{width:"100%",padding:"11px",marginBottom:"8px",background:"#2e7d46",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",fontWeight:"bold"}}>Save</button>
                 {/* v59: "Don't save" discards ONLY this session's unsaved edits. It must NOT
                     touch shareSavedChecks — leaving the last saved selection intact so the
                     next open reseeds from it (via openShareSheet). Previously this nulled the
@@ -5734,6 +6212,15 @@ export default function TheList() {
             ); })}
           </div>
           <div style={{position:"relative",flex:"1 1 auto",display:"flex",justifyContent:"flex-end",padding:"0 6px",minWidth:0}}>
+            {bannerInline && !searchExpanded && (
+              <div onClick={function(){ onBannerTap(); }} title="Tap to see the change"
+                style={{marginRight:"auto",maxWidth:"calc(100% - 44px)",display:"flex",alignItems:"center",gap:"8px",background:getBannerColor(banner.type),color:"#fff",padding:"4px 12px",borderRadius:"16px",fontSize:"11px",letterSpacing:"0.03em",cursor:"pointer",boxShadow:"0 1px 6px rgba(0,0,0,0.18)",overflow:"hidden",whiteSpace:"nowrap"}}>
+                <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",minWidth:0}}>{describeBanner(banner)}</span>
+                {(banner.type!=="undo"&&banner.type!=="redo"&&canUndo)&&(
+                  <button onClick={function(e){ e.stopPropagation(); handleUndo(); }} title="Undo" style={{background:"rgba(255,255,255,0.22)",border:"none",borderRadius:"9px",color:"#fff",padding:"3px 7px",cursor:"pointer",fontFamily:"inherit",flexShrink:0,display:"flex",alignItems:"center"}}><UndoIcon size={13} color="#fff"/></button>
+                )}
+              </div>
+            )}
             {!searchExpanded ? (
               <button onClick={function(){ setSearchExpanded(true); setTimeout(function(){ if(searchInputRef.current) searchInputRef.current.focus(); }, 0); }} title="Search a name" style={{...navBtn,width:"32px",padding:"0",background:"#f6f6f4",border:"1px solid #e0e0de"}}><SearchIcon size={15} color="#888"/></button>
             ) : (
@@ -5781,7 +6268,7 @@ export default function TheList() {
           <div style={{width:"100vw",position:"relative",left:"50%",right:"50%",marginLeft:"-50vw",marginRight:"-50vw",boxSizing:"border-box",textAlign:"left",flex:"1 1 auto",display:"flex",flexDirection:"column",minHeight:0}}>
             {(mTot.takehome>0||mTot.services>0||mTot.hours>0)&&(
               <div style={{display:"flex",justifyContent:"center",alignItems:"baseline",flexWrap:"wrap",gap:isPhone?"14px":"24px",padding:isPhone?"6px 8px":"8px 12px",background:"#faf7f0",borderBottom:"1px solid #ece4d4",flexShrink:0,fontFamily:"Georgia,serif"}}>
-                <span style={{fontSize:isPhone?"12px":"14px",color:"#777"}}>{"$"+mTot.takehome}</span>
+                <span style={{fontSize:isPhone?"12px":"14px",color:"#777"}}>{"$"+Math.round(mTot.takehome)}</span>
                 {mTot.services>0&&<span style={{fontSize:isPhone?"12px":"14px",color:"#777"}}>{"# "+mTot.services}</span>}
                 {mTot.hours>0&&<span style={{fontSize:isPhone?"12px":"14px",color:"#777"}}>{": "+mTot.hours}</span>}
               </div>
@@ -5819,13 +6306,13 @@ export default function TheList() {
                     )}
                     {acctHasData(dk)&&(function(){ var r=acctFor(dk); var sv=acctNum(r.services); var hr=acctNum(r.hours); return (
                       <div style={{marginTop:"3px",fontSize:isPhone?"9px":"11px",lineHeight:1.3,fontFamily:"Georgia,serif"}}>
-                        <div style={{color:outside?"#c2c2c0":"#888"}}>{"$"+acctTakehome(r)}</div>
+                        <div style={{color:outside?"#c2c2c0":"#888"}}>{"$"+Math.round(acctTakehome(r))}</div>
                         <div style={{color:outside?"#c2c2c0":"#888"}}>{"#"+sv}</div>
                         <div style={{color:outside?"#c2c2c0":"#888"}}>{":"+hr}</div>
                       </div>
                     ); })()}
-                    {(function(){ var hasN=!!dayNoteText(dk); var k=dayNoteKind(dk); var col=!hasN?"#cfcccc":(k==="personal"?TODAY_BLUE:"#c9a96e"); return (
-                      <button onClick={function(e){ e.stopPropagation(); setNoteDraft(dayNoteText(dk)); setNoteKind(dayNoteKind(dk)); setNoteModal({dayKey:dk,isDay:true,name:friendlyDateLong(dk)}); }} onMouseDown={function(e){ e.stopPropagation(); }} onTouchStart={function(e){ e.stopPropagation(); }} title={hasN?"Day note":"Add a day note"} style={{position:"absolute",bottom:"2px",right:"3px",background:"none",border:"none",cursor:"pointer",padding:"2px 3px",color:col,fontSize:isPhone?"13px":"15px",lineHeight:1,opacity:outside?0.6:1,WebkitTextStroke:"0.4px currentColor"}}>{"✎"}</button>
+                    {(function(){ var rN=resolveDayNote(dk); var hasN=!!rN.text; var k=rN.text?rN.kind:null; var rep=rN.repeating; var col=!hasN?"#cfcccc":(k==="personal"?TODAY_BLUE:"#c9a96e"); return (
+                      <button onClick={function(e){ e.stopPropagation(); var r=resolveDayNote(dk); setNoteDraft(r.text); setNoteKind(r.text?r.kind:null); setNoteRepeat(r.rpt); setNoteWasRepeat(r.repeating); setNoteScopeAsk(null); setNoteModal({dayKey:dk,isDay:true,name:friendlyDateLong(dk),ruleKey:r.ruleKey}); }} onMouseDown={function(e){ e.stopPropagation(); }} onTouchStart={function(e){ e.stopPropagation(); }} title={hasN?"Day note":"Add a day note"} style={{position:"absolute",bottom:"2px",right:"3px",background:"none",border:"none",cursor:"pointer",padding:"2px 3px",color:col,fontSize:isPhone?"13px":"15px",lineHeight:1,opacity:outside?0.6:1,WebkitTextStroke:"0.4px currentColor"}}>{"✎"}{rep?<sup style={{fontSize:"7px",marginLeft:"1px",opacity:0.85,WebkitTextStroke:"0px"}}>{"↻"}</sup>:null}</button>
                     ); })()}
                   </div>
                 );
@@ -5871,7 +6358,7 @@ export default function TheList() {
                     );
                   })()}
                   <button onClick={function(e){ e.stopPropagation(); setAcctAdd({}); setAcctModal({dateKey:dateKey}); }} title="Accounting for the day" style={{background:"none",border:"none",cursor:"pointer",padding:(getDayCount()>3?"0 2px":"0 4px 0 2px"),color:acctHasData(dateKey)?"#c9a96e":"#bbb",fontSize:"19px",fontWeight:"bold",lineHeight:1,flexShrink:0,fontFamily:"Georgia,serif"}}>{"$"}</button>
-                  <button onClick={function(e){ e.stopPropagation(); setNoteDraft(dayNoteText(dateKey)); setNoteKind(dayNoteKind(dateKey)); setNoteModal({dayKey:dateKey,isDay:true,name:friendlyDateLong(dateKey)}); }} title="Note for the day" style={{background:"none",border:"none",cursor:"pointer",padding:(getDayCount()>3?"0 2px":"0 9px 0 2px"),color:dayNoteText(dateKey)?(dayNoteKind(dateKey)==="personal"?TODAY_BLUE:"#c9a96e"):"#bbb",fontSize:"22px",lineHeight:1,flexShrink:0,WebkitTextStroke:"0.5px currentColor"}}>{"✎"}</button>
+                  <button onClick={function(e){ e.stopPropagation(); var r=resolveDayNote(dateKey); setNoteDraft(r.text); setNoteKind(r.text?r.kind:null); setNoteRepeat(r.rpt); setNoteWasRepeat(r.repeating); setNoteScopeAsk(null); setNoteModal({dayKey:dateKey,isDay:true,name:friendlyDateLong(dateKey),ruleKey:r.ruleKey}); }} title="Note for the day" style={{background:"none",border:"none",cursor:"pointer",padding:(getDayCount()>3?"0 2px":"0 9px 0 2px"),color:dayNoteText(dateKey)?(dayNoteKind(dateKey)==="personal"?TODAY_BLUE:"#c9a96e"):"#bbb",fontSize:"22px",lineHeight:1,flexShrink:0,WebkitTextStroke:"0.5px currentColor"}}>{"✎"}{dayNoteRepeating(dateKey)?<sup style={{fontSize:"9px",marginLeft:"1px",opacity:0.85,WebkitTextStroke:"0px"}}>{"↻"}</sup>:null}</button>
                 </div>
                 <div data-slotscroll="1" style={{flex:(slots.length+" 1 0px"),minHeight:0,paddingBottom:"0px",overflowX:"hidden",overscrollBehavior:"contain",display:"flex",flexDirection:"column"}}
                   onTouchMove={function(e){
@@ -5906,6 +6393,7 @@ export default function TheList() {
                     }
                     var isEditing=editingCell&&editingCell.dateKey===dateKey&&editingCell.idx===idx;
                     var filled=!!slot.name; var wasRemoved=recentlyRemoved[dateKey+"-"+idx]&&!slot.name;
+                    var wasPlaced=recentlyPlaced[dateKey+"-"+idx]&&!!slot.name; // B1: green glow on a just-landed spot
                     var isSwiped=swipedSlot===(dateKey+"-"+idx); var rowKey=dateKey+"-"+idx;
                     // On a phone, a plain open slot must be a *real* editable field so the
                     // very first tap (a true user gesture) raises the keyboard. Programmatic
@@ -5914,8 +6402,10 @@ export default function TheList() {
                     var phoneEmptyTypable = isPhone && !filled && !slot.blocked && !slot.availStatus && !slot.done;
                     var isOccEdit=isEditing&&editingOccupied;
                     var isSelected=selectMode&&!!selectedSlots[rowKey];
-                    var isDragging=dragState&&dragState.sourceKey===rowKey;
-                    var slotBg=slot.blocked?"#f4f4f2":(wasRemoved&&!isEditing)?"#fff0ee":isOccEdit?"#fff0ee":isSelected?"#f0f4ff":slot.done?"#f4faf4":(isEditing&&editChromeReady)?"#f0f0ee":filled?"#fcfcfa":"transparent";
+                    // B1: a group/multi drag greys EVERY member, not just the one grabbed.
+                    // sourceKey covers the grabbed row; the clients list covers the rest.
+                    var isDragging=dragState&&(dragState.sourceKey===rowKey||(dragState.multi&&dragState.clients&&dragState.clients.some(function(c){ return (c.originalDateKey+"-"+c.originalIdx)===rowKey; })));
+                    var slotBg=slot.blocked?"#f4f4f2":(wasRemoved&&!isEditing)?"#fff0ee":isOccEdit?"#fff0ee":isSelected?"#f0f4ff":(wasPlaced&&!isEditing)?"#e0f4e0":slot.done?"#f4faf4":(isEditing&&editChromeReady)?"#f0f0ee":filled?"#fcfcfa":"transparent";
                     var isSearchHit=searchHit&&slot.name&&slot.name.toLowerCase()===searchHit.name&&dateKey===searchHit.dateKey;
                     if (isSearchHit&&!isEditing) slotBg="#bfe9bf";
                     var isCustomSlot=slot.isCustom===true||(slot.isCustom===undefined&&!slot.defaultBaseTime&&!DEFAULT_TIMES.includes(slot.time));
@@ -5931,6 +6421,9 @@ export default function TheList() {
                     if (isDropTarget) slotBg="#e3f3e3";
                     else if (placingClient&&!filled&&!slot.blocked&&!isEditing) slotBg="#f4faf4";
                     else if (!filled&&!slot.blocked&&slot.availStatus&&!isEditing) slotBg="#e7f6e7";
+                    var isFlash=flashCells&&flashCells.keys[dateKey+"|"+slot.time]&&!isEditing&&!isDropTarget;
+                    var flashFam=isFlash?bannerFamily(flashCells.type):null;
+                    if (isFlash) slotBg=flashTintFor(flashFam);
                     return (
                       <div key={rowKey} style={{position:"relative",overflow:isEditing?"visible":"hidden",zIndex:isEditing?50:"auto",borderBottom:"1px solid #efefed",opacity:isDragging?0.4:1,flex:"1 1 0px",minHeight:"26px",display:"flex",flexDirection:"column"}}>
                         {!filled&&!slot.blocked&&!isEditing&&!(reassignMode&&reassignMode.currentDateKey===dateKey)&&!placingClient&&isCustomSlot&&(
@@ -5945,14 +6438,16 @@ export default function TheList() {
                         )}
                         <div
                           data-droprow={rowKey} data-dropfilled={filled?"1":"0"} data-dropblocked={slot.blocked?"1":"0"}
-                          style={{display:"flex",alignItems:"center",padding:(getDayCount()>3?"0 7px":"0 14px"),flex:"1 1 auto",minHeight:0,background:slotBg,transition:"background 0.2s",position:"relative",opacity:slot.blocked?0.6:1,userSelect:"none",WebkitUserSelect:"none",outline:isDropTarget?"2px solid #5a9a5a":(showDropHint?"1px dashed #cdddcd":"none"),outlineOffset:"-3px",borderRadius:isDropTarget?"6px":"0"}}
+                          style={{display:"flex",alignItems:"center",padding:(getDayCount()>3?"0 7px":"0 14px"),flex:"1 1 auto",minHeight:0,background:slotBg,transition:"background 0.2s",animation:isFlash?(flashAnimFor(flashFam)+" 1.6s ease-out"):"none",position:"relative",opacity:slot.blocked?0.6:1,userSelect:"none",WebkitUserSelect:"none",outline:isDropTarget?"2px solid #5a9a5a":(showDropHint?"1px dashed #cdddcd":"none"),outlineOffset:"-3px",borderRadius:isDropTarget?"6px":"0"}}
                           onTouchStart={function(e){ handleTouchStart(e,dateKey,idx); }}
                           onTouchEnd={function(e){ handleTouchEnd(e,dateKey,idx); }}
                           onMouseUp={function(){ if(dragState&&!dragState.multi&&!dragCalHover) handleSlotDrop(dateKey,idx); }}
                         >
                           {(wasRemoved||isOccEdit)&&<div style={{position:"absolute",left:0,top:0,bottom:0,width:"3px",background:"#c0392b"}}/>}
+                          {wasPlaced&&!isEditing&&<div style={{position:"absolute",left:0,top:0,bottom:0,width:"3px",background:"#2a7a2a"}}/>}
                           {isSelected&&<div style={{position:"absolute",left:0,top:0,bottom:0,width:"3px",background:"#4a7aaa"}}/>}
                           {isSearchHit&&!isEditing&&<div style={{position:"absolute",left:0,top:0,bottom:0,width:"3px",background:"#2a7a2a"}}/>}
+                          {isFlash&&<div style={{position:"absolute",left:0,top:0,bottom:0,width:"3px",background:flashBarFor(flashFam)}}/>}
                           {slot.groupId&&!wasRemoved&&(function(){
                             var ds=getSlots(dateKey); var gS=ds.map(function(s,i){ return {...s,i}; }).filter(function(s){ return s.groupId===slot.groupId&&s.name; });
                             var first=gS[0]&&gS[0].i===idx; var last=gS[gS.length-1]&&gS[gS.length-1].i===idx; var inG=gS.some(function(s){ return s.i===idx; });
@@ -6037,7 +6532,7 @@ export default function TheList() {
                                     }
                                     return <button onClick={function(e){ e.stopPropagation(); setPhoneModal({name:slot.name,phone:""}); }} title={"Add a number for "+slot.name} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 1px 2px 4px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={20} color="#c6c6c6"/></button>;
                                   })()}
-                                  {!compactIcons&&filled&&<button onClick={function(e){ e.stopPropagation(); setNoteDraft(slot.note||""); setNoteKind(slot.noteKind||null); setNoteModal({dateKey,idx,name:slot.name}); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 5px",color:slot.note?(slot.noteKind==="personal"?TODAY_BLUE:"#c9a96e"):"#bbb",fontSize:"24px",fontWeight:"bold",lineHeight:1,WebkitTextStroke:"0.6px currentColor"}}>{"✎"}</button>}
+                                  {!compactIcons&&filled&&<button onClick={function(e){ e.stopPropagation(); setNoteDraft(slot.note||""); setNoteKind(slot.noteKind||null); setNoteRepeat(0); setNoteWasRepeat(false); setNoteScopeAsk(null); setNoteModal({dateKey,idx,name:slot.name}); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 5px",color:slot.note?(slot.noteKind==="personal"?TODAY_BLUE:"#c9a96e"):"#bbb",fontSize:"24px",fontWeight:"bold",lineHeight:1,WebkitTextStroke:"0.6px currentColor"}}>{"✎"}</button>}
                                 </div>
                               )}
                               {isEditing&&editChromeReady&&<input value={editValues.price} onChange={function(e){ setEditValues(function(v){ return {...v,price:e.target.value}; }); }} onKeyDown={function(e){ if(e.key==="Tab"&&!e.shiftKey){ var nmT=stripLeadingNumbers(((editValuesRef.current&&editValuesRef.current.name)||"").trim()); if(nmT){ e.preventDefault(); commitPenciled(dateKey,idx); return; } } handleKeyDown(e,dateKey,idx); }} onBlur={handleBlur} data-rowkey={rowKey} placeholder="$" style={{width:view==="Week"?"26px":"52px",fontSize:isPhone?"16px":"13px",color:"#1a1a1a",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"4px",outline:"none",padding:view==="Week"?"2px 3px":"2px 5px",fontFamily:"Georgia,serif",WebkitAppearance:"none",appearance:"none"}}/>}
