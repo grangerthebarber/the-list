@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+ import { useState, useRef, useCallback, useEffect } from "react";
 import { initializeApp } from "firebase/app";
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail, signOut } from "firebase/auth";
 import { getFirestore, doc, onSnapshot, setDoc, serverTimestamp } from "firebase/firestore";
@@ -634,6 +634,10 @@ export default function TheList() {
   const [dragCalHover, setDragCalHover] = useState(false);
   const [reassignQueue, setReassignQueue] = useState([]);
   const [isLiveDragging, setIsLiveDragging] = useState(false);
+  // v70: a live drag is "armed" the moment a hold is picked up, but stays visually
+  // silent (no chip, no lock sound, no drop hints) until the finger actually moves.
+  // dragLifted flips true on first real movement (or immediately for multi/group).
+  const [dragLifted, setDragLifted] = useState(false);
   const [dragOverKey, setDragOverKey] = useState(null);
   const [timeEditModal, setTimeEditModal] = useState(null);
   const [timeEditMinutes, setTimeEditMinutes] = useState(0);
@@ -795,6 +799,9 @@ export default function TheList() {
   const longPressTimer = useRef(null);
   const checkoffLongPress = useRef(null);
   const dragLongPress = useRef(null);
+  // v70: fires a short beat after a still single-name hold to open the profile
+  // without needing to lift the finger. Cancelled the instant a drag starts.
+  const profileHoldTimer = useRef(null);
   const editingRef = useRef(null);
   const editValuesRef = useRef(editValues);
   editValuesRef.current = editValues;
@@ -824,6 +831,8 @@ export default function TheList() {
   const settleTimer = useRef(null);
   const isLiveDraggingRef = useRef(false);
   isLiveDraggingRef.current = isLiveDragging;
+  const dragLiftedRef = useRef(false);
+  dragLiftedRef.current = dragLifted;
   // #5: ring buffer of the last few JSON payloads WE pushed to the cloud, so the
   // matching onSnapshot echo can be recognised and ignored (a single lastSyncRef
   // loses the race when undo writes the old state right after a booked-state push).
@@ -4435,6 +4444,7 @@ export default function TheList() {
         if (isTouch) {
           dragPosRef.current = {x:startX, y:startY};
           dragOverRef.current = null; setDragOverKey(null);
+          dragLiftedRef.current = true; setDragLifted(true);
           setIsLiveDragging(true);
           captureDragPointer();
         } else {
@@ -4460,6 +4470,7 @@ export default function TheList() {
             if (isTouch) {
               dragPosRef.current = {x:startX, y:startY};
               dragOverRef.current = null; setDragOverKey(null);
+              dragLiftedRef.current = true; setDragLifted(true);
               setIsLiveDragging(true);
               captureDragPointer();
             } else {
@@ -4473,12 +4484,28 @@ export default function TheList() {
       var clients = [{name:slot.name,price:slot.price,recurWeeks:slot.recurWeeks,originalTime:slot.time,originalDateKey:dateKey,originalIdx:idx}];
       setDragState({clients,sourceKey:dateKey+"-"+idx,multi:false});
       if (isTouch) {
-        // True drag-and-drop: lift the appointment and let it follow the finger.
+        // v70: a plain still-hold should feel like a press that opens the profile,
+        // NOT a pickup. Arm the drag SILENTLY — no chip, no lock sound, no drop
+        // hints (all gated on dragLifted) — and let it "lift" only once the finger
+        // actually moves (see onMove). If the finger just stays put, open the
+        // profile on its own after a short dwell, with no need to let go.
         dragPosRef.current = {x:startX, y:startY};
         dragOverRef.current = null; setDragOverKey(null);
+        dragLiftedRef.current = false; setDragLifted(false);
         setIsLiveDragging(true);
         captureDragPointer();
-        playSound("lock");
+        if (profileHoldTimer.current) { clearTimeout(profileHoldTimer.current); }
+        profileHoldTimer.current = setTimeout(function() {
+          profileHoldTimer.current = null;
+          if (dragMovedRef.current) return;           // finger moved -> it's a drag, not a profile open
+          var pds = dragStateRef.current;
+          var pName = (pds && !pds.multi && pds.clients && pds.clients[0]) ? pds.clients[0].name : null;
+          releaseDragPointer();
+          setIsLiveDragging(false); dragLiftedRef.current = false; setDragLifted(false);
+          dragOverRef.current = null; setDragOverKey(null);
+          setDragState(null);
+          if (pName) openClientProfile(pName);
+        }, 300);
       } else {
         // Mouse / desktop fallback: open the date picker.
         setDragCalOpen(true); setDragCalMonth(new Date()); setDragCalHover(true);
@@ -4764,7 +4791,13 @@ export default function TheList() {
       var px = e.clientX; var py = e.clientY;
       dragPosRef.current = {x:px, y:py};
       if (!dragMovedRef.current && dragStartPosRef.current) {
-        if (Math.abs(px - dragStartPosRef.current.x) > 10 || Math.abs(py - dragStartPosRef.current.y) > 10) dragMovedRef.current = true;
+        if (Math.abs(px - dragStartPosRef.current.x) > 10 || Math.abs(py - dragStartPosRef.current.y) > 10) {
+          dragMovedRef.current = true;
+          // v70: first real movement turns a silent hold into a visible drag —
+          // cancel the pending profile-open and reveal the chip + lock sound now.
+          if (profileHoldTimer.current) { clearTimeout(profileHoldTimer.current); profileHoldTimer.current = null; }
+          if (!dragLiftedRef.current) { dragLiftedRef.current = true; setDragLifted(true); playSound("lock"); }
+        }
       }
       if (dragChipRef.current) dragChipRef.current.style.transform = dragChipTransform(px, py);
       // Hovering a view tab while dragging jumps into that view so off-screen days
@@ -4786,9 +4819,10 @@ export default function TheList() {
       // Held and let go without dragging: treat as "open this person's profile",
       // not a move. (Single pickup only — a multi/group hold just cancels cleanly.)
       if (!dragMovedRef.current) {
+        if (profileHoldTimer.current) { clearTimeout(profileHoldTimer.current); profileHoldTimer.current = null; }
         var heldName = (ds && !ds.multi && ds.clients && ds.clients[0]) ? ds.clients[0].name : null;
         releaseDragPointer();
-        setIsLiveDragging(false);
+        setIsLiveDragging(false); dragLiftedRef.current = false; setDragLifted(false);
         dragOverRef.current = null; setDragOverKey(null);
         setDragState(null);
         if (heldName) openClientProfile(heldName);
@@ -4837,7 +4871,7 @@ export default function TheList() {
         }
       }
       releaseDragPointer();
-      setIsLiveDragging(false);
+      setIsLiveDragging(false); dragLiftedRef.current = false; setDragLifted(false);
       dragOverRef.current = null; setDragOverKey(null);
       setDragState(null);
     };
@@ -4846,8 +4880,9 @@ export default function TheList() {
       // Rare with pointer capture, but if the OS still aborts: complete the drop if
       // the finger was over an open slot, otherwise hand a single move to
       // tap-to-place and a group/multi move to the picker.
+      if (profileHoldTimer.current) { clearTimeout(profileHoldTimer.current); profileHoldTimer.current = null; }
       releaseDragPointer();
-      setIsLiveDragging(false);
+      setIsLiveDragging(false); dragLiftedRef.current = false; setDragLifted(false);
       var overKey = dragOverRef.current;
       dragOverRef.current = null; setDragOverKey(null);
       var ds = dragStateRef.current;
@@ -5121,7 +5156,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v69</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v71</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -5142,7 +5177,7 @@ export default function TheList() {
         </div>
       )}
 
-      {isLiveDragging && dragState && (
+      {isLiveDragging && dragLifted && dragState && (
         <div ref={dragChipRef}
           style={{position:"fixed",left:0,top:0,zIndex:3000,pointerEvents:"none",background:"#1a1a1a",color:"#fff",padding:"8px 14px",borderRadius:"9px",fontSize:"14px",fontFamily:"Georgia,serif",boxShadow:"0 8px 24px rgba(0,0,0,0.35)",whiteSpace:"nowrap",transform:dragChipTransform(dragPosRef.current.x, dragPosRef.current.y)}}>
           {dragState.clients.length>1 ? (dragState.clients.length+" appointments") : dragState.clients[0].name}
@@ -5733,7 +5768,7 @@ export default function TheList() {
         var dk=acctModal.dateKey;
         var rec=acctFor(dk);
         var th=acctTakehome(rec);
-        var methods=[["cash","Cash"],["square","Square"],["venmo","Venmo"],["applepay","Apple Pay"]];
+        var methods=[["cash","Cash"],["square","Square","https://squareup.com/dashboard",null],["venmo","Venmo","sms:86753",null],["applepay","Apple Pay","shoebox://",null]];
         var draftVal=function(key){ return acctAdd[key]!==undefined?acctAdd[key]:(rec[key]?String(rec[key]):""); };
         var liveAmt=function(key){ return acctAdd[key]!==undefined?acctNum(acctAdd[key]):acctNum(rec[key]); };
         var liveTh=liveAmt("cash")+liveAmt("venmo")+liveAmt("applepay")+liveAmt("square");
@@ -5761,11 +5796,14 @@ export default function TheList() {
         var onFieldBlur=function(key){ return function(){ acctSetField(dk,key,acctAdd[key]!==undefined?acctAdd[key]:rec[key]); }; };
         var commitAll=function(){ var r={...acctFor(dk)}; ["cash","venmo","applepay","square","services","hours"].forEach(function(k){ if(acctAdd[k]!==undefined) r[k]=acctNum(acctAdd[k]); }); acctCommit(dk,r); };
         var closeAcct=function(){ commitAll(); setAcctModal(null); setAcctAdd({}); };
-        // B5: one-tap launchers for the payment apps. No public deep link lands on a
-        // specific balance/report screen, so these just open each app: Venmo via its own
-        // scheme (web fallback if not installed); Square via web, which iOS may open in
-        // Safari rather than the app; Apple Pay via the Wallet scheme, unverified on
-        // current iOS (the on-device gamble). commitAll first so nothing typed is lost.
+        // v71: one-tap launchers now live ON the payment word-labels themselves
+        // (no separate button row). No public deep link lands on a specific balance
+        // screen, so each just opens its app/thread: Square via web (iOS may open in
+        // Safari); Venmo via the Messages thread to pay-shortcode 86753 (sms:); Apple
+        // Pay via the Wallet scheme, unverified on current iOS (the on-device gamble).
+        // Cash has no app, so its label stays a plain (non-tappable) word. commitAll
+        // fires first so nothing typed is lost when the app switches away.
+        // launchBtn kept (dormant) as a fallback lever in case the buttons return.
         var launchBtn={flex:1,padding:"9px 6px",border:"1px solid #ddd8cc",borderRadius:"8px",background:"#fbf9f3",color:"#a07830",fontFamily:"Georgia,serif",fontSize:"12px",cursor:"pointer",WebkitAppearance:"none",appearance:"none"};
         var launchApp=function(target,fallback){ commitAll(); if(fallback){ var t0=Date.now(); setTimeout(function(){ if(Date.now()-t0<1500 && !document.hidden){ window.location.href=fallback; } }, 1200); } try{ window.location.href=target; }catch(e){} };
         var onFieldKey=function(e){
@@ -5797,10 +5835,12 @@ export default function TheList() {
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#a07830",marginBottom:"4px"}}>Accounting</div>
             <div style={{fontSize:"18px",color:"#1a1a1a",marginBottom:"18px"}}>{friendlyDateLong(dk)}</div>
             {methods.map(function(m){
-              var key=m[0]; var label=m[1];
+              var key=m[0]; var label=m[1]; var tgt=m[2]; var fb=m[3];
               return (
                 <div key={key} style={rowWrap}>
-                  <div style={rowLabel}>{label}</div>
+                  {tgt
+                    ? <div onClick={function(){ launchApp(tgt, fb); }} title={"Open "+label} style={{...rowLabel,color:"#a07830",cursor:"pointer",textDecoration:"underline",textDecorationColor:"#e0d3b0",textUnderlineOffset:"3px",WebkitTapHighlightColor:"transparent"}}>{label}</div>
+                    : <div style={rowLabel}>{label}</div>}
                   <input type="text" inputMode="decimal" value={draftVal(key)} onChange={onFieldChange(key)} onBlur={onFieldBlur(key)} onFocus={onFieldFocus} onKeyDown={onFieldKey} placeholder="0" style={fieldInp}/>
                 </div>
               );
@@ -5829,12 +5869,6 @@ export default function TheList() {
                 </div>
               </div>
             )}
-            <div style={{display:"flex",alignItems:"center",gap:"7px",marginBottom:"12px"}}>
-              <span style={{fontSize:"11px",color:"#b0a68e",letterSpacing:"0.05em",fontFamily:"Georgia,serif",flexShrink:0}}>{"Open"}</span>
-              <button onClick={function(){ launchApp("https://squareup.com/dashboard", null); }} style={launchBtn}>{"Square"}</button>
-              <button onClick={function(){ launchApp("venmo://", "https://venmo.com"); }} style={launchBtn}>{"Venmo"}</button>
-              <button onClick={function(){ launchApp("shoebox://", null); }} style={launchBtn}>{"Apple Pay"}</button>
-            </div>
             <button onClick={closeAcct} style={{display:"block",width:"100%",padding:"11px",background:"#1a1a1a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Done</button>
           </div>
         </div>
@@ -6471,8 +6505,8 @@ export default function TheList() {
                     // highlight like an empty slot does.
                     var groupMemberHere=filled&&dragState&&dragState.multi&&dragState.clients&&slot.name&&dragState.clients.some(function(c){ return (c.name||"").toLowerCase()===slot.name.toLowerCase(); });
                     var dropEligible=(!filled||groupMemberHere)&&!slot.blocked;
-                    var isDropTarget=isLiveDragging&&dragOverKey===rowKey&&dropEligible;
-                    var showDropHint=(isLiveDragging||placingClient)&&dropEligible&&!isEditing&&!(dragState&&dragState.sourceKey===rowKey);
+                    var isDropTarget=isLiveDragging&&dragLifted&&dragOverKey===rowKey&&dropEligible;
+                    var showDropHint=((isLiveDragging&&dragLifted)||placingClient)&&dropEligible&&!isEditing&&!(dragState&&dragState.sourceKey===rowKey);
                     if (isDropTarget) slotBg="#e3f3e3";
                     else if (placingClient&&!filled&&!slot.blocked&&!isEditing) slotBg="#f4faf4";
                     else if (!filled&&!slot.blocked&&slot.availStatus&&!isEditing) slotBg="#e7f6e7";
