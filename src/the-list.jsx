@@ -2243,6 +2243,7 @@ export default function TheList() {
     var slots = getSlots(dateKey);
     var slot = slots[idx];
     if (!slot.name && !slot.blocked) return;
+    if (slot.blocked) return; // v73: lunches/blocks are not checkoffable
     var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
     pushUndo(snapshot);
     var newDone = !slot.done;
@@ -2263,7 +2264,7 @@ export default function TheList() {
       var up = idx; while (up>0 && (slots[up-1].name||"").toLowerCase()===nm) { flip[up-1]=true; up--; }
       var dn = idx; while (dn<slots.length-1 && (slots[dn+1].name||"").toLowerCase()===nm) { flip[dn+1]=true; dn++; }
     }
-    var updated = slots.map(function(s, i){ return flip[i] ? {...s,done:newDone} : s; });
+    var updated = slots.map(function(s, i){ return (flip[i] && !s.blocked) ? {...s,done:newDone} : s; });
     setSlots(dateKey,updated);
     if (newDone) {
       playSound("lock");
@@ -2292,7 +2293,7 @@ export default function TheList() {
         var dn = idx; while (dn<slots.length-1 && (slots[dn+1].name||"").toLowerCase()===nm) { flip[dn+1]=true; dn++; }
       }
     });
-    var updated = slots.map(function(s, i){ return flip[i] ? {...s,done:newDone} : s; });
+    var updated = slots.map(function(s, i){ return (flip[i] && !s.blocked) ? {...s,done:newDone} : s; });
     setSlots(dateKey,updated);
     playSound(newDone ? "lock" : "tap");
   };
@@ -4488,18 +4489,21 @@ export default function TheList() {
       var clients = [{name:slot.name,price:slot.price,recurWeeks:slot.recurWeeks,originalTime:slot.time,originalDateKey:dateKey,originalIdx:idx}];
       setDragState({clients,sourceKey:dateKey+"-"+idx,multi:false});
       if (isTouch) {
-        // v72: reverted the v70 "silent hold" pickup. Back to the known-good v58 feel —
-        // a 500ms hold picks the chip up IMMEDIATELY (visible chip + lock sound) so a
-        // drag works, and releasing WITHOUT moving opens the profile (handled in onEnd).
-        // The v70 300ms auto-open (open profile with the finger still down) is left OFF:
-        // it broke both drag AND hold-to-open. profileHoldTimer stays declared but dormant
-        // as a fallback lever, and every clearTimeout guard on it is a harmless no-op.
+        // v74: SILENT ARM. A 500ms hold no longer lifts the chip. It arms the drag
+        // (dragState was set just above, pointer gets captured, and the live-drag effect
+        // attaches its move/end listeners) but stays visually silent — no chip, no lock
+        // sound — until the finger actually MOVES. onMove lifts the chip and plays the
+        // lock sound on the first >10px of movement; onEnd, seeing no movement, opens the
+        // client profile instead. This is the v70 feel Granger asked for, MINUS the 300ms
+        // finger-still-down auto-open that actually broke v70 (that profileHoldTimer stays
+        // disabled). The source-row fade is now also gated on dragLifted in the row render,
+        // so nothing greys out on the bare hold.
+        // v72 immediate-pickup lever kept commented for a one-line revert if ever needed:
+        //   dragLiftedRef.current = true; setDragLifted(true); playSound("lock");
         dragPosRef.current = {x:startX, y:startY};
         dragOverRef.current = null; setDragOverKey(null);
-        dragLiftedRef.current = true; setDragLifted(true);
         setIsLiveDragging(true);
         captureDragPointer();
-        playSound("lock");
       } else {
         // Mouse / desktop fallback: open the date picker.
         setDragCalOpen(true); setDragCalMonth(new Date()); setDragCalHover(true);
@@ -5150,7 +5154,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v72</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v74</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -6182,7 +6186,7 @@ export default function TheList() {
           <div style={{width:"min(360px,90vw)",height:"100%",background:"#fafaf8",borderLeft:"1px solid #e4e4e2",overflowY:"auto",padding:"24px 20px",paddingTop:"calc(env(safe-area-inset-top,0px) + 24px)",boxShadow:"-4px 0 20px rgba(0,0,0,0.08)"}} onClick={function(e){ e.stopPropagation(); }}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"16px"}}>
               <div style={{fontSize:"11px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#888"}}>Change History</div>
-              <span style={{fontSize:"10px",letterSpacing:"0.04em",color:"#bbb",fontFamily:"Georgia,serif"}}>{(function(){ var n=0; var sk=Object.keys(schedules); for(var ii=0;ii<sk.length;ii++){ var arr=schedules[sk[ii]]||[]; for(var jj=0;jj<arr.length;jj++){ var ss=arr[jj]; if(ss&&ss.name&&!ss.blocked) n++; } } return n+" on the list"; })()}</span>
+              <span style={{fontSize:"10px",letterSpacing:"0.04em",color:"#bbb",fontFamily:"Georgia,serif"}}>{(function(){ var n=0; var _tdk=toDateKey(new Date()); var sk=Object.keys(schedules); for(var ii=0;ii<sk.length;ii++){ if(sk[ii]<_tdk) continue; var arr=schedules[sk[ii]]||[]; for(var jj=0;jj<arr.length;jj++){ var ss=arr[jj]; if(ss&&ss.name&&!ss.blocked&&!ss.done) n++; } } return n+" on the list"; })()}</span>
             </div>
             <button onClick={openShareSheet} style={{width:"100%",padding:"11px",marginBottom:"10px",background:"#2e7d46",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",letterSpacing:"0.04em",fontWeight:"bold"}}>Share openings</button>
             {/* v67: quick-messages entry point for iPhone (the header button only exists on iPad). Opens the same Messages popup and closes the menu. B3. */}
@@ -6508,7 +6512,7 @@ export default function TheList() {
                     var flashFam=isFlash?bannerFamily(flashCells.type):null;
                     if (isFlash) slotBg=flashTintFor(flashFam);
                     return (
-                      <div key={rowKey} style={{position:"relative",overflow:isEditing?"visible":"hidden",zIndex:isEditing?50:"auto",borderBottom:"1px solid #efefed",opacity:isDragging?0.4:1,flex:"1 1 0px",minHeight:"26px",display:"flex",flexDirection:"column"}}>
+                      <div key={rowKey} style={{position:"relative",overflow:isEditing?"visible":"hidden",zIndex:isEditing?50:"auto",borderBottom:"1px solid #efefed",opacity:(isDragging&&dragLifted)?0.4:1,flex:"1 1 0px",minHeight:"26px",display:"flex",flexDirection:"column"}}>
                         {!filled&&!slot.blocked&&!isEditing&&!(reassignMode&&reassignMode.currentDateKey===dateKey)&&!placingClient&&isCustomSlot&&(
                           <div style={{position:"absolute",right:"10px",top:0,bottom:0,display:"flex",alignItems:"center",gap:"4px",pointerEvents:"auto",zIndex:1}}>
                             <button onClick={function(e){ e.stopPropagation(); removeCustomSlot(dateKey,idx); }} style={{background:"none",border:"none",color:"#ddd",fontSize:"12px",cursor:"pointer",fontFamily:"inherit",padding:"2px 4px"}} onMouseEnter={function(e){ e.currentTarget.style.color="#c0392b"; }} onMouseLeave={function(e){ e.currentTarget.style.color="#ddd"; }}>{"× slot"}</button>
