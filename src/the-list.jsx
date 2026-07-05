@@ -1168,6 +1168,18 @@ export default function TheList() {
     });
   }, [acctModal]);
 
+  // v68: when the notes popup opens, drop the caret at the END of any existing text.
+  // iOS autoFocus lands it at the far left; this fires once per open (noteModal identity
+  // only changes on open/close, never while typing), so tapping mid-text still works
+  // afterward. The textarea's autoFocus is kept as the fallback focus lever.
+  useEffect(function(){
+    if (!noteModal) return;
+    setTimeout(function(){
+      var el = document.querySelector("[data-noteinput='1']");
+      if (el) { el.focus(); var L = (el.value || "").length; try { el.setSelectionRange(L, L); } catch(e) {} }
+    }, 0);
+  }, [noteModal]);
+
   useEffect(function() {
     var handler = function(e) {
       if ((e.ctrlKey||e.metaKey) && e.key==="z" && !e.shiftKey) { e.preventDefault(); handleUndo(); }
@@ -3037,7 +3049,9 @@ export default function TheList() {
     copyPlainText(body || "");
     setQuickMsgCopiedId(id);
     if (quickMsgCopyTimer.current) clearTimeout(quickMsgCopyTimer.current);
-    quickMsgCopyTimer.current = setTimeout(function(){ setQuickMsgCopiedId(null); }, 2000);
+    // v67: flash the green "Copied" tick briefly, then auto-close the popup so Granger
+    // lands back in Messages ready to paste (B3).
+    quickMsgCopyTimer.current = setTimeout(function(){ setQuickMsgCopiedId(null); setQuickMsgModal(false); setQuickMsgOpenId(null); }, 700);
   };
   const updateQuickMsg = function(id, field, value) {
     setQuickMsgs(function(prev){
@@ -3881,7 +3895,16 @@ export default function TheList() {
     var snap={schedules:JSON.parse(JSON.stringify(schedulesRef.current))}; pushUndo(snap);
     if (scope==="one") {
       var slots=[...getSlots(m.dateKey)]; var p=slots[m.idx];
-      slots[m.idx]={...p,name:m.newName,price:m.newPrice,availStatus:null,pending:false,isException:true};
+      // v69: a "just this one" swap to a DIFFERENT person must NOT inherit the old
+      // client's recurring flag. The old spread carried recurWeeks straight onto the new
+      // name, silently marking them recurring with no prompt. This mirrors the guard
+      // already used in the pencil-in and inline name-edit paths. A same-person price or
+      // edit keeps its recurring flag and stays an exception for this occurrence, as before.
+      var prevNameOne = (m.oldName!=null ? m.oldName : (p.name||""));
+      var nameChangedOne = (m.newName||"").toLowerCase() !== (prevNameOne||"").toLowerCase();
+      var oneWrite = {...p,name:m.newName,price:m.newPrice,availStatus:null,pending:false,isException:true};
+      if (nameChangedOne) { oneWrite.recurWeeks = null; oneWrite.isException = false; }
+      slots[m.idx]=oneWrite;
       setSlots(m.dateKey,slots);
       addHistoryEntry({type:"edited",time:p.time,name:m.newName,prevName:m.oldName,dateKey:m.dateKey});
     } else {
@@ -4189,8 +4212,20 @@ export default function TheList() {
     lines.push("Exported " + now.toLocaleString());
     lines.push("Plain-text copy of your schedule, in case the app is ever gone.");
     lines.push("");
+    // B7: total upcoming appointments, right-aligned into the section banner. Skips
+    // Blocked rows; counts done ones since they still happened. Independent pre-pass so
+    // the existing sch/keys setup just below is left untouched.
+    var _schB7 = schedulesRef.current || {};
+    var _todayB7 = toDateKey(now);
+    var _totalAppts = 0;
+    Object.keys(_schB7).filter(function(k){ return k >= _todayB7; }).forEach(function(k){
+      (_schB7[k] || []).forEach(function(s){ if (!s.blocked && s.name) _totalAppts++; });
+    });
+    var _b7label = _totalAppts + (_totalAppts===1 ? " appointment" : " appointments");
+    var _b7pad = 60 - 17 - _b7label.length; if (_b7pad < 2) _b7pad = 2;
+    var _b7sp = ""; while (_b7sp.length < _b7pad) _b7sp += " ";
     lines.push("============================================================");
-    lines.push("UPCOMING SCHEDULE");
+    lines.push("UPCOMING SCHEDULE" + _b7sp + _b7label);
     lines.push("============================================================");
     lines.push("");
     var sch = schedulesRef.current || {};
@@ -4210,10 +4245,12 @@ export default function TheList() {
     keys.forEach(function(dk){
       var slots = sch[dk] || [];
       var rows = [];
+      var apptCount = 0;
       slots.forEach(function(s){
         if (s.blocked) {
           rows.push(padTime(s.time) + (s.blockLabel || "Blocked"));
         } else if (s.name) {
+          apptCount++;
           var line = padTime(s.time) + s.name;
           var ph = phoneOf(s.name);
           if (ph) line += "  " + ph;
@@ -4225,7 +4262,7 @@ export default function TheList() {
       });
       if (rows.length === 0) return;
       anyDay = true;
-      lines.push(friendlyDateLong(dk));
+      lines.push(friendlyDateLong(dk) + "   (" + apptCount + (apptCount===1 ? " appt)" : " appts)"));
       var note = dayNoteText(dk);
       if (note) lines.push("  note: " + note);
       rows.forEach(function(r){ lines.push("  " + r); });
@@ -5084,7 +5121,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v66</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v69</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -5718,9 +5755,19 @@ export default function TheList() {
         var symLabel={width:"96px",flexShrink:0,fontSize:"18px",color:"#a07830",fontFamily:"Georgia,serif"};
         var fieldInp={flex:1,minWidth:0,boxSizing:"border-box",padding:"9px 11px",border:"1px solid #ddd8cc",borderRadius:"8px",fontFamily:"Georgia,serif",fontSize:"16px",color:"#1a1a1a",background:"#fcfbf7",textAlign:"right",WebkitAppearance:"none",appearance:"none"};
         var onFieldChange=function(key){ return function(e){ var v=e.target.value; setAcctAdd(function(p){ var n={...p}; n[key]=v; return n; }); }; };
+        // v68: tapping a field that already holds a number should land the caret at the END
+        // so you can keep typing / backspace, instead of iOS dropping it at the far left.
+        var onFieldFocus=function(e){ var el=e.target; var L=(el.value||"").length; setTimeout(function(){ try{ el.setSelectionRange(L,L); }catch(err){} }, 0); };
         var onFieldBlur=function(key){ return function(){ acctSetField(dk,key,acctAdd[key]!==undefined?acctAdd[key]:rec[key]); }; };
         var commitAll=function(){ var r={...acctFor(dk)}; ["cash","venmo","applepay","square","services","hours"].forEach(function(k){ if(acctAdd[k]!==undefined) r[k]=acctNum(acctAdd[k]); }); acctCommit(dk,r); };
         var closeAcct=function(){ commitAll(); setAcctModal(null); setAcctAdd({}); };
+        // B5: one-tap launchers for the payment apps. No public deep link lands on a
+        // specific balance/report screen, so these just open each app: Venmo via its own
+        // scheme (web fallback if not installed); Square via web, which iOS may open in
+        // Safari rather than the app; Apple Pay via the Wallet scheme, unverified on
+        // current iOS (the on-device gamble). commitAll first so nothing typed is lost.
+        var launchBtn={flex:1,padding:"9px 6px",border:"1px solid #ddd8cc",borderRadius:"8px",background:"#fbf9f3",color:"#a07830",fontFamily:"Georgia,serif",fontSize:"12px",cursor:"pointer",WebkitAppearance:"none",appearance:"none"};
+        var launchApp=function(target,fallback){ commitAll(); if(fallback){ var t0=Date.now(); setTimeout(function(){ if(Date.now()-t0<1500 && !document.hidden){ window.location.href=fallback; } }, 1200); } try{ window.location.href=target; }catch(e){} };
         var onFieldKey=function(e){
           if (e.key==="Enter"){ e.preventDefault(); closeAcct(); return; }
           if (e.key==="ArrowDown"){
@@ -5754,7 +5801,7 @@ export default function TheList() {
               return (
                 <div key={key} style={rowWrap}>
                   <div style={rowLabel}>{label}</div>
-                  <input type="text" inputMode="decimal" value={draftVal(key)} onChange={onFieldChange(key)} onBlur={onFieldBlur(key)} onKeyDown={onFieldKey} placeholder="0" style={fieldInp}/>
+                  <input type="text" inputMode="decimal" value={draftVal(key)} onChange={onFieldChange(key)} onBlur={onFieldBlur(key)} onFocus={onFieldFocus} onKeyDown={onFieldKey} placeholder="0" style={fieldInp}/>
                 </div>
               );
             })}
@@ -5764,11 +5811,11 @@ export default function TheList() {
             </div>
             <div style={rowWrap}>
               <div style={symLabel}>{"#"}</div>
-              <input type="text" inputMode="decimal" value={acctAdd.services!==undefined?acctAdd.services:(rec.services?String(rec.services):(estToday&&estToday.any?estToday.services:""))} onChange={onFieldChange("services")} onBlur={onFieldBlur("services")} onKeyDown={onFieldKey} placeholder="services" style={fieldInp}/>
+              <input type="text" inputMode="decimal" value={acctAdd.services!==undefined?acctAdd.services:(rec.services?String(rec.services):(estToday&&estToday.any?estToday.services:""))} onChange={onFieldChange("services")} onBlur={onFieldBlur("services")} onFocus={onFieldFocus} onKeyDown={onFieldKey} placeholder="services" style={fieldInp}/>
             </div>
             <div style={{...rowWrap,marginBottom:"18px"}}>
               <div style={symLabel}>{":"}</div>
-              <input type="text" inputMode="decimal" value={acctAdd.hours!==undefined?acctAdd.hours:(rec.hours?String(rec.hours):(estToday&&estToday.any?estToday.hours:""))} onChange={onFieldChange("hours")} onBlur={onFieldBlur("hours")} onKeyDown={onFieldKey} placeholder="hours" style={fieldInp}/>
+              <input type="text" inputMode="decimal" value={acctAdd.hours!==undefined?acctAdd.hours:(rec.hours?String(rec.hours):(estToday&&estToday.any?estToday.hours:""))} onChange={onFieldChange("hours")} onBlur={onFieldBlur("hours")} onFocus={onFieldFocus} onKeyDown={onFieldKey} placeholder="hours" style={fieldInp}/>
             </div>
             {(dpsVal!==null||sphVal!==null)&&(
               <div style={{padding:"10px 0 4px",marginTop:"-6px",marginBottom:"14px",borderTop:"1px dashed #ece4d4"}}>
@@ -5782,6 +5829,12 @@ export default function TheList() {
                 </div>
               </div>
             )}
+            <div style={{display:"flex",alignItems:"center",gap:"7px",marginBottom:"12px"}}>
+              <span style={{fontSize:"11px",color:"#b0a68e",letterSpacing:"0.05em",fontFamily:"Georgia,serif",flexShrink:0}}>{"Open"}</span>
+              <button onClick={function(){ launchApp("https://squareup.com/dashboard", null); }} style={launchBtn}>{"Square"}</button>
+              <button onClick={function(){ launchApp("venmo://", "https://venmo.com"); }} style={launchBtn}>{"Venmo"}</button>
+              <button onClick={function(){ launchApp("shoebox://", null); }} style={launchBtn}>{"Apple Pay"}</button>
+            </div>
             <button onClick={closeAcct} style={{display:"block",width:"100%",padding:"11px",background:"#1a1a1a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Done</button>
           </div>
         </div>
@@ -5793,7 +5846,7 @@ export default function TheList() {
           <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"24px",width:"min(360px,92vw)"}} onClick={function(e){ e.stopPropagation(); }}>
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#a07830",marginBottom:"8px"}}>{noteModal.isDay?"Day Note":"Note"}</div>
             <div style={{fontSize:"16px",color:"#1a1a1a",marginBottom:"14px"}}>{noteModal.name}</div>
-            <textarea autoFocus value={noteDraft} onChange={function(e){ setNoteDraft(e.target.value); }} onKeyDown={function(e){ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); var nm=noteModal; if(nm.isDay){ dnCommitDayNote("save"); } else { var slots=[...getSlots(nm.dateKey)]; var s=slots[nm.idx]; slots[nm.idx]={...s,note:noteDraft.trim(),noteKind:noteDraft.trim()?noteKind:null}; setSlots(nm.dateKey,slots); setNoteModal(null); setNoteDraft(""); setNoteKind(null); } } }} placeholder={noteModal.isDay?"":"Add a note for this appointment..."} style={{width:"100%",boxSizing:"border-box",minHeight:"96px",resize:"vertical",background:"#efefed",border:"1px solid #d8d8d6",borderRadius:"6px",padding:"10px",fontSize:"14px",fontFamily:"Georgia,serif",color:noteColorFor(noteKind),outline:"none",marginBottom:"12px"}}/>
+            <textarea autoFocus data-noteinput="1" value={noteDraft} onChange={function(e){ setNoteDraft(e.target.value); }} onKeyDown={function(e){ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); var nm=noteModal; if(nm.isDay){ dnCommitDayNote("save"); } else { var slots=[...getSlots(nm.dateKey)]; var s=slots[nm.idx]; slots[nm.idx]={...s,note:noteDraft.trim(),noteKind:noteDraft.trim()?noteKind:null}; setSlots(nm.dateKey,slots); setNoteModal(null); setNoteDraft(""); setNoteKind(null); } } }} placeholder={noteModal.isDay?"":"Add a note for this appointment..."} style={{width:"100%",boxSizing:"border-box",minHeight:"96px",resize:"vertical",background:"#efefed",border:"1px solid #d8d8d6",borderRadius:"6px",padding:"10px",fontSize:"14px",fontFamily:"Georgia,serif",color:noteColorFor(noteKind),outline:"none",marginBottom:"12px"}}/>
             <div style={{display:"flex",alignItems:"center",gap:"8px",marginBottom:"14px"}}>
               <button onClick={function(){ setNoteKind(noteKind==="personal"?null:"personal"); }} style={{flex:1,padding:"8px",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",letterSpacing:"0.06em",border:"1px solid "+TODAY_BLUE,background:noteKind==="personal"?TODAY_BLUE:"transparent",color:noteKind==="personal"?"#fff":TODAY_BLUE}}>Personal</button>
               <button onClick={function(){ setNoteKind(noteKind==="business"?null:"business"); }} style={{flex:1,padding:"8px",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",letterSpacing:"0.06em",border:"1px solid #a07830",background:noteKind==="business"?"#a07830":"transparent",color:noteKind==="business"?"#fff":"#a07830"}}>Business</button>
@@ -5956,7 +6009,7 @@ export default function TheList() {
       )}
 
       {shareModal && (
-        <div onClick={function(e){ e.stopPropagation(); }} style={{position:"fixed",top:isPhone?0:(gridTopY>0?gridTopY:(listTopY>0?listTopY:"calc(env(safe-area-inset-top,0px) + 56px)")),left:isPhone?0:"auto",right:0,bottom:0,width:isPhone?"100%":"clamp(300px,34vw,460px)",background:"#fafaf8",borderLeft:isPhone?"none":"1px solid #ececea",boxShadow:"-6px 0 24px rgba(0,0,0,0.12)",zIndex:90,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+        <div onClick={function(e){ e.stopPropagation(); }} style={{position:"fixed",top:isPhone?0:(gridTopY>0?gridTopY:(listTopY>0?listTopY:"calc(env(safe-area-inset-top,0px) + 56px)")),left:isPhone?0:"auto",right:0,bottom:0,width:isPhone?"100%":"clamp(300px,34vw,460px)",background:"#fafaf8",borderLeft:isPhone?"none":"1px solid #ececea",boxShadow:"-6px 0 24px rgba(0,0,0,0.12)",zIndex:110,display:"flex",flexDirection:"column",overflow:"hidden"}}>
           <div style={{padding:isPhone?"calc(env(safe-area-inset-top, 0px) + 14px) 16px 10px":"14px 16px 10px",borderBottom:"1px solid #ececea",display:"flex",justifyContent:"space-between",alignItems:"center",flexShrink:0}}>
             <div style={{fontSize:"15px",fontWeight:"bold",color:"#1a1a1a",fontFamily:"inherit"}}>Share openings</div>
             <button onClick={function(){ if (shareDirty) { setShareSaveConfirm(true); } else { setShareModal(false); setShareDraftEditing(false); } }} style={{background:"none",border:"none",fontSize:"22px",color:"#999",cursor:"pointer",lineHeight:1,padding:"0 4px"}}>{"×"}</button>
@@ -6073,9 +6126,9 @@ export default function TheList() {
             </div>
           </div>
 
-          <div style={{padding:"10px 16px 14px",borderTop:"1px solid #ececea",flexShrink:0}}>
-            <button onClick={function(){ if (shareDirty) commitShareSave(); }} disabled={!shareDirty} title={shareDirty?"Save everything in the days below (syncs across your devices)":"Everything you're seeing is already saved"} style={{width:"100%",padding:"9px",marginBottom:"8px",background:shareDirty?"#fff":"#eef4ef",border:shareDirty?"1px solid #2e7d46":"1px solid #cfe3d4",borderRadius:"8px",color:shareDirty?"#2e7d46":"#5a8a68",cursor:shareDirty?"pointer":"default",fontFamily:"inherit",fontSize:"13px",fontWeight:"bold"}}>{shareDirty?"Save":"Saved ✓"}</button>
-            <button onClick={doShareCopy} style={{width:"100%",padding:"12px",background:shareCopied?"#246b3a":"#2e7d46",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",fontWeight:"bold"}}>{shareCopied?"Copied to clipboard ✓":"Copy to clipboard"}</button>
+          <div style={{padding:"10px 16px 14px",borderTop:"1px solid #ececea",flexShrink:0,display:"flex",gap:"8px",alignItems:"stretch"}}>
+            <button onClick={function(){ if (shareDirty) commitShareSave(); }} disabled={!shareDirty} title={shareDirty?"Save everything in the days below (syncs across your devices)":"Everything you're seeing is already saved"} style={{flex:"0 0 auto",padding:"9px 18px",background:shareDirty?"#fff":"#eef4ef",border:shareDirty?"1px solid #2e7d46":"1px solid #cfe3d4",borderRadius:"8px",color:shareDirty?"#2e7d46":"#5a8a68",cursor:shareDirty?"pointer":"default",fontFamily:"inherit",fontSize:"13px",fontWeight:"bold",whiteSpace:"nowrap"}}>{shareDirty?"Save":"Saved ✓"}</button>
+            <button onClick={doShareCopy} style={{flex:"1 1 auto",padding:"12px",background:shareCopied?"#246b3a":"#2e7d46",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",fontWeight:"bold"}}>{shareCopied?"Copied to clipboard ✓":"Copy to clipboard"}</button>
           </div>
 
           {shareSaveConfirm && (
@@ -6104,6 +6157,8 @@ export default function TheList() {
               <span style={{fontSize:"10px",letterSpacing:"0.04em",color:"#bbb",fontFamily:"Georgia,serif"}}>{(function(){ var n=0; var sk=Object.keys(schedules); for(var ii=0;ii<sk.length;ii++){ var arr=schedules[sk[ii]]||[]; for(var jj=0;jj<arr.length;jj++){ var ss=arr[jj]; if(ss&&ss.name&&!ss.blocked) n++; } } return n+" on the list"; })()}</span>
             </div>
             <button onClick={openShareSheet} style={{width:"100%",padding:"11px",marginBottom:"10px",background:"#2e7d46",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",letterSpacing:"0.04em",fontWeight:"bold"}}>Share openings</button>
+            {/* v67: quick-messages entry point for iPhone (the header button only exists on iPad). Opens the same Messages popup and closes the menu. B3. */}
+            <button onClick={function(){ setQuickMsgModal(true); setShowHistory(false); }} style={{width:"100%",padding:"11px",marginBottom:"10px",background:"#fff",border:"1px solid #2e7d46",borderRadius:"6px",color:"#2e7d46",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",letterSpacing:"0.04em",fontWeight:"bold"}}>Quick messages</button>
             <div style={{display:"flex",gap:"8px",marginBottom:"8px"}}>
               <button onClick={exportData} style={{flex:1,padding:"8px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#666",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.05em"}}>Export backup</button>
               <label style={{flex:1,padding:"8px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#666",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.05em",textAlign:"center",display:"flex",alignItems:"center",justifyContent:"center"}}>
