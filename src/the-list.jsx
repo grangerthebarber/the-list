@@ -801,7 +801,15 @@ export default function TheList() {
   const dragLongPress = useRef(null);
   // v70: fires a short beat after a still single-name hold to open the profile
   // without needing to lift the finger. Cancelled the instant a drag starts.
+  // v75: RE-ARMED (snappy) at Granger's request. The v70 breakage came from
+  // opening the profile while the live drag was still armed under it; v75 routes
+  // both the timer AND the still-release through one teardown helper that fully
+  // dismantles the drag first, so the modal never opens over a live gesture.
   const profileHoldTimer = useRef(null);
+  // v75: sentinel so the snappy auto-open and the release-open can't BOTH fire
+  // for a single gesture. Whichever opens the profile first flips this; it is
+  // reset to false each time a fresh hold arms (see the live-drag effect).
+  const profileHoldFired = useRef(false);
   const editingRef = useRef(null);
   const editValuesRef = useRef(editValues);
   editValuesRef.current = editValues;
@@ -4428,6 +4436,25 @@ export default function TheList() {
     dragPointerId.current = null;
   };
 
+  // v75: single source of truth for "a still single-name hold opened the profile".
+  // Called from TWO places — the snappy auto-open timer (finger still down) and the
+  // still-release path in onEnd (finger lifted without moving). Both must dismantle
+  // the live drag IDENTICALLY before the profile appears, which is what v70 failed to
+  // do. The profileHoldFired sentinel makes it idempotent: whichever path runs first
+  // opens the profile and tears down; a second call for the same gesture no-ops.
+  const openHeldProfileNow = function() {
+    if (profileHoldTimer.current) { clearTimeout(profileHoldTimer.current); profileHoldTimer.current = null; }
+    if (profileHoldFired.current) return;
+    profileHoldFired.current = true;
+    var ds = dragStateRef.current;
+    var heldName = (ds && !ds.multi && ds.clients && ds.clients[0]) ? ds.clients[0].name : null;
+    releaseDragPointer();
+    setIsLiveDragging(false); dragLiftedRef.current = false; setDragLifted(false);
+    dragOverRef.current = null; setDragOverKey(null);
+    setDragState(null);
+    if (heldName) openClientProfile(heldName);
+  };
+
   const startDragLongPress = function(dateKey, idx, touchX, touchY, isTouch) {
     if (dragLongPress.current) { clearTimeout(dragLongPress.current); dragLongPress.current = null; }
     dragTouchStart.current = {x: touchX||0, y: touchY||0};
@@ -4489,27 +4516,40 @@ export default function TheList() {
       var clients = [{name:slot.name,price:slot.price,recurWeeks:slot.recurWeeks,originalTime:slot.time,originalDateKey:dateKey,originalIdx:idx}];
       setDragState({clients,sourceKey:dateKey+"-"+idx,multi:false});
       if (isTouch) {
-        // v74: SILENT ARM. A 500ms hold no longer lifts the chip. It arms the drag
-        // (dragState was set just above, pointer gets captured, and the live-drag effect
-        // attaches its move/end listeners) but stays visually silent — no chip, no lock
-        // sound — until the finger actually MOVES. onMove lifts the chip and plays the
-        // lock sound on the first >10px of movement; onEnd, seeing no movement, opens the
-        // client profile instead. This is the v70 feel Granger asked for, MINUS the 300ms
-        // finger-still-down auto-open that actually broke v70 (that profileHoldTimer stays
-        // disabled). The source-row fade is now also gated on dragLifted in the row render,
-        // so nothing greys out on the bare hold.
+        // v74: SILENT ARM. A 250ms hold (v75: was 500ms) no longer lifts the chip. It
+        // arms the drag (dragState was set just above, pointer gets captured, and the
+        // live-drag effect attaches its move/end listeners) but stays visually silent —
+        // no chip, no lock sound — until the finger actually MOVES. onMove lifts the chip
+        // and plays the lock sound on the first >10px of movement.
+        // v75: SNAPPY AUTO-OPEN re-armed at Granger's request. After the arm, if the
+        // finger stays still (no >10px move) for the dwell below, profileHoldTimer opens
+        // the client profile WITHOUT a release — "opens while my finger's still down."
+        // A real drag moves first, and onMove cancels this timer, so drag still wins. A
+        // still RELEASE before the timer fires still opens the profile via onEnd. Both
+        // paths run through openHeldProfileNow, which tears the live drag fully down
+        // BEFORE the modal shows — the clean teardown v70 lacked (v70 opened over a still
+        // armed drag, which is what broke it). The source-row fade stays gated on
+        // dragLifted, so nothing greys out on the bare hold.
         // v72 immediate-pickup lever kept commented for a one-line revert if ever needed:
         //   dragLiftedRef.current = true; setDragLifted(true); playSound("lock");
         dragPosRef.current = {x:startX, y:startY};
         dragOverRef.current = null; setDragOverKey(null);
         setIsLiveDragging(true);
         captureDragPointer();
+        // --- Snappy auto-open dwell. THIS number is the tunable dial: lower = snappier
+        // but a slow-to-start drag can pop the profile; higher = drag-safer, slower open.
+        if (profileHoldTimer.current) { clearTimeout(profileHoldTimer.current); profileHoldTimer.current = null; }
+        profileHoldTimer.current = setTimeout(function() {
+          profileHoldTimer.current = null;
+          if (dragMovedRef.current) return; // a real drag already began — leave it alone
+          openHeldProfileNow();
+        }, 200); // v75 snappy dwell (ms) — adjust this one number to tune the feel
       } else {
         // Mouse / desktop fallback: open the date picker.
         setDragCalOpen(true); setDragCalMonth(new Date()); setDragCalHover(true);
         playSound("lock");
       }
-    }, 500);
+    }, 250); // v75: arm delay halved (was 500ms) — the "recognizes I'm holding" beat
   };
   const cancelDragLongPress = function() {
     if (dragLongPress.current) { clearTimeout(dragLongPress.current); dragLongPress.current = null; }
@@ -4742,6 +4782,7 @@ export default function TheList() {
     // A fresh live drag starts "not yet moved": a still hold+release opens the
     // profile; real finger movement past the threshold commits to a reschedule.
     dragMovedRef.current = false;
+    profileHoldFired.current = false; // v75: re-arm the snappy-open sentinel per drag
     dragStartPosRef.current = {x: dragPosRef.current.x, y: dragPosRef.current.y};
     if (dragChipRef.current) {
       dragChipRef.current.style.transform = dragChipTransform(dragPosRef.current.x, dragPosRef.current.y);
@@ -4816,14 +4857,11 @@ export default function TheList() {
       var py = (e.clientY!=null) ? e.clientY : (dragPosRef.current ? dragPosRef.current.y : null);
       // Held and let go without dragging: treat as "open this person's profile",
       // not a move. (Single pickup only — a multi/group hold just cancels cleanly.)
+      // v75: goes through the shared openHeldProfileNow so a still RELEASE and the
+      // snappy auto-open tear the drag down identically — and the sentinel inside
+      // makes this a no-op if the timer already opened the profile a beat earlier.
       if (!dragMovedRef.current) {
-        if (profileHoldTimer.current) { clearTimeout(profileHoldTimer.current); profileHoldTimer.current = null; }
-        var heldName = (ds && !ds.multi && ds.clients && ds.clients[0]) ? ds.clients[0].name : null;
-        releaseDragPointer();
-        setIsLiveDragging(false); dragLiftedRef.current = false; setDragLifted(false);
-        dragOverRef.current = null; setDragOverKey(null);
-        setDragState(null);
-        if (heldName) openClientProfile(heldName);
+        openHeldProfileNow();
         return;
       }
       var landed = false;
@@ -5154,7 +5192,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v74</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v75</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
