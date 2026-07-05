@@ -3069,11 +3069,16 @@ export default function TheList() {
   // Quick messages: copy the BODY (not the title), toggle a brief "Copied ✓" on that row.
   const copyQuickMsg = function(id, body) {
     copyPlainText(body || "");
-    setQuickMsgCopiedId(id);
-    if (quickMsgCopyTimer.current) clearTimeout(quickMsgCopyTimer.current);
-    // v67: flash the green "Copied" tick briefly, then auto-close the popup so Granger
-    // lands back in Messages ready to paste (B3).
-    quickMsgCopyTimer.current = setTimeout(function(){ setQuickMsgCopiedId(null); setQuickMsgModal(false); setQuickMsgOpenId(null); }, 700);
+    if (quickMsgCopyTimer.current) { clearTimeout(quickMsgCopyTimer.current); quickMsgCopyTimer.current = null; }
+    // v76: close the popup the INSTANT the body is copied — no "Copied ✓" dwell — so
+    // Granger drops straight back into Messages ready to paste. Applies to iPhone and
+    // iPad alike. The prior v67 700ms confirm-then-close is kept commented as a
+    // one-line revert lever:
+    //   setQuickMsgCopiedId(id);
+    //   quickMsgCopyTimer.current = setTimeout(function(){ setQuickMsgCopiedId(null); setQuickMsgModal(false); setQuickMsgOpenId(null); }, 700);
+    setQuickMsgCopiedId(null);
+    setQuickMsgModal(false);
+    setQuickMsgOpenId(null);
   };
   const updateQuickMsg = function(id, field, value) {
     setQuickMsgs(function(prev){
@@ -4452,6 +4457,12 @@ export default function TheList() {
     setIsLiveDragging(false); dragLiftedRef.current = false; setDragLifted(false);
     dragOverRef.current = null; setDragOverKey(null);
     setDragState(null);
+    // v76: the snappy auto-open fires with the finger STILL down, so iOS was treating
+    // the continued press as a text-selection gesture and highlighting whatever profile
+    // word landed under the finger. The profile card is now userSelect:none (nothing to
+    // latch onto); this clears any range that already formed during the hold, as
+    // insurance for both the auto-open and the still-release paths.
+    try { var _sel = window.getSelection && window.getSelection(); if (_sel && _sel.removeAllRanges) _sel.removeAllRanges(); } catch(e) {}
     if (heldName) openClientProfile(heldName);
   };
 
@@ -5192,7 +5203,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v75</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v76</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -5563,7 +5574,7 @@ export default function TheList() {
 
       {clientProfile && (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={function(){ setClientProfile(null); }}>
-          <div style={{background:"#ffffff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"28px 28px 24px",width:"min(420px,92vw)",maxHeight:"82vh",display:"flex",flexDirection:"column"}} onClick={function(e){ e.stopPropagation(); }}>
+          <div style={{background:"#ffffff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"28px 28px 24px",width:"min(420px,92vw)",maxHeight:"82vh",display:"flex",flexDirection:"column",userSelect:"none",WebkitUserSelect:"none"}} onClick={function(e){ e.stopPropagation(); }}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"6px"}}>
               <div style={{flex:1,minWidth:0}}>
                 <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#aaa",marginBottom:"4px"}}>Client Profile</div>
@@ -5571,7 +5582,7 @@ export default function TheList() {
                   <div style={{display:"flex",gap:"6px",alignItems:"center",flexWrap:"wrap"}}>
                     <input autoFocus value={renameValue} onChange={function(e){ setRenameValue(e.target.value); }}
                       onKeyDown={function(e){ if(e.key==="Enter"){ renameClient(clientProfile.name, renameValue); setRenamingProfile(false); } else if(e.key==="Escape"){ setRenamingProfile(false); } }}
-                      style={{...inputStyle,fontSize:"18px",flex:"1 1 140px",minWidth:0}}/>
+                      style={{...inputStyle,fontSize:"18px",flex:"1 1 140px",minWidth:0,userSelect:"text",WebkitUserSelect:"text"}}/>
                     <button onClick={function(){ renameClient(clientProfile.name, renameValue); setRenamingProfile(false); }} style={{padding:"7px 12px",background:"#2a6a2a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",flexShrink:0}}>Save</button>
                     <button onClick={function(){ setRenamingProfile(false); }} style={{padding:"7px 12px",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"8px",color:"#777",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",flexShrink:0}}>Cancel</button>
                   </div>
@@ -5603,7 +5614,7 @@ export default function TheList() {
             <div style={{display:"flex",gap:"6px",alignItems:"center",marginBottom:"14px"}}>
               <input type="tel" inputMode="tel" autoComplete="off" value={clientProfile.phone||""} placeholder="Phone number"
                 onChange={function(e){ var v=e.target.value; setClientProfile(function(p){ return p?{...p,phone:v}:p; }); setClientPhone(clientProfile.name, v); }}
-                style={{flex:1,padding:"8px 10px",border:"1px solid #d8d8d6",borderRadius:"8px",fontFamily:"inherit",fontSize:"13px",color:"#1a1a1a",background:"#fcfcfb",minWidth:0}} />
+                style={{flex:1,padding:"8px 10px",border:"1px solid #d8d8d6",borderRadius:"8px",fontFamily:"inherit",fontSize:"13px",color:"#1a1a1a",background:"#fcfcfb",minWidth:0,userSelect:"text",WebkitUserSelect:"text"}} />
               {(clientProfile.phone||"").replace(/[^0-9+]/g,"")?<button onClick={function(){ window.location.href="sms:"+(clientProfile.phone||"").replace(/[^0-9+]/g,""); }} style={{padding:"8px 12px",background:"#2a6a2a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",flexShrink:0}}>Message</button>:null}
               {(clientProfile.phone||"").replace(/[^0-9+]/g,"")?<button onClick={function(){ window.location.href="tel:"+(clientProfile.phone||"").replace(/[^0-9+]/g,""); }} style={{padding:"8px 12px",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"8px",color:"#555",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",flexShrink:0}}>Call</button>:null}
             </div>
@@ -6226,9 +6237,16 @@ export default function TheList() {
               <div style={{fontSize:"11px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#888"}}>Change History</div>
               <span style={{fontSize:"10px",letterSpacing:"0.04em",color:"#bbb",fontFamily:"Georgia,serif"}}>{(function(){ var n=0; var _tdk=toDateKey(new Date()); var sk=Object.keys(schedules); for(var ii=0;ii<sk.length;ii++){ if(sk[ii]<_tdk) continue; var arr=schedules[sk[ii]]||[]; for(var jj=0;jj<arr.length;jj++){ var ss=arr[jj]; if(ss&&ss.name&&!ss.blocked&&!ss.done) n++; } } return n+" on the list"; })()}</span>
             </div>
-            <button onClick={openShareSheet} style={{width:"100%",padding:"11px",marginBottom:"10px",background:"#2e7d46",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",letterSpacing:"0.04em",fontWeight:"bold"}}>Share openings</button>
-            {/* v67: quick-messages entry point for iPhone (the header button only exists on iPad). Opens the same Messages popup and closes the menu. B3. */}
-            <button onClick={function(){ setQuickMsgModal(true); setShowHistory(false); }} style={{width:"100%",padding:"11px",marginBottom:"10px",background:"#fff",border:"1px solid #2e7d46",borderRadius:"6px",color:"#2e7d46",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",letterSpacing:"0.04em",fontWeight:"bold"}}>Quick messages</button>
+            {/* v76: Share openings + Quick messages live in this drawer ONLY on iPhone,
+                where the phone header has no room for them. On iPad both already sit in
+                the header (openShareSheet / setQuickMsgModal buttons), so gating on
+                isPhone removes the duplicates from the iPad Change History drawer. */}
+            {isPhone && (
+              <button onClick={openShareSheet} style={{width:"100%",padding:"11px",marginBottom:"10px",background:"#2e7d46",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",letterSpacing:"0.04em",fontWeight:"bold"}}>Share openings</button>
+            )}
+            {isPhone && (
+              <button onClick={function(){ setQuickMsgModal(true); setShowHistory(false); }} style={{width:"100%",padding:"11px",marginBottom:"10px",background:"#fff",border:"1px solid #2e7d46",borderRadius:"6px",color:"#2e7d46",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",letterSpacing:"0.04em",fontWeight:"bold"}}>Quick messages</button>
+            )}
             <div style={{display:"flex",gap:"8px",marginBottom:"8px"}}>
               <button onClick={exportData} style={{flex:1,padding:"8px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#666",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.05em"}}>Export backup</button>
               <label style={{flex:1,padding:"8px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#666",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.05em",textAlign:"center",display:"flex",alignItems:"center",justifyContent:"center"}}>
