@@ -1294,7 +1294,7 @@ export default function TheList() {
     var displayEntry = overrideType ? {...entry, type:overrideType} : entry;
     setBannerSwipeY(0);
     setBanner(displayEntry);
-    bannerTimer.current = setTimeout(function(){ setBanner(null); }, 10000);
+    bannerTimer.current = setTimeout(function(){ setBanner(null); }, 8000);
   };
   // Dismiss helper shared by the swipe gesture and any programmatic close.
   const dismissBanner = function() {
@@ -1306,7 +1306,7 @@ export default function TheList() {
   // Restart the standard auto-dismiss countdown (used when a banner tap keeps it up).
   const restartBannerTimer = function() {
     if (bannerTimer.current) clearTimeout(bannerTimer.current);
-    bannerTimer.current = setTimeout(function(){ setBanner(null); }, 10000);
+    bannerTimer.current = setTimeout(function(){ setBanner(null); }, 8000);
   };
   // Pulse the given spots ([{dateKey,time},...]) in the banner family's color, then clear.
   const flashSpots = function(type, targets) {
@@ -1367,7 +1367,7 @@ export default function TheList() {
     var clearSoon = function() {
       if (!bannerRef.current) return;
       if (bannerTimer.current) clearTimeout(bannerTimer.current);
-      bannerTimer.current = setTimeout(function(){ setBanner(null); }, 10000);
+      bannerTimer.current = setTimeout(function(){ setBanner(null); }, 8000);
     };
     var onVis = function() { if (document.visibilityState === "visible") clearSoon(); };
     document.addEventListener("visibilitychange", onVis);
@@ -1478,9 +1478,13 @@ export default function TheList() {
 
   // #11: flash a just-emptied slot red for 8 seconds so a cancel is visible no matter
   // how it happened (swipe-delete, name cleared by editing, or undone).
-  var flashRemoved = function(dateKey, idx) {
+  var flashRemoved = function(dateKey, idx, name) {
     var fk = dateKey + "-" + idx;
-    setRecentlyRemoved(function(r){ var n={...r}; n[fk]=true; return n; });
+    // v72: store the vacated NAME (falls back to boolean true when a caller has none)
+    // so the red glow can show whose spot this was. All consumers only test truthiness,
+    // so a name string behaves exactly like the old true value.
+    var stamp = (name && String(name)) || true;
+    setRecentlyRemoved(function(r){ var n={...r}; n[fk]=stamp; return n; });
     setTimeout(function(){ setRecentlyRemoved(function(r){ var n={...r}; delete n[fk]; return n; }); }, 8000);
   };
 
@@ -1499,12 +1503,12 @@ export default function TheList() {
   // the emptied spot -- we skip red there rather than redden the wrong row).
   // Indices are re-resolved from the FINAL arrays by time, so a same-day collapse
   // that shifts indices can't misplace either color.
-  var flashMovePair = function(srcDK, srcArr, vacTime, vacShared, tgtDK, tgtArr, landTime) {
+  var flashMovePair = function(srcDK, srcArr, vacTime, vacShared, tgtDK, tgtArr, landTime, vacName) {
     var li = findSlotIdxByTime(tgtArr, landTime);
     if (li >= 0) flashPlaced(tgtDK, li);
     if (!vacShared && vacTime) {
       var vi = findSlotIdxByTime(srcArr, vacTime);
-      if (vi >= 0 && !srcArr[vi].name) flashRemoved(srcDK, vi);
+      if (vi >= 0 && !srcArr[vi].name) flashRemoved(srcDK, vi, vacName);
     }
   };
 
@@ -1536,7 +1540,7 @@ export default function TheList() {
       pushUndo(snapshot);
       slots[idx] = {...cur,name:"",price:"",done:false,recurWeeks:null,isException:false,blocked:false,blockLabel:"",note:""};
       setSlots(dk, slots);
-      flashRemoved(dk, idx);
+      flashRemoved(dk, idx, entry.name);
       showBanner({type:"undo",name:entry.name,time:entry.time,dateKey:dk});
     } else if (entry.type==="removed"||entry.type==="slot_removed") {
       // expected: slot is empty now. Restore the name. If occupied by someone else, conflict.
@@ -1822,7 +1826,7 @@ export default function TheList() {
       if (isNameTransition) { writeSlot.recurWeeks = null; writeSlot.isException = false; }
       slots[idx] = writeSlot;
       setSlots(dateKey,slots);
-      if (prev.name&&!newName) { addHistoryEntry({type:"removed",time:prev.time,name:prev.name,dateKey}); flashRemoved(dateKey,idx); }
+      if (prev.name&&!newName) { addHistoryEntry({type:"removed",time:prev.time,name:prev.name,dateKey}); flashRemoved(dateKey,idx,prev.name); }
       else if (!prev.name&&newName) {
         addHistoryEntry({type:"added",time:slots[idx].time,name:newName,price:newPrice,dateKey});
         setClientMemory(function(mem) {
@@ -3979,7 +3983,7 @@ export default function TheList() {
           var sVacShared=false; for (var svi=0; svi<tgt.length; svi++){ if (svi!==m.idx && tgt[svi] && tgt[svi].time===sVacTime) { sVacShared=true; break; } }
           tgt=vacateSlotCollapsing(tgt,m.idx);
           setSlots(m.targetDateKey,tgt);
-          flashMovePair(m.targetDateKey, tgt, sVacTime, sVacShared, m.targetDateKey, tgt, tslot.time);
+          flashMovePair(m.targetDateKey, tgt, sVacTime, sVacShared, m.targetDateKey, tgt, tslot.time, m.name);
         } else {
           setSlots(m.targetDateKey,tgt);
           var src=[...getSlots(m.dateKey)];
@@ -3987,7 +3991,7 @@ export default function TheList() {
           var sVacSharedX=false; for (var sxi=0; sxi<src.length; sxi++){ if (sxi!==m.idx && src[sxi] && src[sxi].time===sVacTimeX) { sVacSharedX=true; break; } }
           src=vacateSlotCollapsing(src,m.idx);
           setSlots(m.dateKey,src);
-          flashMovePair(m.dateKey, src, sVacTimeX, sVacSharedX, m.targetDateKey, tgt, tslot.time);
+          flashMovePair(m.dateKey, src, sVacTimeX, sVacSharedX, m.targetDateKey, tgt, tslot.time, m.name);
         }
         addHistoryEntry({type:"rescheduled",time:m.newTime,name:m.name,price:m.price,dateKey:m.targetDateKey});
       }
@@ -4107,7 +4111,7 @@ export default function TheList() {
       }
       try { if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); } catch(e) {}
       var gk=dateKey+"-"+onlyIdx;
-      setRecentlyRemoved(function(r){ return {...r,[gk]:true}; });
+      setRecentlyRemoved(function(r){ return {...r,[gk]:(s.name||true)}; });
       setTimeout(function(){ setRecentlyRemoved(function(r){ var n={...r}; delete n[gk]; return n; }); },8000);
     } else {
       slots.forEach(function(s,i){ if(s.groupId===groupId&&s.name){ addHistoryEntry({type:"removed",time:s.time,name:s.name,dateKey}); slots[i]={...s,name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null,pending:false,availStatus:null}; } });
@@ -4155,7 +4159,7 @@ export default function TheList() {
     }
     try { if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); } catch(e) {}
     var key=dateKey+"-"+idx;
-    setRecentlyRemoved(function(r){ return {...r,[key]:true}; });
+    setRecentlyRemoved(function(r){ return {...r,[key]:(slot.name||true)}; });
     setTimeout(function(){ setRecentlyRemoved(function(r){ var n={...r}; delete n[key]; return n; }); },8000);
     setConfirmDelete(null);
   };
@@ -4484,28 +4488,18 @@ export default function TheList() {
       var clients = [{name:slot.name,price:slot.price,recurWeeks:slot.recurWeeks,originalTime:slot.time,originalDateKey:dateKey,originalIdx:idx}];
       setDragState({clients,sourceKey:dateKey+"-"+idx,multi:false});
       if (isTouch) {
-        // v70: a plain still-hold should feel like a press that opens the profile,
-        // NOT a pickup. Arm the drag SILENTLY — no chip, no lock sound, no drop
-        // hints (all gated on dragLifted) — and let it "lift" only once the finger
-        // actually moves (see onMove). If the finger just stays put, open the
-        // profile on its own after a short dwell, with no need to let go.
+        // v72: reverted the v70 "silent hold" pickup. Back to the known-good v58 feel —
+        // a 500ms hold picks the chip up IMMEDIATELY (visible chip + lock sound) so a
+        // drag works, and releasing WITHOUT moving opens the profile (handled in onEnd).
+        // The v70 300ms auto-open (open profile with the finger still down) is left OFF:
+        // it broke both drag AND hold-to-open. profileHoldTimer stays declared but dormant
+        // as a fallback lever, and every clearTimeout guard on it is a harmless no-op.
         dragPosRef.current = {x:startX, y:startY};
         dragOverRef.current = null; setDragOverKey(null);
-        dragLiftedRef.current = false; setDragLifted(false);
+        dragLiftedRef.current = true; setDragLifted(true);
         setIsLiveDragging(true);
         captureDragPointer();
-        if (profileHoldTimer.current) { clearTimeout(profileHoldTimer.current); }
-        profileHoldTimer.current = setTimeout(function() {
-          profileHoldTimer.current = null;
-          if (dragMovedRef.current) return;           // finger moved -> it's a drag, not a profile open
-          var pds = dragStateRef.current;
-          var pName = (pds && !pds.multi && pds.clients && pds.clients[0]) ? pds.clients[0].name : null;
-          releaseDragPointer();
-          setIsLiveDragging(false); dragLiftedRef.current = false; setDragLifted(false);
-          dragOverRef.current = null; setDragOverKey(null);
-          setDragState(null);
-          if (pName) openClientProfile(pName);
-        }, 300);
+        playSound("lock");
       } else {
         // Mouse / desktop fallback: open the date picker.
         setDragCalOpen(true); setDragCalMonth(new Date()); setDragCalHover(true);
@@ -4552,7 +4546,7 @@ export default function TheList() {
       var pVacShared = false; for (var pvi=0; pvi<arr.length; pvi++){ if (pvi!==client.originalIdx && arr[pvi] && arr[pvi].time===pVacTime) { pVacShared=true; break; } }
       arr = vacateSlotCollapsing(arr, client.originalIdx);
       setSlots(targetDateKey, arr);
-      flashMovePair(targetDateKey, arr, pVacTime, pVacShared, targetDateKey, arr, targetSlot.time);
+      flashMovePair(targetDateKey, arr, pVacTime, pVacShared, targetDateKey, arr, targetSlot.time, client.name);
     } else {
       var ts = [...getSlots(targetDateKey)];
       ts[targetIdx] = {...ts[targetIdx],name:client.name,price:client.price,recurWeeks:client.recurWeeks,isException:true,done:false};
@@ -4562,7 +4556,7 @@ export default function TheList() {
       var pVacSharedX = false; for (var pxi=0; pxi<os.length; pxi++){ if (pxi!==client.originalIdx && os[pxi] && os[pxi].time===pVacTimeX) { pVacSharedX=true; break; } }
       os = vacateSlotCollapsing(os, client.originalIdx);
       setSlots(client.originalDateKey, os);
-      flashMovePair(client.originalDateKey, os, pVacTimeX, pVacSharedX, targetDateKey, ts, targetSlot.time);
+      flashMovePair(client.originalDateKey, os, pVacTimeX, pVacSharedX, targetDateKey, ts, targetSlot.time, client.name);
     }
     addHistoryEntry({type:"rescheduled",time:targetSlot.time,name:client.name,price:client.price,dateKey:targetDateKey});
     setPlacingClient(null);
@@ -4602,7 +4596,7 @@ export default function TheList() {
         if (remSame.length===1) { var riSame = arr.findIndex(function(x){ return x.groupId===srcGidSame && x.name; }); if (riSame>=0) arr[riSame]={...arr[riSame],groupId:null}; }
       }
       setSlots(targetDateKey, arr);
-      flashMovePair(targetDateKey, arr, vacTimeSame, vacSharedSame, targetDateKey, arr, targetSlot.time);
+      flashMovePair(targetDateKey, arr, vacTimeSame, vacSharedSame, targetDateKey, arr, targetSlot.time, client.name);
     } else {
       var ts = [...getSlots(targetDateKey)];
       ts[targetIdx] = {...ts[targetIdx],name:client.name,price:client.price,recurWeeks:client.recurWeeks,isException:true,done:false,groupId:null};
@@ -4617,7 +4611,7 @@ export default function TheList() {
         if (remX.length===1) { var riX = os.findIndex(function(x){ return x.groupId===srcGidX && x.name; }); if (riX>=0) os[riX]={...os[riX],groupId:null}; }
       }
       setSlots(client.originalDateKey, os);
-      flashMovePair(client.originalDateKey, os, vacTimeX, vacSharedX, targetDateKey, ts, targetSlot.time);
+      flashMovePair(client.originalDateKey, os, vacTimeX, vacSharedX, targetDateKey, ts, targetSlot.time, client.name);
     }
     addHistoryEntry({type:"rescheduled",time:targetSlot.time,name:client.name,price:client.price,dateKey:targetDateKey});
     return true;
@@ -4639,7 +4633,7 @@ export default function TheList() {
     clients.forEach(function(c){
       var od = getDay(c.originalDateKey);
       if (od[c.originalIdx] && od[c.originalIdx].name===c.name) {
-        vacListMulti.push({dateKey:c.originalDateKey, time:od[c.originalIdx].time}); // B1: remember where to paint red
+        vacListMulti.push({dateKey:c.originalDateKey, time:od[c.originalIdx].time, name:c.name}); // B1: remember where to paint red
         od[c.originalIdx] = {...od[c.originalIdx],name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null};
         newSch[c.originalDateKey] = od;
       }
@@ -4664,7 +4658,7 @@ export default function TheList() {
     // re-resolved by time from newSch so nothing mis-lands; the !name guard skips
     // red on any slot a person actually landed back into.
     flashT.forEach(function(ft){ var d=newSch[ft.dateKey]; if(d){ var i=findSlotIdxByTime(d,ft.time); if(i>=0) flashPlaced(ft.dateKey,i); } });
-    vacListMulti.forEach(function(vt){ var d=newSch[vt.dateKey]; if(d){ var i=findSlotIdxByTime(d,vt.time); if(i>=0 && !d[i].name) flashRemoved(vt.dateKey,i); } });
+    vacListMulti.forEach(function(vt){ var d=newSch[vt.dateKey]; if(d){ var i=findSlotIdxByTime(d,vt.time); if(i>=0 && !d[i].name) flashRemoved(vt.dateKey,i,vt.name); } });
     setSelectMode(false); setSelectedSlots({});
     if (conflicts.length > 0) {
       var first = conflicts[0]; var rest = conflicts.slice(1);
@@ -4699,7 +4693,7 @@ export default function TheList() {
     clients.forEach(function(c){
       var od = getDay(c.originalDateKey);
       if (od[c.originalIdx] && od[c.originalIdx].name===c.name) {
-        vacListGroup.push({dateKey:c.originalDateKey, time:od[c.originalIdx].time}); // B1: remember where to paint red
+        vacListGroup.push({dateKey:c.originalDateKey, time:od[c.originalIdx].time, name:c.name}); // B1: remember where to paint red
         od[c.originalIdx] = {...od[c.originalIdx],name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null};
         newSch[c.originalDateKey] = od;
       }
@@ -4724,7 +4718,7 @@ export default function TheList() {
     // B1: green on each landing spot, red on each vacated spot (indices re-resolved
     // by time; red skipped on any slot repacked into on this same day).
     flashT2.forEach(function(ft){ var d=newSch[ft.dateKey]; if(d){ var i=findSlotIdxByTime(d,ft.time); if(i>=0) flashPlaced(ft.dateKey,i); } });
-    vacListGroup.forEach(function(vt){ var d=newSch[vt.dateKey]; if(d){ var i=findSlotIdxByTime(d,vt.time); if(i>=0 && !d[i].name) flashRemoved(vt.dateKey,i); } });
+    vacListGroup.forEach(function(vt){ var d=newSch[vt.dateKey]; if(d){ var i=findSlotIdxByTime(d,vt.time); if(i>=0 && !d[i].name) flashRemoved(vt.dateKey,i,vt.name); } });
     setSelectMode(false); setSelectedSlots({});
     if (conflicts.length > 0) {
       var first = conflicts[0]; var rest = conflicts.slice(1);
@@ -5156,7 +5150,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v71</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v72</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -5768,7 +5762,7 @@ export default function TheList() {
         var dk=acctModal.dateKey;
         var rec=acctFor(dk);
         var th=acctTakehome(rec);
-        var methods=[["cash","Cash"],["square","Square","https://squareup.com/dashboard",null],["venmo","Venmo","sms:86753",null],["applepay","Apple Pay","shoebox://",null]];
+        var methods=[["cash","Cash"],["square","Card"],["venmo","Venmo","sms:86753",null],["applepay","Apple Pay","shoebox://",null]];
         var draftVal=function(key){ return acctAdd[key]!==undefined?acctAdd[key]:(rec[key]?String(rec[key]):""); };
         var liveAmt=function(key){ return acctAdd[key]!==undefined?acctNum(acctAdd[key]):acctNum(rec[key]); };
         var liveTh=liveAmt("cash")+liveAmt("venmo")+liveAmt("applepay")+liveAmt("square");
@@ -6303,7 +6297,7 @@ export default function TheList() {
           <div style={{position:"relative",flex:"1 1 auto",display:"flex",justifyContent:"flex-end",padding:"0 6px",minWidth:0}}>
             {bannerInline && !searchExpanded && (
               <div onClick={function(){ onBannerTap(); }} title="Tap to see the change"
-                style={{marginRight:"auto",maxWidth:"calc(100% - 44px)",display:"flex",alignItems:"center",gap:"8px",background:getBannerColor(banner.type),color:"#fff",padding:"4px 12px",borderRadius:"16px",fontSize:"11px",letterSpacing:"0.03em",cursor:"pointer",boxShadow:"0 1px 6px rgba(0,0,0,0.18)",overflow:"hidden",whiteSpace:"nowrap"}}>
+                style={{marginLeft:"auto",marginRight:"auto",maxWidth:"calc(100% - 44px)",display:"flex",alignItems:"center",gap:"8px",background:getBannerColor(banner.type),color:"#fff",padding:"4px 12px",borderRadius:"16px",fontSize:"11px",letterSpacing:"0.03em",cursor:"pointer",boxShadow:"0 1px 6px rgba(0,0,0,0.18)",overflow:"hidden",whiteSpace:"nowrap"}}>
                 <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",minWidth:0}}>{describeBanner(banner)}</span>
                 {(banner.type!=="undo"&&banner.type!=="redo"&&canUndo)&&(
                   <button onClick={function(e){ e.stopPropagation(); handleUndo(); }} title="Undo" style={{background:"rgba(255,255,255,0.22)",border:"none",borderRadius:"9px",color:"#fff",padding:"3px 7px",cursor:"pointer",fontFamily:"inherit",flexShrink:0,display:"flex",alignItems:"center"}}><UndoIcon size={13} color="#fff"/></button>
@@ -6481,7 +6475,7 @@ export default function TheList() {
                       if (!slot.name) return null;
                     }
                     var isEditing=editingCell&&editingCell.dateKey===dateKey&&editingCell.idx===idx;
-                    var filled=!!slot.name; var wasRemoved=recentlyRemoved[dateKey+"-"+idx]&&!slot.name;
+                    var __rmVal=recentlyRemoved[dateKey+"-"+idx]; var filled=!!slot.name; var wasRemoved=__rmVal&&!slot.name; var rmName=(typeof __rmVal==="string")?__rmVal:"";
                     var wasPlaced=recentlyPlaced[dateKey+"-"+idx]&&!!slot.name; // B1: green glow on a just-landed spot
                     var isSwiped=swipedSlot===(dateKey+"-"+idx); var rowKey=dateKey+"-"+idx;
                     // On a phone, a plain open slot must be a *real* editable field so the
@@ -6585,6 +6579,7 @@ export default function TheList() {
                               onTouchMove={function(e){ if(e.touches[0]) cancelDragLongPressIfMoved(e.touches[0].clientX,e.touches[0].clientY); }}
                               onTouchEnd={function(e){ var wasTap=!!dragLongPress.current; cancelDragLongPress(); handleTouchEnd(e,dateKey,idx); if(wasTap&&filled&&!slot.done&&!isEditing&&!selectMode) startEdit(dateKey,idx); }}
                             >
+                              {wasRemoved&&!isEditing&&rmName&&<div style={{position:"absolute",left:"2px",top:0,bottom:0,display:"flex",alignItems:"center",pointerEvents:"none",fontStyle:"italic",fontFamily:"Georgia,serif",fontSize:isPhone?"16px":"13px",color:"#9a2f22",opacity:0.72,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:"100%",zIndex:1}}>{rmName}</div>}
                               {isOccEdit&&<div style={{position:"absolute",top:"2px",left:"70px",fontSize:"9px",color:"#c0392b"}}>Editing {slot.name}</div>}
                               <input
                                 value={isEditing?editValues.name:(wasRemoved?"":(slot.name||((!filled&&slot.availStatus)?(slot.availStatus==="overtime"?"OVERTIME":"AVAILABLE"):"")))}
