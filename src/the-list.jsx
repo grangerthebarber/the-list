@@ -1199,8 +1199,17 @@ export default function TheList() {
 
   useEffect(function() {
     var handler = function(e) {
-      if ((e.ctrlKey||e.metaKey) && e.key==="z" && !e.shiftKey) { e.preventDefault(); handleUndo(); }
-      if ((e.ctrlKey||e.metaKey) && (e.key==="y" || (e.key==="z" && e.shiftKey))) { e.preventDefault(); handleRedo(); }
+      // v77: while the cursor sits in a LIVE text field (typing/pasting a name into a slot,
+      // editing a price, a note, etc.) Cmd-Z / Cmd-Y belong to the browser's native text
+      // undo — NOT The List's schedule undo. Before this, pasting a name into a slot and
+      // hitting Cmd-Z rolled back the last BOOKING instead of undoing the paste (the
+      // dangerous behavior Granger reported). readOnly / disabled inputs (a slot field that
+      // has lost focus but is still mounted) fall through, so app-undo still fires there —
+      // matching the existing arrow-key guard a few lines down.
+      var aeUR = (typeof document!=="undefined") ? document.activeElement : null;
+      var inLiveField = !!(aeUR && (aeUR.tagName==="INPUT" || aeUR.tagName==="TEXTAREA") && !aeUR.readOnly && !aeUR.disabled);
+      if ((e.ctrlKey||e.metaKey) && e.key==="z" && !e.shiftKey) { if(inLiveField) return; e.preventDefault(); handleUndo(); }
+      if ((e.ctrlKey||e.metaKey) && (e.key==="y" || (e.key==="z" && e.shiftKey))) { if(inLiveField) return; e.preventDefault(); handleRedo(); }
       // While ANY popup is open the arrows belong to the popup, not the schedule behind
       // it — so they never page the day or jump the background to today. (Undo/redo above
       // still work.) Each modal's own handlers take over the arrows from here.
@@ -3399,6 +3408,28 @@ export default function TheList() {
     return "";
   };
 
+  // v77: does this person already have a LATER appointment on the books? Scans every
+  // saved day strictly AFTER the given day for a real (non-blocked) booking under the
+  // same name, short-circuiting on the first hit. Date keys are ISO strings, so the
+  // ">" comparison is a plain lexical date compare (same trick findNextBookingDate uses).
+  // Used only to draw the "next is booked" arrow on NON-recurring rows — recurring people
+  // keep their ↺ + weeks and never consult this.
+  const hasLaterBooking = function(name, afterDateKey) {
+    var lower = (name || "").toLowerCase();
+    if (!lower) return false;
+    var sch = schedulesRef.current || {};
+    var keys = Object.keys(sch);
+    for (var i = 0; i < keys.length; i++) {
+      if (!(keys[i] > afterDateKey)) continue;
+      var slots = sch[keys[i]] || [];
+      for (var j = 0; j < slots.length; j++) {
+        var s = slots[j];
+        if (s && !s.blocked && s.name && s.name.toLowerCase() === lower) return true;
+      }
+    }
+    return false;
+  };
+
   // The names offered in the search dropdown: saved clients whose name contains the
   // typed text, A–Z, capped at 8. Empty text shows nothing (no giant dump).
   const searchMatches = function(text) {
@@ -3407,12 +3438,16 @@ export default function TheList() {
     // #6: the roster is now phone-only, but search should still jump to ANYONE booked
     // on The List, number or not — so pool phoned profiles with everyone on the schedule.
     var seen = {}; var out = [];
-    var consider = function(nm){
+    var push = function(nm){
       if (!nm) return;
       var lo = nm.toLowerCase();
       if (seen[lo]) return;
-      if (lo.indexOf(q) === -1) return;
       seen[lo] = true; out.push(nm);
+    };
+    var consider = function(nm){
+      if (!nm) return;
+      if (nm.toLowerCase().indexOf(q) === -1) return;
+      push(nm);
     };
     var mem = clientMemoryRef.current || [];
     mem.forEach(function(c){ if (c && c.name && c.phone && String(c.phone).trim()) consider(c.name); });
@@ -3421,6 +3456,18 @@ export default function TheList() {
       var day = sch[k] || [];
       for (var i=0;i<day.length;i++) { var s=day[i]; if (s && s.name && !s.blocked) consider(s.name); }
     });
+    // v77: PHONE SEARCH. When the typed query contains digits, also match saved clients
+    // by their phone number (digits-only, substring) regardless of name — so Granger can
+    // type a number into the header search and land on that client. Phone-only hits are
+    // pushed straight through (they bypass the name-substring gate) and de-duped by push.
+    var qDigits = q.replace(/[^0-9]/g, "");
+    if (qDigits.length > 0) {
+      mem.forEach(function(c){
+        if (!c || !c.name || !c.phone) return;
+        var pd = String(c.phone).replace(/[^0-9]/g, "");
+        if (pd.length > 0 && pd.indexOf(qDigits) >= 0) push(c.name);
+      });
+    }
     out.sort(function(a,b){ return a.toLowerCase().localeCompare(b.toLowerCase()); });
     return out.slice(0, 8);
   };
@@ -5203,7 +5250,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v76</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v77</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -6256,7 +6303,13 @@ export default function TheList() {
             </div>
             <button onClick={exportReadable} style={{width:"100%",padding:"8px",marginBottom:"8px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#666",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.05em"}}>Download schedule</button>
             <button onClick={function(){ try { signOut(fbAuth); } catch(e) {} }} style={{width:"100%",padding:"8px",marginBottom:"8px",background:"none",border:"1px solid #e0b0a8",borderRadius:"6px",color:"#b04a3a",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.05em"}}>{authUser?("Sign out ("+authUser.email+")"):"Sign out"}</button>
-            {clientMemory.length>0&&(
+            {/* v77: iPad has the header search bar (now name + phone), so the redundant
+                Saved Clients search is removed from the Change History popup THERE. iPhone
+                has no header search — this block stays its only client search, so it's gated
+                to isPhone (same pattern as Share/Quick-messages above). Deleting a client
+                still works from each client's profile on both devices. To restore on iPad,
+                drop the "isPhone&&". */}
+            {isPhone&&clientMemory.length>0&&(
               <div style={{marginBottom:"20px",marginTop:"16px"}}>
                 <div style={{fontSize:"10px",letterSpacing:"0.15em",textTransform:"uppercase",color:"#aaa",marginBottom:"8px"}}>Saved Clients</div>
                 <div style={{display:"flex",gap:"6px",marginBottom:"8px"}}>
@@ -6608,6 +6661,12 @@ export default function TheList() {
                               style={{width:"18px",height:"18px",borderRadius:"4px",border:isSelected?"1.5px solid #4a7aaa":"1.5px solid #ccc",background:isSelected?"#4a7aaa":"transparent",flexShrink:0,marginRight:"8px",display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer"}}>
                               {isSelected&&<span style={{color:"#fff",fontSize:"11px",lineHeight:1}}>{"✓"}</span>}
                             </div>
+                          ) : slot.blocked ? (
+                          /* v77: blocked spots + lunches can't be checked off, so the empty
+                             circle was just noise Granger didn't want. Drop the circle and
+                             leave a same-size spacer (18px + 10px right margin) so the time
+                             column on blocked rows still lines up with everyone else. */
+                          <div style={{width:"18px",height:"18px",marginRight:"10px",flexShrink:0}}/>
                           ) : (
                           <button
                             onClick={function(){ handleCheckoff(dateKey,idx); }}
@@ -6668,7 +6727,15 @@ export default function TheList() {
                                       <span onClick={function(e){ e.stopPropagation(); if(slot.done){ handleDoneRowTap(dateKey,idx); } else { openClientProfile(slot.name); } }} style={{fontSize:"12px",fontWeight:"500",color:"#4a8a9a",cursor:"pointer",lineHeight:1,letterSpacing:"0.01em"}}>{(slot.recurWeeks===1?"1w":(slot.recurWeeks+"w"))+(slot.isException?"*":"")}</span>
                                       <button onClick={function(e){ e.stopPropagation(); if(slot.done){ handleDoneRowTap(dateKey,idx); return; } if(slot.groupId){var aS=getSlots(dateKey);var gS=aS.map(function(s,i){ return {...s,i}; }).filter(function(s){ return s.groupId===slot.groupId&&s.name; });if(gS.length>1){setGroupRecurModal({dateKey,idx,slot,groupSlots:gS,weeks:null});return;}} setRecurringModal({dateKey,idx,slot}); }} title={slot.done?"Schedule next":"Recurring — tap to manage"} style={{background:"none",border:"none",cursor:"pointer",padding:"0 1px",color:"#4a8a9a",fontSize:"16px",fontWeight:"500",lineHeight:1}}>{"↺"}</button>
                                     </div>
-                                  ):<div style={{width:"50px",flexShrink:0}}/>)}
+                                  ):(hasLaterBooking(slot.name,dateKey)?(
+                                    /* v77: NON-recurring person who already has their next
+                                       appointment on the books. Same arrow, same spot as the
+                                       recurring badge — but NO weeks number beside it, so it
+                                       reads as "next one's booked" without implying a series. */
+                                    <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:"2px",width:"50px",flexShrink:0}}>
+                                      <span title="Next appointment is on the books" style={{color:"#4a8a9a",fontSize:"16px",fontWeight:"500",lineHeight:1,padding:"0 1px"}}>{"↺"}</span>
+                                    </div>
+                                  ):<div style={{width:"50px",flexShrink:0}}/>))}
                                   {!compactIcons&&filled&&(function(){
                                     var digits=getClientPhone(slot.name).replace(/[^0-9+]/g,"");
                                     if (digits) {
