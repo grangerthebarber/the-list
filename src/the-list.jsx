@@ -4812,7 +4812,10 @@ export default function TheList() {
         cursor++;
         placed++;
       } else {
-        conflicts.push(c);
+        // v78: overflow members carry the group's shared gid into the tap-to-place
+        // queue, so when Granger taps them into open slots they RE-JOIN the group
+        // instead of coming out detached.
+        conflicts.push({...c, groupId:gid});
       }
     });
     newSch[targetDateKey] = day;
@@ -4826,13 +4829,34 @@ export default function TheList() {
       var first = conflicts[0]; var rest = conflicts.slice(1);
       setBaseDate(parseDateKey(targetDateKey)); setView(isPhone?"Day":"3-Day");
       setReassignQueue(rest);
-      setReassignMode({client:{name:first.name,price:first.price,recurWeeks:first.recurWeeks},currentDateKey:targetDateKey,remainingConflicts:[],originalDateKey:first.originalDateKey,originalIdx:first.originalIdx});
+      setReassignMode({client:{name:first.name,price:first.price,recurWeeks:first.recurWeeks,groupId:(first.groupId||null)},currentDateKey:targetDateKey,remainingConflicts:[],originalDateKey:first.originalDateKey,originalIdx:first.originalIdx});
     } else {
       var mvNames2 = clients.map(function(c){ return c.name; }).filter(function(n){ return !!n; });
       var mvLabel2 = mvNames2.length<=2 ? mvNames2.join(" & ") : (mvNames2.slice(0,-1).join(", ")+" & "+mvNames2[mvNames2.length-1]);
       showBanner({type:"rescheduled",msg:(mvLabel2||(placed+" appointment"+(placed!==1?"s":"")))+" rescheduled",time:null,dateKey:null,flashTargets:flashT2});
     }
     return true;
+  };
+
+  // v78: Month-view (or calendar-picker) group drop — NEVER auto-place. Granger's
+  // rule: a drag-and-drop reschedule always ends with HIM choosing the time. Open
+  // the target day and hand the whole group to tap-to-place, one open-slot tap per
+  // member in time order. Each queued member carries a shared groupId so the group
+  // lands re-joined as the taps complete. (Select-mode multi drags pass through
+  // here too with gid=null — they place the same way, just un-joined.)
+  const queueGroupTapToPlace = function(targetDateKey, ds) {
+    var clients = ds.clients.filter(function(c){ return c.name; });
+    if (clients.length === 0) return;
+    clients = clients.slice().sort(function(a,b){
+      return timeToAbsMinutes(a.originalTime||a.time) - timeToAbsMinutes(b.originalTime||b.time);
+    });
+    var gid = (ds.group && clients.length > 1) ? newGroupId() : null;
+    var withGid = clients.map(function(c){ return {...c, groupId:gid}; });
+    setSelectMode(false); setSelectedSlots({});
+    setBaseDate(parseDateKey(targetDateKey)); setView(isPhone?"Day":"3-Day");
+    var first = withGid[0]; var rest = withGid.slice(1);
+    setReassignQueue(rest);
+    setReassignMode({client:{name:first.name,price:first.price,recurWeeks:first.recurWeeks,groupId:first.groupId},currentDateKey:targetDateKey,remainingConflicts:[],originalDateKey:first.originalDateKey,originalIdx:first.originalIdx});
   };
 
   useEffect(function() {
@@ -4906,6 +4930,9 @@ export default function TheList() {
       }
       var ds = dragStateRef.current;
       var key = (ds && ds.multi) ? findAnyRowKey(px, py) : findDropKeyNear(px, py);
+      // v78: Month-view glide. No slot row under the finger but a month day cell is —
+      // track it as "M:<dateKey>" so that cell can light up as the drag passes over it.
+      if (!key) { var mdkHover = findMonthDayKey(px, py); if (mdkHover) key = "M:" + mdkHover; }
       if (key !== dragOverRef.current) { dragOverRef.current = key; setDragOverKey(key); }
     };
     var onEnd = function(e) {
@@ -4925,23 +4952,33 @@ export default function TheList() {
       var landed = false;
       if (ds && ds.multi) {
         var anyKey = dragOverRef.current || (px!=null ? findAnyRowKey(px, py) : null);
+        // v78: an "M:" key is a Month-view day cell (from the glide highlight), not a
+        // slot row — peel it off so it routes to the month branch, not the row parser.
+        var monthOverM = (anyKey && anyKey.indexOf("M:")===0) ? anyKey.slice(2) : null;
+        if (monthOverM) anyKey = null;
         var dayKey = dayKeyFromRow(anyKey);
-        if (dayKey) {
-          var allSameDay = ds.clients.every(function(c){ return c.originalDateKey === dayKey; });
-          if (allSameDay && anyKey) {
-            var gp = anyKey.split("-"); var gi = parseInt(gp[gp.length-1]);
-            landed = dropGroupAtSlot(dayKey, gi);
-          } else {
-            landed = dropMultiOnDay(dayKey);
-          }
+        if (dayKey && anyKey) {
+          // v78: dropped on a specific slot row — Granger chose that spot, so pack
+          // the group in starting exactly there, on ANY visible day. (v77 only did
+          // this for same-day drops; cross-day fell into dropMultiOnDay, which
+          // snapped everyone to their original times and detached the joint link.)
+          var gp = anyKey.split("-"); var gi = parseInt(gp[gp.length-1]);
+          landed = dropGroupAtSlot(dayKey, gi);
         }
-        // Dropped on a Month-view day: drop everyone onto that day.
-        if (!landed && px!=null) {
-          var mdkM = findMonthDayKey(px, py);
-          if (mdkM) landed = dropMultiOnDay(mdkM);
+        // Dropped on a Month-view day: never auto-place. Open that day and walk the
+        // whole group through tap-to-place, re-joined as they land.
+        // (v77 called dropMultiOnDay(mdkM) here — kept dormant below as the lever.)
+        if (!landed && (monthOverM || px!=null)) {
+          var mdkM = monthOverM || ((px!=null) ? findMonthDayKey(px, py) : null);
+          if (mdkM) { queueGroupTapToPlace(mdkM, ds); landed = true; }
+          // v77 fallback lever: if (mdkM) landed = dropMultiOnDay(mdkM);
         }
       } else {
         var key = dragOverRef.current;
+        // v78: "M:" keys are Month-view day cells (glide highlight) — not slot rows.
+        // Peel the day off so the month branch below handles it; never row-parse it.
+        var monthOverS = (key && key.indexOf("M:")===0) ? key.slice(2) : null;
+        if (monthOverS) key = null;
         if (!key && px!=null) key = findDropKeyNear(px, py);
         if (key) {
           var parts = key.split("-"); var di = parseInt(parts[parts.length-1]); var dk2 = parts.slice(0,parts.length-1).join("-");
@@ -4949,8 +4986,8 @@ export default function TheList() {
         }
         // Dropped on a Month-view day cell: open that day in Day view and finish
         // the move with one tap-to-place on whatever open slot they choose.
-        if (!landed && px!=null) {
-          var mdk = findMonthDayKey(px, py);
+        if (!landed && (monthOverS || px!=null)) {
+          var mdk = monthOverS || ((px!=null) ? findMonthDayKey(px, py) : null);
           if (mdk) {
             setBaseDate(parseDateKey(mdk)); setView(isPhone?"Day":"3-Day");
             if (ds && ds.clients && ds.clients[0]) setPlacingClient(ds.clients[0]);
@@ -5034,13 +5071,18 @@ export default function TheList() {
 
   const handleDragDrop = function(targetDateKey) {
     if (!dragState) return;
-    var clients = dragState.clients;
+    var dsCal = dragState;
     setDragCalOpen(false); setDragState(null); setDragCalHover(false);
-    setSelectMode(false); setSelectedSlots({});
-    setBaseDate(parseDateKey(targetDateKey)); setView(isPhone?"Day":"3-Day");
-    var first = clients[0]; var rest = clients.slice(1);
-    setReassignQueue(rest);
-    setReassignMode({client:{name:first.name,price:first.price,recurWeeks:first.recurWeeks},currentDateKey:targetDateKey,remainingConflicts:[],originalDateKey:first.originalDateKey,originalIdx:first.originalIdx});
+    // v78: delegate to the shared group-aware queue so a joint group picked from the
+    // calendar keeps its link (shared groupId) as the taps place each member, and
+    // members go in time order. v77 body kept as the fallback lever:
+    //   var clients = dsCal.clients;
+    //   setSelectMode(false); setSelectedSlots({});
+    //   setBaseDate(parseDateKey(targetDateKey)); setView(isPhone?"Day":"3-Day");
+    //   var first = clients[0]; var rest = clients.slice(1);
+    //   setReassignQueue(rest);
+    //   setReassignMode({client:{name:first.name,price:first.price,recurWeeks:first.recurWeeks},currentDateKey:targetDateKey,remainingConflicts:[],originalDateKey:first.originalDateKey,originalIdx:first.originalIdx});
+    queueGroupTapToPlace(targetDateKey, dsCal);
   };
 
   const handleSlotDrop = function(targetDateKey, targetIdx) {
@@ -5072,18 +5114,22 @@ export default function TheList() {
     var slots = [...getSlots(dateKey)]; var slot = slots[idx];
     if (slot.name) return;
     var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))}; pushUndo(snapshot);
-    var ns = [...slots]; ns[idx] = {...slot,name:client.name,price:client.price,recurWeeks:client.recurWeeks,isException:true,done:false};
+    // v78: groupId travels with the queued client (a joint group placed via
+    // tap-to-place re-joins as each member lands); explicitly null for everyone
+    // else so a stale link on the empty slot can never be inherited by accident.
+    var ns = [...slots]; ns[idx] = {...slot,name:client.name,price:client.price,recurWeeks:client.recurWeeks,isException:true,done:false,groupId:(client.groupId||null)};
     setSlots(dateKey, ns); addHistoryEntry({type:"added",time:slot.time,name:client.name,price:client.price,dateKey});
     if (reassignMode.originalDateKey && reassignMode.originalIdx !== undefined) {
       var os = [...getSlots(reassignMode.originalDateKey)]; var os2 = os[reassignMode.originalIdx];
-      os[reassignMode.originalIdx] = {...os2,name:"",price:"",done:false,recurWeeks:null,isException:false};
+      // v78: the vacated slot also drops any old joint link (matches the drag paths).
+      os[reassignMode.originalIdx] = {...os2,name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null};
       setSlots(reassignMode.originalDateKey, os);
       addHistoryEntry({type:"removed",time:os2.time,name:client.name,dateKey:reassignMode.originalDateKey});
     }
     if (reassignQueue.length > 0) {
       var next = reassignQueue[0]; var rest = reassignQueue.slice(1);
       setReassignQueue(rest);
-      setReassignMode({client:{name:next.name,price:next.price,recurWeeks:next.recurWeeks},currentDateKey:dateKey,remainingConflicts:[],originalDateKey:next.originalDateKey,originalIdx:next.originalIdx});
+      setReassignMode({client:{name:next.name,price:next.price,recurWeeks:next.recurWeeks,groupId:(next.groupId||null)},currentDateKey:dateKey,remainingConflicts:[],originalDateKey:next.originalDateKey,originalIdx:next.originalIdx});
     } else {
       setReassignMode(null);
       if (rc.length > 0) setReassignApplyAll({altTime:slot.time,remainingConflicts:rc,client});
@@ -5250,7 +5296,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v77</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v78</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -6478,6 +6524,10 @@ export default function TheList() {
                 var dk=toDateKey(day); var slots=getSlots(dk); var booked=slots.filter(function(s){ return s.name; });
                 var isT=isToday(day); var holiday=getHolidayForDate(dk); var range=getDayTimeRange(dk);
                 var cellBg = outside ? "#f6f6f4" : (isT?"#fffbf0":"#ffffff");
+                // v78: glide highlight — this day lights up while a live drag (single
+                // or group) passes over it, so it's clear where the drop will land.
+                var mOver = isLiveDragging && dragLifted && dragOverKey===("M:"+dk);
+                if (mOver) cellBg = "#e3f3e3";
                 return (
                   <div key={dk} data-monthday={dk}
                     onClick={function(){ setBaseDate(day);setView(isPhone?"Day":"3-Day"); }}
@@ -6485,7 +6535,7 @@ export default function TheList() {
                     onMouseUp={cancelLongPress} onMouseLeave={function(e){ cancelLongPress();e.currentTarget.style.background=cellBg; }}
                     onTouchStart={function(){ longPressTimer.current=setTimeout(function(){ setMonthLongPress({dateKey:dk,day}); },600); }}
                     onTouchEnd={cancelLongPress} onTouchMove={cancelLongPress}
-                    style={{position:"relative",background:cellBg,minHeight:isPhone?"50px":"64px",padding:isPhone?"4px 4px":"7px 8px",cursor:"pointer",borderTop:isT?("2px solid "+TODAY_BLUE):"2px solid transparent",transition:"background 0.1s",userSelect:"none",boxSizing:"border-box",overflow:"hidden",opacity:outside?0.85:1}}
+                    style={{position:"relative",background:cellBg,minHeight:isPhone?"50px":"64px",padding:isPhone?"4px 4px":"7px 8px",cursor:"pointer",borderTop:isT?("2px solid "+TODAY_BLUE):"2px solid transparent",transition:"background 0.1s",userSelect:"none",boxSizing:"border-box",overflow:"hidden",opacity:outside?0.85:1,outline:mOver?"2px solid #5a9a5a":"none",outlineOffset:"-2px"}}
                     onMouseEnter={function(e){ e.currentTarget.style.background=outside?"#efefec":(isT?"#fff8e8":"#f4f4f2"); }}
                   >
                     <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:"6px",marginBottom:"3px"}}>
