@@ -5296,7 +5296,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v78</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v79</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -6775,7 +6775,7 @@ export default function TheList() {
                                   {!compactIcons&&filled&&(slot.recurWeeks?(
                                     <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:"2px",width:"50px",flexShrink:0}}>
                                       <span onClick={function(e){ e.stopPropagation(); if(slot.done){ handleDoneRowTap(dateKey,idx); } else { openClientProfile(slot.name); } }} style={{fontSize:"12px",fontWeight:"500",color:"#4a8a9a",cursor:"pointer",lineHeight:1,letterSpacing:"0.01em"}}>{(slot.recurWeeks===1?"1w":(slot.recurWeeks+"w"))+(slot.isException?"*":"")}</span>
-                                      <button onClick={function(e){ e.stopPropagation(); if(slot.done){ handleDoneRowTap(dateKey,idx); return; } if(slot.groupId){var aS=getSlots(dateKey);var gS=aS.map(function(s,i){ return {...s,i}; }).filter(function(s){ return s.groupId===slot.groupId&&s.name; });if(gS.length>1){setGroupRecurModal({dateKey,idx,slot,groupSlots:gS,weeks:null});return;}} setRecurringModal({dateKey,idx,slot}); }} title={slot.done?"Schedule next":"Recurring — tap to manage"} style={{background:"none",border:"none",cursor:"pointer",padding:"0 1px",color:"#4a8a9a",fontSize:"16px",fontWeight:"500",lineHeight:1}}>{"↺"}</button>
+                                      <button onClick={function(e){ e.stopPropagation(); if(slot.done){ handleDoneRowTap(dateKey,idx); return; } /* v79: recurring arrow now opens the CLIENT PROFILE. The single recurring editor AND the group recurring manager both stay reachable inside the profile via its "Edit or cancel recurring" button, so nothing is lost. Old direct-to-modal routing kept as a revert lever: if(slot.groupId){var aS=getSlots(dateKey);var gS=aS.map(function(s,i){ return {...s,i}; }).filter(function(s){ return s.groupId===slot.groupId&&s.name; });if(gS.length>1){setGroupRecurModal({dateKey,idx,slot,groupSlots:gS,weeks:null});return;}} setRecurringModal({dateKey,idx,slot}); */ openClientProfile(slot.name); }} title={slot.done?"Schedule next":"Recurring — tap for profile"} style={{background:"none",border:"none",cursor:"pointer",padding:"0 1px",color:"#4a8a9a",fontSize:"16px",fontWeight:"500",lineHeight:1}}>{"↺"}</button>
                                     </div>
                                   ):(hasLaterBooking(slot.name,dateKey)?(
                                     /* v77: NON-recurring person who already has their next
@@ -6783,7 +6783,7 @@ export default function TheList() {
                                        recurring badge — but NO weeks number beside it, so it
                                        reads as "next one's booked" without implying a series. */
                                     <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:"2px",width:"50px",flexShrink:0}}>
-                                      <span title="Next appointment is on the books" style={{color:"#4a8a9a",fontSize:"16px",fontWeight:"500",lineHeight:1,padding:"0 1px"}}>{"↺"}</span>
+                                      <span onClick={function(e){ e.stopPropagation(); openClientProfile(slot.name); }} title="Next appointment — tap for profile" style={{color:"#4a8a9a",fontSize:"16px",fontWeight:"500",lineHeight:1,padding:"0 1px",cursor:"pointer"}}>{"↺"}</span>
                                     </div>
                                   ):<div style={{width:"50px",flexShrink:0}}/>))}
                                   {!compactIcons&&filled&&(function(){
