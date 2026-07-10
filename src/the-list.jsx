@@ -353,6 +353,39 @@ function describeBanner(entry) {
   return prefix + name + time + date;
 }
 
+// v82 change-log wording (SPEC LOCKED, display-only): maps a stored history entry to
+// the corrected category word (for the colored chip) and the main-line action phrase.
+// Reads ONLY the stored action type/flags already on the entry — no write-path or
+// engine involvement. See Kickoff "Change-log wording accuracy" for the full table.
+function logEntryWords(entry) {
+  var t = entry ? entry.type : "";
+  var nm = (entry && entry.name) ? entry.name : "";
+  var prev = (entry && entry.prevName) ? entry.prevName : "";
+  var isPencil = !!(entry && entry.bannerType === "penciled");
+  var isLunch = (t === "blocked") && (nm === "Lunch");
+  // A profile-level rename carries no slot: type "edited" with no dateKey and no time.
+  var isProfileRename = (t === "edited") && !(entry && entry.dateKey) && !(entry && entry.time);
+  // A slot name-edit that actually changed the name reads as "replaced <old>". The app
+  // can't tell a typo-fix from a genuine swap, so every real slot name-edit says "replaced."
+  var isSlotSwap = (t === "edited") && !!(entry && entry.dateKey) && !!prev && prev !== nm;
+  var chip, action;
+  if (t === "added") { chip = isPencil ? "penciled in" : "locked in"; action = chip; }
+  else if (t === "removed") { chip = "canceled"; action = chip; }
+  else if (t === "rescheduled") { chip = "rescheduled"; action = chip; }
+  else if (t === "checkoff") { chip = "checked off"; action = chip; }
+  else if (t === "blocked") { chip = isLunch ? "lunch" : "blocked"; action = chip; }
+  else if (t === "unblocked") { chip = "unblocked"; action = chip; }
+  else if (t === "recurring_set") { chip = "set recurring" + ((entry && entry.weeks) ? (" (" + entry.weeks + "w)") : ""); action = chip; }
+  else if (t === "slot_added") { chip = "slot added"; action = chip; }
+  else if (t === "slot_removed") { chip = "slot removed"; action = chip; }
+  else if (isProfileRename) { chip = "renamed"; action = "renamed"; }
+  else if (isSlotSwap) { chip = "replaced"; action = "replaced " + prev; }
+  else if (t === "edited") { chip = "edited"; action = "edited"; }
+  else if (t === "backup") { chip = "backup"; action = "backup"; }
+  else { chip = "changed"; action = "changed"; }
+  return {chip: chip, action: action, isProfileRename: isProfileRename};
+}
+
 const VIEWS = ["Day","3-Day","Wknd","Week","Month"];
 
 // When the iPad is in Split View and our app is at least this wide (CSS px), the
@@ -616,6 +649,7 @@ export default function TheList() {
   const [noteRepeat, setNoteRepeat] = useState(0); // v63: 0 once | 1 weekly | 2/3/4 every N weeks (selected interval in the day-note modal)
   const [noteWasRepeat, setNoteWasRepeat] = useState(false); // v63: true if the opened day-note is governed by a repeat rule
   const [noteScopeAsk, setNoteScopeAsk] = useState(null); // v63: null | "save" | "clear" — pending action awaiting "this day / all repeats"
+  const [wlInput, setWlInput] = useState(""); // v83: day-note standby list — text of the pending (not-yet-added) new entry
   const [dayNotes, setDayNotes] = useState(function() { return loadFromStorage("tl_daynotes", {}); });
   // #13 accounting: per-day takings keyed by dateKey -> {cash,venmo,applepay,square,services,hours}.
   // Rides the same Firebase sync as the other data fields (added as the LAST key in the
@@ -1191,6 +1225,7 @@ export default function TheList() {
   // afterward. The textarea's autoFocus is kept as the fallback focus lever.
   useEffect(function(){
     if (!noteModal) return;
+    setWlInput(""); // v83: start the standby-list add field empty on every open
     setTimeout(function(){
       var el = document.querySelector("[data-noteinput='1']");
       if (el) { el.focus(); var L = (el.value || "").length; try { el.setSelectionRange(L, L); } catch(e) {} }
@@ -1597,6 +1632,20 @@ export default function TheList() {
   };
 
   var handleEntryUndo = function(entry) { performEntryUndo(entry, false); };
+  // v82: tapping a change-log ROW jumps the schedule to that change (the log used to be
+  // undo-only). Closes the panel, moves to the entry's day (leaving Month/Wknd for a
+  // day view so the row is reachable), and gives the spot a neutral flash. The row's
+  // Undo button stops propagation so it still only undoes.
+  var jumpToLogEntry = function(entry) {
+    if (!entry || !entry.dateKey) return;
+    setShowHistory(false);
+    setBaseDate(parseDateKey(entry.dateKey));
+    if (viewRef.current === "Month" || viewRef.current === "Wknd") setView(isPhone ? "Day" : "3-Day");
+    if (entry.time) {
+      var dk = entry.dateKey; var tm = entry.time;
+      setTimeout(function(){ flashSpots("neutral", [{dateKey:dk, time:tm}]); }, 80);
+    }
+  };
 
   const getDayTimeRange = function(dateKey) {
     var slots = getSlots(dateKey);
@@ -3524,6 +3573,32 @@ export default function TheList() {
     var e=clientMemoryRef.current.find(function(c){ return c.name && c.name.toLowerCase()===lower; });
     return (e && e.phone) ? e.phone : "";
   };
+  // #6: the price to show beside a name in the header search dropdown. Prefer the
+  // client's saved default price on their memory card; if that's blank (e.g. a
+  // schedule-only name with no phoned profile), fall back to the price on their
+  // nearest UPCOMING booking, then their most recent PAST one. Read-only — this only
+  // looks things up, it never writes anything.
+  const getClientPrice = function(name) {
+    var lower=(name||"").toLowerCase();
+    if (!lower) return "";
+    var e=clientMemoryRef.current.find(function(c){ return c.name && c.name.toLowerCase()===lower; });
+    if (e && e.price && String(e.price).trim()) return e.price;
+    var sch=schedulesRef.current || {};
+    var keys=Object.keys(sch).sort();
+    var today=toDateKey(new Date());
+    var future=""; var past="";
+    for (var ki=0; ki<keys.length; ki++) {
+      var day=sch[keys[ki]] || [];
+      for (var si=0; si<day.length; si++) {
+        var s=day[si];
+        if (s && s.name && s.name.toLowerCase()===lower && !s.blocked && s.price && String(s.price).trim()) {
+          if (keys[ki] >= today) { if (!future) future=s.price; }
+          else { past=s.price; }
+        }
+      }
+    }
+    return future || past || "";
+  };
   const setClientPhone = function(name, phone) {
     if (!name) return;
     setClientMemory(function(mem) {
@@ -3730,7 +3805,39 @@ export default function TheList() {
       return n;
     });
   };
-  var dnCloseNoteModal = function(){ setNoteModal(null); setNoteDraft(""); setNoteKind(null); setNoteRepeat(0); setNoteWasRepeat(false); setNoteScopeAsk(null); };
+  // --- v83 per-day STANDBY / cancellation waitlist -----------------------------
+  // Manual line-item list of clients wanting an opening on a given day. Entries are
+  // added by hand (no auto-capture — the removal/recurring paths are untouched).
+  // Stored INSIDE the already-synced dayNotes object under a reserved "@wl:" key
+  // prefix — the same container trick the repeat rules use ("@rpt:") — so the
+  // Firebase payload shape is unchanged and it syncs across devices for free.
+  // resolveDayNote ignores every key that isn't an "@rpt:" rule, so these entries
+  // never collide with the day-note text. Non-repeating by design (date-specific).
+  // A dayNotes value under "@wl:"+dk is an array of {id, name}.
+  var WL_PREFIX = "@wl:";
+  var wlGet = function(dk){
+    var rec = dayNotes[WL_PREFIX+dk];
+    return (rec && rec.length) ? rec : [];
+  };
+  var wlAdd = function(dk, name){
+    var t = (name||"").trim(); if(!t) return;
+    setDayNotes(function(prev){
+      var n={...prev}; var key=WL_PREFIX+dk;
+      var cur = (n[key] && n[key].length) ? n[key].slice() : [];
+      cur.push({id:Date.now()+Math.random(), name:t});
+      n[key]=cur; return n;
+    });
+  };
+  var wlRemove = function(dk, id){
+    setDayNotes(function(prev){
+      var n={...prev}; var key=WL_PREFIX+dk;
+      var cur = (n[key] && n[key].length) ? n[key] : [];
+      var next = cur.filter(function(it){ return it.id!==id; });
+      if(next.length){ n[key]=next; } else { delete n[key]; }
+      return n;
+    });
+  };
+  var dnCloseNoteModal = function(){ setNoteModal(null); setNoteDraft(""); setNoteKind(null); setNoteRepeat(0); setNoteWasRepeat(false); setNoteScopeAsk(null); setWlInput(""); };
   // Commit from the day-note modal. If the note is already a repeat, defer to the
   // "this day / all repeats" prompt; otherwise write straight through.
   var dnCommitDayNote = function(action){
@@ -4510,7 +4617,13 @@ export default function TheList() {
     // latch onto); this clears any range that already formed during the hold, as
     // insurance for both the auto-open and the still-release paths.
     try { var _sel = window.getSelection && window.getSelection(); if (_sel && _sel.removeAllRanges) _sel.removeAllRanges(); } catch(e) {}
-    if (heldName) openClientProfile(heldName);
+    // v81: press-and-hold no longer opens the client profile. A hold now ONLY arms the
+    // drag. Both callers still run the teardown above so an unmoved hold cancels cleanly
+    // (finger lifts, nothing greys out, no move) — but the profile no longer pops. The
+    // non-recurring / no-next-booking profile is reached instead by tapping the blank
+    // ↺ column (see the row render). Revert lever — un-comment the next line to bring
+    // the old hold-to-open behavior back:
+    // if (heldName) openClientProfile(heldName);
   };
 
   const startDragLongPress = function(dateKey, idx, touchX, touchY, isTouch) {
@@ -4596,12 +4709,17 @@ export default function TheList() {
         captureDragPointer();
         // --- Snappy auto-open dwell. THIS number is the tunable dial: lower = snappier
         // but a slow-to-start drag can pop the profile; higher = drag-safer, slower open.
-        if (profileHoldTimer.current) { clearTimeout(profileHoldTimer.current); profileHoldTimer.current = null; }
-        profileHoldTimer.current = setTimeout(function() {
-          profileHoldTimer.current = null;
-          if (dragMovedRef.current) return; // a real drag already began — leave it alone
-          openHeldProfileNow();
-        }, 200); // v75 snappy dwell (ms) — adjust this one number to tune the feel
+        // v81: SNAPPY AUTO-OPEN DISABLED. A still hold used to pop the client profile
+        // after this dwell; press-and-hold is now drag-only. A still hold simply stays
+        // armed until you move (drag begins) or lift without moving (clean cancel via
+        // onEnd). Revert lever — un-comment this whole block to bring the hold-to-open
+        // dwell back:
+        // if (profileHoldTimer.current) { clearTimeout(profileHoldTimer.current); profileHoldTimer.current = null; }
+        // profileHoldTimer.current = setTimeout(function() {
+        //   profileHoldTimer.current = null;
+        //   if (dragMovedRef.current) return; // a real drag already began — leave it alone
+        //   openHeldProfileNow();
+        // }, 200); // v75 snappy dwell (ms) — adjust this one number to tune the feel
       } else {
         // Mouse / desktop fallback: open the date picker.
         setDragCalOpen(true); setDragCalMonth(new Date()); setDragCalHover(true);
@@ -4682,12 +4800,17 @@ export default function TheList() {
       return true;
     }
     var sameDay = client.originalDateKey === targetDateKey;
+    // v82: a penciled-in client dragged to a new slot used to auto-lock (the pencil was
+    // dropped on the move). Carry the source slot's pending flag onto the landing slot so
+    // the pencil (italic name + lock-in button) rides through the reschedule intact.
+    var srcSlotNow = getSlots(client.originalDateKey)[client.originalIdx] || {};
+    var wasPending = !!srcSlotNow.pending;
     var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
     pushUndo(snapshot);
     if (sameDay) {
       var arr = [...getSlots(targetDateKey)];
       var srcGidSame = arr[client.originalIdx] ? arr[client.originalIdx].groupId : null;
-      arr[targetIdx] = {...arr[targetIdx],name:client.name,price:client.price,recurWeeks:client.recurWeeks,isException:true,done:false,groupId:null};
+      arr[targetIdx] = {...arr[targetIdx],name:client.name,price:client.price,recurWeeks:client.recurWeeks,isException:true,done:false,groupId:null,pending:wasPending};
       // B1: capture the vacated time + whether it was a shared slot BEFORE the
       // vacate splices/blanks it, so the red lands on the right (final) row.
       var vacTimeSame = arr[client.originalIdx] ? arr[client.originalIdx].time : null;
@@ -4701,7 +4824,7 @@ export default function TheList() {
       flashMovePair(targetDateKey, arr, vacTimeSame, vacSharedSame, targetDateKey, arr, targetSlot.time, client.name);
     } else {
       var ts = [...getSlots(targetDateKey)];
-      ts[targetIdx] = {...ts[targetIdx],name:client.name,price:client.price,recurWeeks:client.recurWeeks,isException:true,done:false,groupId:null};
+      ts[targetIdx] = {...ts[targetIdx],name:client.name,price:client.price,recurWeeks:client.recurWeeks,isException:true,done:false,groupId:null,pending:wasPending};
       setSlots(targetDateKey, ts);
       var os = [...getSlots(client.originalDateKey)];
       var srcGidX = os[client.originalIdx] ? os[client.originalIdx].groupId : null;
@@ -4950,6 +5073,7 @@ export default function TheList() {
         return;
       }
       var landed = false;
+      var keepDragForCal = false; // v82 (#4): true when a dead-space group drop hands off to the day picker (dragState must survive)
       if (ds && ds.multi) {
         var anyKey = dragOverRef.current || (px!=null ? findAnyRowKey(px, py) : null);
         // v78: an "M:" key is a Month-view day cell (from the glide highlight), not a
@@ -4972,6 +5096,14 @@ export default function TheList() {
           var mdkM = monthOverM || ((px!=null) ? findMonthDayKey(px, py) : null);
           if (mdkM) { queueGroupTapToPlace(mdkM, ds); landed = true; }
           // v77 fallback lever: if (mdkM) landed = dropMultiOnDay(mdkM);
+        }
+        // v82 (#4): group released on dead space (no slot row, no month-day cell) used
+        // to silently cancel. Instead hand the whole group to the day picker so it
+        // carries into tap-to-place together — the same recovery onCancel already uses
+        // for an OS-aborted multi drag. dragState is preserved for handleDragDrop.
+        if (!landed) {
+          setDragCalOpen(true); setDragCalMonth(new Date()); setDragCalHover(true);
+          keepDragForCal = true; landed = true;
         }
       } else {
         var key = dragOverRef.current;
@@ -5004,7 +5136,7 @@ export default function TheList() {
       releaseDragPointer();
       setIsLiveDragging(false); dragLiftedRef.current = false; setDragLifted(false);
       dragOverRef.current = null; setDragOverKey(null);
-      setDragState(null);
+      if (!keepDragForCal) setDragState(null); // v82 (#4): keep the group alive for the day picker
     };
     var onCancel = function(e) {
       if (!mine(e)) return;
@@ -5097,14 +5229,18 @@ export default function TheList() {
       setDragState(null); setDragCalOpen(false);
       return;
     }
+    // v82: preserve the pencil across the move here too (mouse drop path) so a penciled
+    // client doesn't auto-lock, and report it as penciled rather than locked in.
+    var srcSlotHS = getSlots(client.originalDateKey)[client.originalIdx] || {};
+    var wasPendingHS = !!srcSlotHS.pending;
     var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))}; pushUndo(snapshot);
     var ts = [...getSlots(targetDateKey)];
-    ts[targetIdx] = {...ts[targetIdx],name:client.name,price:client.price,recurWeeks:client.recurWeeks,done:false};
+    ts[targetIdx] = {...ts[targetIdx],name:client.name,price:client.price,recurWeeks:client.recurWeeks,done:false,pending:wasPendingHS};
     setSlots(targetDateKey, ts);
     var os = [...getSlots(client.originalDateKey)];
     os[client.originalIdx] = {...os[client.originalIdx],name:"",price:"",done:false,recurWeeks:null,isException:false};
     setSlots(client.originalDateKey, os);
-    addHistoryEntry({type:"added",time:ts[targetIdx].time,name:client.name,price:client.price,dateKey:targetDateKey});
+    addHistoryEntry(wasPendingHS?{type:"added",time:ts[targetIdx].time,name:client.name,price:client.price,dateKey:targetDateKey,bannerType:"penciled"}:{type:"added",time:ts[targetIdx].time,name:client.name,price:client.price,dateKey:targetDateKey});
     setDragState(null); setDragCalOpen(false);
   };
 
@@ -5296,7 +5432,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v79</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v83</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -5598,7 +5734,14 @@ export default function TheList() {
         <div style={{position:"fixed",top:0,left:0,right:0,zIndex:900,background:"#1a1a1a",color:"#fff",padding:"12px 20px",paddingTop:"calc(env(safe-area-inset-top,0px) + 12px)",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
           <div>
             <div style={{fontSize:"11px",letterSpacing:"0.15em",textTransform:"uppercase",color:"#c9a96e",marginBottom:"2px"}}>Reassigning</div>
+            {/* v79 lever — revert to this exact line to drop the "next:" name and return to the bare count:
             <div style={{fontSize:"14px"}}>Tap any open slot for <strong>{reassignMode.client.name}</strong>{reassignQueue.length>0?(" (+"+(reassignQueue.length)+" more)"):""} on {friendlyDate(reassignMode.currentDateKey)}</div>
+            */}
+            {/* v80 lever — revert to this exact line to drop the pair-aware "both/all" wording and return to the "(+N more)" count:
+            <div style={{fontSize:"14px"}}>Tap any open slot for <strong>{reassignMode.client.name}</strong>{reassignQueue.length>0?(" (+"+(reassignQueue.length)+" more)"):""}{(reassignQueue.length>0&&reassignQueue[0]&&reassignQueue[0].name)?(" · next: "+reassignQueue[0].name):""} on {friendlyDate(reassignMode.currentDateKey)}</div>
+            */}
+            {/* v82 (#5b): pair-aware group wording. "still to place" at render = 1 (this one) + reassignQueue.length. Reflects the LIVE remaining count so the word always matches the actual number left: exactly two -> "both", three or more -> "all N". Drops to just the name on the last one. To use the FIXED original group size instead, the original count would need to be captured into reassignMode at drop time (extra plumbing) — flagged in the handoff. */}
+            <div style={{fontSize:"14px"}}>Tap any open slot for <strong>{reassignMode.client.name}</strong>{reassignQueue.length===1?" — placing both":(reassignQueue.length>=2?(" — placing all "+(reassignQueue.length+1)):"")}{(reassignQueue.length>0&&reassignQueue[0]&&reassignQueue[0].name)?(" · next: "+reassignQueue[0].name):""} on {friendlyDate(reassignMode.currentDateKey)}</div>
           </div>
           <button onClick={function(){ setReassignMode(null); setReassignQueue([]); }} style={{background:"none",border:"1px solid #444",borderRadius:"6px",color:"#888",padding:"6px 12px",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>Cancel</button>
         </div>
@@ -6040,6 +6183,31 @@ export default function TheList() {
                 <button onClick={function(){ addSlotToEnd(noteModal.dayKey); }} style={{padding:"4px 10px",background:"transparent",border:"1px solid #e6e6e4",borderRadius:"6px",color:"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.04em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#f4f4f2"; }} onMouseLeave={function(e){ e.currentTarget.style.background="transparent"; }}>+PM</button>
               </div>
             )}
+            {noteModal.isDay && !noteScopeAsk && (
+              <div style={{borderTop:"1px solid #ececea",marginTop:"2px",marginBottom:"14px",paddingTop:"12px"}}>
+                <div style={{fontSize:"10px",letterSpacing:"0.12em",color:"#a07830",marginBottom:"8px"}}>{"STANDBY LIST"}</div>
+                {(function(){
+                  var items = wlGet(noteModal.dayKey);
+                  if (!items.length) return (<div style={{fontSize:"12px",color:"#bbb",fontStyle:"italic",marginBottom:"8px"}}>{"No one waiting yet."}</div>);
+                  return (
+                    <div style={{marginBottom:"8px"}}>
+                      {items.map(function(it){
+                        return (
+                          <div key={it.id} style={{display:"flex",alignItems:"center",gap:"8px",padding:"6px 8px",background:"#f6f4ef",border:"1px solid #ece7dc",borderRadius:"6px",marginBottom:"6px"}}>
+                            <span style={{flex:1,fontSize:"14px",color:"#1a1a1a",fontFamily:"Georgia,serif",wordBreak:"break-word"}}>{it.name}</span>
+                            <button onClick={function(){ wlRemove(noteModal.dayKey, it.id); }} title="Remove from standby" style={{background:"none",border:"none",cursor:"pointer",color:"#c0392b",fontSize:"18px",lineHeight:1,padding:"0 4px",flexShrink:0}}>{"×"}</button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
+                <div style={{display:"flex",gap:"8px"}}>
+                  <input value={wlInput} onChange={function(e){ setWlInput(e.target.value); }} onKeyDown={function(e){ if(e.key==="Enter"){ e.preventDefault(); wlAdd(noteModal.dayKey, wlInput); setWlInput(""); } }} placeholder="Add a name…" style={{flex:1,boxSizing:"border-box",background:"#efefed",border:"1px solid #d8d8d6",borderRadius:"6px",padding:"8px 10px",fontSize:"14px",fontFamily:"Georgia,serif",color:"#1a1a1a",outline:"none"}}/>
+                  <button onClick={function(){ wlAdd(noteModal.dayKey, wlInput); setWlInput(""); }} style={{padding:"8px 14px",background:"#c9a96e",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",flexShrink:0}}>{"Add"}</button>
+                </div>
+              </div>
+            )}
             {noteModal.isDay && noteScopeAsk ? (
               <div>
                 <div style={{fontSize:"12px",color:"#777",marginBottom:"10px"}}>{noteScopeAsk==="clear"?"Remove this repeating note…":"Apply your change…"}</div>
@@ -6384,21 +6552,36 @@ export default function TheList() {
               return hay.indexOf(q)>=0;
             }).map(function(entry,i){
               var canEntryUndo=(entry.dateKey&&entry.time&&(entry.type==="added"||entry.type==="removed"||entry.type==="edited"||entry.type==="blocked"||entry.type==="unblocked"||entry.type==="recurring_set"||entry.type==="checkoff"||entry.type==="slot_removed"));
+              // v82: corrected chip/action words + reordered main line ("Name — action — time · day").
+              var lw=logEntryWords(entry);
+              var logTail="";
+              if (lw.isProfileRename) { logTail = entry.prevName?("(was "+entry.prevName+")"):""; }
+              else { var _tp=[]; if(entry.time)_tp.push(entry.time); if(entry.dateKey)_tp.push(friendlyDate(entry.dateKey)); logTail=_tp.join(" · "); }
+              var canJump=!!entry.dateKey;
               return (
-              <div key={entry.id||i} style={{padding:"10px 12px",marginBottom:"6px",borderRadius:"6px",background:(entry.type==="removed"||entry.type==="slot_removed")?"#fff0ee":"#fafaf8",border:(entry.type==="removed"||entry.type==="slot_removed")?"1px solid #e0b0a8":"1px solid #e4e4e2"}}>
+              <div key={entry.id||i} onClick={canJump?function(){ jumpToLogEntry(entry); }:undefined} style={{padding:"10px 12px",marginBottom:"6px",borderRadius:"6px",cursor:canJump?"pointer":"default",background:(entry.type==="removed"||entry.type==="slot_removed")?"#fff0ee":"#fafaf8",border:(entry.type==="removed"||entry.type==="slot_removed")?"1px solid #e0b0a8":"1px solid #e4e4e2"}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"3px"}}>
                   <span style={{fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",color:entry.type==="added"?"#4a8a5a":(entry.type==="removed"||entry.type==="slot_removed")?"#8a3a2a":entry.type==="recurring_set"?"#c9a96e":entry.type==="slot_added"?"#6a8aaa":entry.type==="checkoff"?"#4a8a5a":entry.type==="backup"?"#999":"#666"}}>
-                    {entry.type==="added"?"Added":entry.type==="removed"?"Removed":entry.type==="slot_removed"?"Slot Removed":entry.type==="slot_added"?"Slot Added":entry.type==="recurring_set"?("Recurring ("+entry.weeks+"w)"):entry.type==="blocked"?"Blocked":entry.type==="unblocked"?"Unblocked":entry.type==="checkoff"?"Checked Off":entry.type==="backup"?"Backup":"Edited"}
+                    {/* v82 lever — old chip labels: entry.type==="added"?"Added":entry.type==="removed"?"Removed":entry.type==="slot_removed"?"Slot Removed":entry.type==="slot_added"?"Slot Added":entry.type==="recurring_set"?("Recurring ("+entry.weeks+"w)"):entry.type==="blocked"?"Blocked":entry.type==="unblocked"?"Unblocked":entry.type==="checkoff"?"Checked Off":entry.type==="backup"?"Backup":"Edited" */}
+                    {lw.chip}
                   </span>
                   <span style={{fontSize:"10px",color:"#bbb"}}>{entry.timestamp}</span>
                 </div>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",gap:"8px"}}>
+                  {/* v82 lever — old order (time — name (was prev) · day):
                   <div style={{fontSize:"13px",color:"#888"}}>
                     {entry.time} {entry.name&&<span style={{color:"#1a1a1a"}}>— {entry.name}</span>}
                     {entry.prevName&&<span style={{color:"#aaa"}}> (was {entry.prevName})</span>}
                     {entry.dateKey&&<span style={{color:"#ccc",fontSize:"11px"}}> · {friendlyDate(entry.dateKey)}</span>}
                   </div>
-                  {canEntryUndo&&<button onClick={function(){ handleEntryUndo(entry); }} title="Undo" style={{background:"none",border:"1px solid #d8d8d6",borderRadius:"5px",color:"#888",cursor:"pointer",padding:"4px 8px",fontFamily:"inherit",flexShrink:0,display:"flex",alignItems:"center"}} onMouseEnter={function(e){ e.currentTarget.style.borderColor="#1a1a1a"; }} onMouseLeave={function(e){ e.currentTarget.style.borderColor="#d8d8d6"; }}><UndoIcon size={13} color="#888"/></button>}
+                  */}
+                  <div style={{fontSize:"13px",color:"#888"}}>
+                    {entry.name&&<span style={{color:"#1a1a1a"}}>{entry.name}</span>}
+                    {entry.name&&<span style={{color:"#bbb"}}>{" — "}</span>}
+                    <span style={{color:"#555"}}>{lw.action}</span>
+                    {logTail&&<span style={{color:"#ccc",fontSize:"11px"}}>{" — "+logTail}</span>}
+                  </div>
+                  {canEntryUndo&&<button onClick={function(e){ e.stopPropagation(); handleEntryUndo(entry); }} title="Undo" style={{background:"none",border:"1px solid #d8d8d6",borderRadius:"5px",color:"#888",cursor:"pointer",padding:"4px 8px",fontFamily:"inherit",flexShrink:0,display:"flex",alignItems:"center"}} onMouseEnter={function(e){ e.currentTarget.style.borderColor="#1a1a1a"; }} onMouseLeave={function(e){ e.currentTarget.style.borderColor="#d8d8d6"; }}><UndoIcon size={13} color="#888"/></button>}
                 </div>
               </div>
             ); })}
@@ -6456,7 +6639,10 @@ export default function TheList() {
           <div style={{position:"relative",flex:"1 1 auto",display:"flex",justifyContent:"flex-end",padding:"0 6px",minWidth:0}}>
             {bannerInline && !searchExpanded && (
               <div onClick={function(){ onBannerTap(); }} title="Tap to see the change"
-                style={{marginLeft:"auto",marginRight:"auto",maxWidth:"calc(100% - 44px)",display:"flex",alignItems:"center",gap:"8px",background:getBannerColor(banner.type),color:"#fff",padding:"4px 12px",borderRadius:"16px",fontSize:"11px",letterSpacing:"0.03em",cursor:"pointer",boxShadow:"0 1px 6px rgba(0,0,0,0.18)",overflow:"hidden",whiteSpace:"nowrap"}}>
+                onTouchStart={function(e){ if(e.touches&&e.touches.length===1){ bannerTouchStart.current=e.touches[0].clientY; } }}
+                onTouchMove={function(e){ if(bannerTouchStart.current==null||!e.touches||!e.touches.length) return; var dy=e.touches[0].clientY-bannerTouchStart.current; setBannerSwipeY(Math.min(0,dy)); }}
+                onTouchEnd={function(){ var dy=bannerSwipeY; bannerTouchStart.current=null; if(dy<-30){ dismissBanner(); } else { setBannerSwipeY(0); } }}
+                style={{marginLeft:"auto",marginRight:"auto",maxWidth:"calc(100% - 44px)",display:"flex",alignItems:"center",gap:"8px",background:getBannerColor(banner.type),color:"#fff",padding:"4px 12px",borderRadius:"16px",fontSize:"11px",letterSpacing:"0.03em",cursor:"pointer",boxShadow:"0 1px 6px rgba(0,0,0,0.18)",overflow:"hidden",whiteSpace:"nowrap",transform:"translateY("+bannerSwipeY+"px)",opacity:Math.max(0.2,1+bannerSwipeY/80),transition:bannerSwipeY===0?"transform 0.2s ease, opacity 0.2s ease":"none",touchAction:"none"}}>
                 <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",minWidth:0}}>{describeBanner(banner)}</span>
                 {(banner.type!=="undo"&&banner.type!=="redo"&&canUndo)&&(
                   <button onClick={function(e){ e.stopPropagation(); handleUndo(); }} title="Undo" style={{background:"rgba(255,255,255,0.22)",border:"none",borderRadius:"9px",color:"#fff",padding:"3px 7px",cursor:"pointer",fontFamily:"inherit",flexShrink:0,display:"flex",alignItems:"center"}}><UndoIcon size={13} color="#fff"/></button>
@@ -6480,8 +6666,12 @@ export default function TheList() {
                     <div style={{position:"absolute",top:"30px",left:0,right:0,background:"#fff",border:"1px solid #e0e0de",borderRadius:"8px",boxShadow:"0 6px 20px rgba(0,0,0,0.12)",zIndex:200,overflow:"hidden",maxHeight:"50vh",overflowY:"auto"}}>
                       {matches.length===0 ? (
                         <div style={{padding:"8px 12px",fontSize:"12px",color:"#aaa"}}>No matches</div>
-                      ) : matches.map(function(nm){ return (
-                        <div key={nm} onMouseDown={function(e){ e.preventDefault(); }} onClick={function(){ runClientSearch(nm); }} style={{padding:"9px 12px",fontSize:"13px",color:"#1a1a1a",cursor:"pointer",borderBottom:"1px solid #f2f2f0",fontFamily:"Georgia,serif"}}>{nm}</div>
+                      ) : matches.map(function(nm){ var pr=getClientPrice(nm); return (
+                        /* #6: name on the left, their price on the right (same styling as the
+                           inline name-edit suggestions). Rows with no known price just show the
+                           name. Revert lever — restore the plain name-only row:
+                           <div key={nm} onMouseDown={function(e){ e.preventDefault(); }} onClick={function(){ runClientSearch(nm); }} style={{padding:"9px 12px",fontSize:"13px",color:"#1a1a1a",cursor:"pointer",borderBottom:"1px solid #f2f2f0",fontFamily:"Georgia,serif"}}>{nm}</div> */
+                        <div key={nm} onMouseDown={function(e){ e.preventDefault(); }} onClick={function(){ runClientSearch(nm); }} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px",padding:"9px 12px",fontSize:"13px",color:"#1a1a1a",cursor:"pointer",borderBottom:"1px solid #f2f2f0",fontFamily:"Georgia,serif"}}><span style={{whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{nm}</span>{pr?<span style={{fontSize:"11px",color:"#a07830",flexShrink:0}}>{pr}</span>:null}</div>
                       ); })}
                     </div>
                   );
@@ -6698,6 +6888,11 @@ export default function TheList() {
                             var ds=getSlots(dateKey); var gS=ds.map(function(s,i){ return {...s,i}; }).filter(function(s){ return s.groupId===slot.groupId&&s.name; });
                             var first=gS[0]&&gS[0].i===idx; var last=gS[gS.length-1]&&gS[gS.length-1].i===idx; var inG=gS.some(function(s){ return s.i===idx; });
                             if (!inG) return null;
+                            // v82 (#3): a group of one isn't a group. When a member is pulled out and
+                            // only one named slot still carries this groupId, first && last are both
+                            // true and the accent would render as a stray zero-height nub. Skip it so
+                            // no leftover "joined" marker lingers on the person left behind.
+                            if (gS.length < 2) return null;
                             return <div style={{position:"absolute",left:0,top:first?"50%":"0",bottom:last?"50%":"0",width:"3px",background:ADJ_BLUE,borderRadius:first?"3px 3px 0 0":last?"0 0 3px 3px":"0"}}/>;
                           })()}
                           {selectMode&&filled ? (
@@ -6785,7 +6980,13 @@ export default function TheList() {
                                     <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:"2px",width:"50px",flexShrink:0}}>
                                       <span onClick={function(e){ e.stopPropagation(); openClientProfile(slot.name); }} title="Next appointment — tap for profile" style={{color:"#4a8a9a",fontSize:"16px",fontWeight:"500",lineHeight:1,padding:"0 1px",cursor:"pointer"}}>{"↺"}</span>
                                     </div>
-                                  ):<div style={{width:"50px",flexShrink:0}}/>))}
+                                  ):/* v81: NON-recurring person with NO next appointment booked — the ↺ column
+                                       is blank for them. That blank is now a tap target that opens their client
+                                       profile (the tap-path to their profile now that press-and-hold is drag-only).
+                                       Stays visually empty; alignSelf:stretch gives it real height to catch the tap;
+                                       stopPropagation keeps it off the row's drag/tap handlers. Revert lever —
+                                       restore the bare spacer: <div style={{width:"50px",flexShrink:0}}/> */
+                                     <div onClick={function(e){ e.stopPropagation(); openClientProfile(slot.name); }} title={"Open "+slot.name+"'s profile"} style={{width:"50px",flexShrink:0,alignSelf:"stretch",cursor:"pointer"}}/>))}
                                   {!compactIcons&&filled&&(function(){
                                     var digits=getClientPhone(slot.name).replace(/[^0-9+]/g,"");
                                     if (digits) {
