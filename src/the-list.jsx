@@ -4552,12 +4552,13 @@ export default function TheList() {
   // future series off the board first makes those self-collisions vanish, so only OTHER
   // people can block a landing. A blocked occurrence is put back down exactly where it
   // was and reported — never dropped, never duplicated.
-  const buildSeriesDayShift = function(name, fromDateKey, toDateKey, newTime) {
+  const buildSeriesDayShift = function(name, fromDateKey, toDateKey, newTime, targetSlot) {
     var dayDelta = dayShiftDelta(fromDateKey, toDateKey);
     if (dayDelta === 0) {
       var same = buildSeriesTimeShift(name, fromDateKey, newTime);
       return {newSchedules:same.newSchedules, conflicts:same.conflicts, blocked:[], moved:0, dayDelta:0};
     }
+    if (!targetSlot) targetSlot = {time:newTime};
     var lower=(name||"").toLowerCase();
     var newSch={...schedulesRef.current};
     var blank=function(){ return DEFAULT_TIMES.map(function(t){ return {time:t,name:"",price:"",done:false,recurWeeks:null}; }); };
@@ -4570,16 +4571,36 @@ export default function TheList() {
       picked.push({dk:dk, slot:{...ds[oi]}});
     });
     if (picked.length===0) return {newSchedules:newSch, conflicts:[], blocked:[], moved:0, dayDelta:dayDelta};
-    // PASS 1 — lift the whole future series off the board. Vacate rule is the proven
-    // one from buildSeriesTimeShift: a LONE default time is blanked in place (keeps the
-    // grid row); a shared time, or any custom time, is spliced out so it collapses.
+    // v93b (#13, the phantom-row bug). EVERYTHING here works off the ANCHOR, never the
+    // displayed time. A slot the barber nudged off-grid — shown as 7:26 but really the
+    // day's 7:36 default row wearing a different label — has defaultBaseTime "7:36".
+    // placementTime() returns that anchor. Matching future days by the displayed 7:26
+    // finds NOTHING (no day has a 7:26 row), so a brand-new row gets pushed in beside
+    // the day's still-empty 7:36 — which is exactly the doubled 7:26 + 7:36 rows.
+    // buildRecurringSchedules already solved this; this now uses the identical rule:
+    // find the ANCHORED row on each future day and RELABEL it.
+    var tAnchor=placementTime(targetSlot);
+    var tIsCust=targetSlot.isCustom===true||(targetSlot.isCustom===undefined&&!targetSlot.defaultBaseTime&&DEFAULT_TIMES.indexOf(targetSlot.time)===-1);
+    var tBase=tIsCust?null:(targetSlot.defaultBaseTime||targetSlot.time);
+    // PASS 1 — lift the whole future series off the board. A vacated row that belongs to
+    // the default grid is RESTORED TO ITS ANCHOR (a nudged 7:26 row goes back to being a
+    // clean, bookable, empty 7:36), never left behind wearing its nudged label. A shared
+    // time, or a genuinely hand-added custom row, is spliced out so the day collapses.
     picked.forEach(function(p){
       var ds=[...newSch[p.dk]];
       var oi=findOcc(ds); if (oi<0) return;
       var oT=ds[oi].time;
+      var oAnchor=placementTime(ds[oi]);
+      var oIsGridRow=DEFAULT_TIMES.indexOf(oAnchor)>=0;
       var shared=ds.some(function(s,si){ return si!==oi && s.time===oT; });
-      if (DEFAULT_TIMES.indexOf(oT)>=0 && !shared) ds[oi]={time:oT,name:"",price:"",done:false,recurWeeks:null};
+      // SELF-HEAL. If an empty row on this day ALREADY claims the same anchor, restoring
+      // his row to that anchor would make a second empty 7:36 sitting next to the first.
+      // So splice instead. This is what repairs days a previous build already doubled:
+      // his nudged 7:26 row is removed and the day is left with its one clean 7:36.
+      var anchorTaken=ds.some(function(s,si){ return si!==oi && !s.name && placementTime(s)===oAnchor; });
+      if (oIsGridRow && !shared && !anchorTaken) ds[oi]={time:oAnchor,name:"",price:"",done:false,recurWeeks:null};
       else ds.splice(oi,1);
+      ds.sort(function(a,b){ return timeToAbsMinutes(a.time)-timeToAbsMinutes(b.time); });
       newSch[p.dk]=ds;
     });
     // PASS 2 — set it back down, each occurrence dayDelta days from where it was.
@@ -4588,28 +4609,31 @@ export default function TheList() {
     // occurrence can never land on top of one that was just put back.
     picked.sort(function(a,b){ if (a.dk===b.dk) return 0; if (dayDelta>0) return a.dk<b.dk?-1:1; return a.dk<b.dk?1:-1; });
     var blocked=[]; var moved=0;
-    var isStillDefault=DEFAULT_TIMES.indexOf(newTime)>=0;
     picked.forEach(function(p){
       var occ=p.slot;
       var tk=formatDateKey(addDays(parseDateKey(p.dk), dayDelta));
       var ds=newSch[tk]?[...newSch[tk]]:blank();
-      var ti=ds.findIndex(function(s){ return s.time===newTime; });
+      // Match by ANCHOR — this is the whole fix. Lands on the day's real 7:36 grid row
+      // and relabels it to 7:26, instead of spawning a second row next to it.
+      var ti=ds.findIndex(function(s){ return placementTime(s)===tAnchor; });
       if (ti>=0 && ds[ti].name) {
         // Somebody else owns that spot. Put this one back down where it came from and
         // say so afterwards — a silently vanished haircut is the one unacceptable outcome.
         blocked.push({dateKey:tk, time:newTime, existingName:ds[ti].name, fromDateKey:p.dk});
         var bs=newSch[p.dk]?[...newSch[p.dk]]:blank();
-        var bi=bs.findIndex(function(s){ return s.time===occ.time && !s.name; });
+        var bAnchor=placementTime(occ);
+        var bi=bs.findIndex(function(s){ return !s.name && placementTime(s)===bAnchor; });
         if (bi>=0) bs[bi]={...occ}; else bs.push({...occ});
         bs.sort(function(a,b){ return timeToAbsMinutes(a.time)-timeToAbsMinutes(b.time); });
         newSch[p.dk]=bs;
         return;
       }
-      var wasCustom=occ.isCustom===true||(occ.isCustom===undefined&&DEFAULT_TIMES.indexOf(occ.time)===-1);
-      var baseTime=occ.defaultBaseTime||(!wasCustom?occ.time:null);
+      // The row descriptors come from the slot he was actually DROPPED ON — that slot is
+      // the truth about whether 7:26 is a nudged grid row or a real custom row. Mirrors
+      // buildRecurringSchedules writing sourceSlot's isCustom/customTime/defaultBaseTime.
       // groupId is dropped: he is leaving the day, so a link to people who stayed behind
       // would dangle. Same call applySeriesDrop("one") already makes on a cross-day drop.
-      var landed={...occ, time:newTime, isException:true, groupId:null, customTime:(wasCustom&&!isStillDefault), defaultBaseTime:(!wasCustom?baseTime:occ.defaultBaseTime)};
+      var landed={...occ, time:newTime, isException:true, groupId:null, isCustom:tIsCust, customTime:tIsCust, defaultBaseTime:tBase};
       if (ti>=0) ds[ti]=landed; else ds.push(landed);
       ds.sort(function(a,b){ return timeToAbsMinutes(a.time)-timeToAbsMinutes(b.time); });
       newSch[tk]=ds;
@@ -4805,7 +4829,12 @@ export default function TheList() {
       //   var res=buildSeriesTimeShift(m.name, m.dateKey, m.newTime);
       // buildSeriesDayShift is identical to that call whenever the drop stayed on the
       // same day (it delegates straight back to it), so the same-day path is unchanged.
-      var res=buildSeriesDayShift(m.name, m.dateKey, m.targetDateKey, m.newTime);
+      // v93b: hand it the slot he was actually DROPPED ON, read live and BEFORE the build
+      // touches anything. That slot is the only thing that knows whether the time he
+      // landed on is a nudged default grid row or a genuine hand-added custom row — and
+      // getting that wrong is what doubled every future day into 7:26 + 7:36.
+      var tSlotAll=getSlots(m.targetDateKey)[m.targetIdx]||{time:m.newTime};
+      var res=buildSeriesDayShift(m.name, m.dateKey, m.targetDateKey, m.newTime, tSlotAll);
       setSeriesEditModal(null);
       if (res.conflicts.length>0) {
         setConflictModal({conflicts:res.conflicts, pending:res.newSchedules, client:{name:m.name,price:m.price||"",recurWeeks:m.recurWeeks}, history:{type:"edited",time:m.newTime,name:m.name,prevName:m.name,dateKey:m.dateKey}});
