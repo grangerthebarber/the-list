@@ -120,6 +120,41 @@ function placementTime(slot) { return (slot && slot.defaultBaseTime) ? slot.defa
 
 var _gid = 1;
 function newGroupId() { return "g"+(_gid++); }
+
+// v92 GROUP TIME CASCADE. Given a day's slots and the index being time-edited, return
+// the indexes of the OTHER members of that slot's group — but ONLY when the edited slot
+// is the group's FIRST (earliest) member. Move the first member and the whole group
+// shifts with it by the same number of minutes; move the 2nd/3rd member and only that
+// person moves. A slot with no groupId, or a group of one, returns [] (no cascade).
+// Membership matches getGroupTimes: same groupId, and actually occupied (name) or a
+// blocked/lunch member of the run. Pure — no state, no writes.
+function groupCascadeIdxs(slots, idx) {
+  if (!slots || !slots[idx]) return [];
+  var g = slots[idx].groupId;
+  if (!g) return [];
+  var mem = [];
+  for (var i = 0; i < slots.length; i++) {
+    var s = slots[i];
+    if (s && s.groupId === g && (s.name || s.blocked)) mem.push(i);
+  }
+  if (mem.length < 2) return [];
+  mem.sort(function(a, b){ return timeToAbsMinutes(slots[a].time) - timeToAbsMinutes(slots[b].time); });
+  if (mem[0] !== idx) return [];          // not the first member -> this person only
+  return mem.slice(1);
+}
+
+// v92: the exact per-slot retime write commitTimeEdit has always done, lifted out
+// verbatim so the cascade can apply the identical treatment to every group member
+// (custom-slot detection, defaultBaseTime stamping, cobalt/purple shift coloring).
+// extra lets the recurring "just this one" path stamp isException:true as it used to.
+function retimeSlot(s, newTime, extra) {
+  var isStillDefault = DEFAULT_TIMES.indexOf(newTime) >= 0;
+  var wasCustom = s.isCustom === true || (s.isCustom === undefined && DEFAULT_TIMES.indexOf(s.time) === -1);
+  var baseTime = s.defaultBaseTime || (!wasCustom ? s.time : null);
+  var out = {...s, time:newTime, isCustom:wasCustom, customTime:(wasCustom && !isStillDefault), defaultBaseTime:(!wasCustom ? baseTime : s.defaultBaseTime)};
+  if (extra) { out = {...out, ...extra}; }
+  return out;
+}
 const SHORT_MONTHS = [3,4,5,6];
 function smartDate(date, includeWeekday) {
   var month = date.getMonth();
@@ -170,6 +205,27 @@ function friendlyDateLong(dateKey) {
   return d.toLocaleDateString("en-US", {weekday:"long", month:monthStyle, day:"numeric"});
 }
 function friendlyDateTime(time, dateKey) { return time + ", " + friendlyDateLong(dateKey); }
+
+// v93: how far a drop moved somebody, in plain words. "" for a same-day drop, which is
+// the signal everywhere that this is a pure retime and the old v92 behavior applies.
+function dayShiftDelta(fromDateKey, toDateKey) {
+  if (!fromDateKey || !toDateKey) return 0;
+  return Math.round((parseDateKey(toDateKey).getTime() - parseDateKey(fromDateKey).getTime()) / 86400000);
+}
+function dayShiftPhrase(fromDateKey, toDateKey) {
+  var d = dayShiftDelta(fromDateKey, toDateKey);
+  if (d === 0) return "";
+  var n = Math.abs(d);
+  return n + (n === 1 ? " day " : " days ") + (d > 0 ? "later" : "earlier");
+}
+// The line under "Move this appointment…". A same-day drop keeps the exact v92 wording;
+// a cross-day drop says out loud that "All" slides the whole ladder, which it now does.
+function seriesDropBlurb(m) {
+  var who = (m && m.name) || "This client";
+  var ph = dayShiftPhrase(m.dateKey, m.targetDateKey);
+  if (!ph) return who + " moves to " + m.newTime + ". \u201cAll\u201d shifts the whole series to this time (each stays on its own day).";
+  return who + " moves to " + friendlyDate(m.targetDateKey) + " at " + m.newTime + ". \u201cAll\u201d slides every future visit " + ph + " as well \u2014 the gap between visits stays the same.";
+}
 // Turn a real Date (e.g. a backup's exportedAt) into "Today at 5:40 AM",
 // "Yesterday at 5:40 AM", or "Mon, Jun 29 at 5:40 AM". Used by the import confirm.
 function friendlyWhen(date) {
@@ -816,6 +872,9 @@ export default function TheList() {
   // Remove ONE person from a shared (same-time) slot — a small confirm scoped to that one.
   const [sharedRemove, setSharedRemove] = useState(null);
   const [seriesEditModal, setSeriesEditModal] = useState(null);
+  // v93: after a whole-series day shift, the occurrences whose new date was already
+  // taken at that time. They stay exactly where they were; this reports which ones.
+  const [seriesShiftReport, setSeriesShiftReport] = useState(null);
   const [renameRequiredModal, setRenameRequiredModal] = useState(null);
   // Import backup confirm: {data, whenText}. Held aside so we can ask before overwriting.
   const [importConfirm, setImportConfirm] = useState(null);
@@ -1284,11 +1343,25 @@ export default function TheList() {
       // While ANY popup is open the arrows belong to the popup, not the schedule behind
       // it — so they never page the day or jump the background to today. (Undo/redo above
       // still work.) Each modal's own handlers take over the arrows from here.
-      var anyOverlay = !!(acctModal||noteModal||checkoffModal||confirmDelete||phoneModal||blockLabelModal||clientProfile||renameRequiredModal||recurringModal||conflictModal||groupRecurModal||holidayModal||groupScheduleModal||timeEditModal||seriesEditModal||importConfirm||profilePriceModal);
+      var anyOverlay = !!(acctModal||noteModal||checkoffModal||confirmDelete||phoneModal||blockLabelModal||clientProfile||renameRequiredModal||recurringModal||conflictModal||groupRecurModal||holidayModal||groupScheduleModal||timeEditModal||seriesEditModal||seriesShiftReport||importConfirm||profilePriceModal);
       // Left/Right arrows page through days (months in Month view), mirroring the
       // on-screen ‹ / › buttons. Ignored while a field is focused — there the arrows
       // move the text cursor / hop slot rows, and Shift+Arrow nudges the time.
       if ((e.key==="ArrowLeft"||e.key==="ArrowRight") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        // v91: the DAY-NOTE and ACCOUNTING popups are the two exceptions to the
+        // "arrows belong to the popup" rule below. When the caret isn't parked in one of
+        // their fields, the arrows page the popup from day to day just like the schedule
+        // does (Shift = a week), saving whatever's typed on the way out. Every other popup —
+        // and the per-line repeat popup layered on top of the day note — still swallows them.
+        var aePop = (typeof document!=="undefined") ? document.activeElement : null;
+        var inFieldPop = !!(aePop && (aePop.tagName==="INPUT" || aePop.tagName==="TEXTAREA" || aePop.tagName==="SELECT") && !aePop.readOnly && !aePop.disabled);
+        var popPageable = !!(((noteModal && noteModal.isDay && !noteRepeatPopup && !noteScopeAsk) || acctModal) && !checkoffModal && !confirmDelete && !phoneModal && !clientProfile && !timeEditModal);
+        if (popPageable && !inFieldPop) {
+          e.preventDefault();
+          var stepP = e.shiftKey ? 7 : 1;
+          popupShiftDay(e.key==="ArrowLeft" ? -stepP : stepP);
+          return;
+        }
         if (anyOverlay) return;
         if (editingRef.current) return;
         var ae = (typeof document!=="undefined") ? document.activeElement : null;
@@ -2071,19 +2144,38 @@ export default function TheList() {
       setSeriesEditModal({field:"time", dateKey:dateKey, idx:idx, oldTime:prev.time, newTime:newTime, name:prev.name});
       return;
     }
-    // Block collisions with another existing slot at that exact time.
-    if (slots.some(function(s,i){ return i!==idx && s.time===newTime; })) { setTimeEditModal(null); return; }
+    // v92 GROUP TIME CASCADE. If this slot is the FIRST member of a group, every other
+    // member of that group moves by the SAME number of minutes. Move the 2nd or 3rd
+    // member and nothing else budges (groupCascadeIdxs returns [] unless idx is first).
+    var cascadeIdxs = groupCascadeIdxs(slots, idx);
+    var deltaMin = timeToAbsMinutes(newTime) - timeToAbsMinutes(prev.time);
+    var moveIdxs = [idx].concat(cascadeIdxs);
+    var newTimeFor = {};
+    var mi;
+    for (mi=0; mi<moveIdxs.length; mi++) {
+      newTimeFor[moveIdxs[mi]] = absMinutesToTime(timeToAbsMinutes(slots[moveIdxs[mi]].time) + deltaMin);
+    }
+    // Block collisions with an existing slot at that exact time. A moving slot may land
+    // on a time another MOVING slot is vacating (the whole group slides together), so
+    // only slots that are staying put can block the move.
+    var moving = {}; for (mi=0; mi<moveIdxs.length; mi++) { moving[moveIdxs[mi]] = true; }
+    var blocked = false;
+    for (mi=0; mi<moveIdxs.length; mi++) {
+      var wantT = newTimeFor[moveIdxs[mi]];
+      if (slots.some(function(s,i){ return !moving[i] && s.time===wantT; })) { blocked = true; }
+    }
+    if (blocked) { setTimeEditModal(null); return; }
     var snapshot = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
     pushUndo(snapshot);
-    var isStillDefault = DEFAULT_TIMES.indexOf(newTime) >= 0;
-    // Editing the minutes of a slot does NOT change whether it's a default slot
-    // or a custom one. Only genuinely custom-added slots (isCustom===true, or
-    // legacy off-grid slots with no flag) keep the custom time styling.
-    var wasCustom = prev.isCustom===true || (prev.isCustom===undefined && DEFAULT_TIMES.indexOf(prev.time) === -1);
-    // For default (non-custom) slots, remember the original default time the first
-    // time it's nudged, so the render layer can color it cobalt (earlier) or purple (later).
-    var baseTime = prev.defaultBaseTime || (!wasCustom ? prev.time : null);
-    slots[idx] = {...prev,time:newTime,isCustom:wasCustom,customTime: wasCustom && !isStillDefault,defaultBaseTime:(!wasCustom?baseTime:prev.defaultBaseTime)};
+    // retimeSlot carries the original per-slot logic: editing the minutes of a slot does
+    // NOT change whether it's a default slot or a custom one, and a default slot remembers
+    // its original default time (defaultBaseTime) so the render layer can color it cobalt
+    // (earlier) or purple (later). Revert lever — the v91 single-slot write:
+    // slots[idx] = {...prev,time:newTime,isCustom:wasCustom,customTime: wasCustom && !isStillDefault,defaultBaseTime:(!wasCustom?baseTime:prev.defaultBaseTime)};
+    for (mi=0; mi<moveIdxs.length; mi++) {
+      var ti = moveIdxs[mi];
+      slots[ti] = retimeSlot(slots[ti], newTimeFor[ti], null);
+    }
     slots.sort(function(a,b){ return timeToAbsMinutes(a.time)-timeToAbsMinutes(b.time); });
     setSlots(dateKey,slots);
     setTimeEditModal(null);
@@ -3810,6 +3902,15 @@ export default function TheList() {
   // to the new shapes and drops the color, per "no more business/personal notation").
   var LRPT_KEY = "@lrpt";
   var DNSKIP_PREFIX = "@dnskip:";
+  // v92 PER-OCCURRENCE TEXT OVERRIDE. One more reserved key on the same synced dayNotes
+  // map, same trick as "@dnskip:" — a plain object keyed by rule id:
+  //   dayNotes["@dnovr:"+dk] = { ruleId: "wording just for this date", ... }
+  // A rule that has an override on dk renders the override text on dk ONLY; every other
+  // occurrence keeps the series wording. Retype the line back to the series wording (or
+  // choose "All repeats") and the override is cleared. Ids are stable, including for the
+  // legacy "@rpt:" rules, which now keep their key as their bucket id when they migrate —
+  // so a skip or an override written against a legacy rule survives the migration.
+  var DNOVR_PREFIX = "@dnovr:";
   var dnNewId = function(){ return "ln_"+Date.now().toString(36)+"_"+Math.floor(Math.random()*1000000).toString(36); };
   // Does recurring line/rule R (anchored at R.since) fire on date dk? r=1 weeks, r=2 months.
   var dnLineMatches = function(R, dk){
@@ -3832,9 +3933,14 @@ export default function TheList() {
   };
   // Resolve the ordered lines shown on date dk. Each: {id,t,r,n,since,src,kind}
   //   src: "once" (new per-date array) | "rule" (central @lrpt) | "legacy" | "legacyrule"
-  var resolveDayLines = function(dk){
+  // v91: the body now takes the dayNotes MAP as an argument instead of closing over the
+  // live dayNotes state. Identical logic — but this lets the new arrow-key day paging
+  // (which saves the open day and immediately re-prefills the NEXT day) resolve against
+  // the just-built map instead of the stale pre-commit state. resolveDayLines(dk) below is
+  // the unchanged public accessor; every existing caller keeps working untouched.
+  var resolveDayLinesIn = function(map, dk){
     var out=[];
-    var val=dayNotes[dk];
+    var val=map[dk];
     if(Array.isArray(val)){
       for(var i=0;i<val.length;i++){ var L=val[i]; if(L&&L.t){ out.push({id:L.id||dnNewId(),t:L.t,r:0,n:0,since:dk,src:"once",kind:null}); } }
     } else if(typeof val==="string"){
@@ -3842,20 +3948,63 @@ export default function TheList() {
     } else if(val && typeof val==="object" && !val.skip && val.text){
       out.push({id:"legacy:"+dk,t:val.text,r:0,n:0,since:dk,src:"legacy",kind:val.kind||null});
     }
-    var skips=(dayNotes[DNSKIP_PREFIX+dk] && dayNotes[DNSKIP_PREFIX+dk].length)?dayNotes[DNSKIP_PREFIX+dk]:[];
-    var rules=(dayNotes[LRPT_KEY] && dayNotes[LRPT_KEY].length)?dayNotes[LRPT_KEY]:[];
+    var skips=(map[DNSKIP_PREFIX+dk] && map[DNSKIP_PREFIX+dk].length)?map[DNSKIP_PREFIX+dk]:[];
+    // v92: per-date wording overrides for recurring lines (see DNOVR_PREFIX above).
+    var ovr=(map[DNOVR_PREFIX+dk] && typeof map[DNOVR_PREFIX+dk]==="object")?map[DNOVR_PREFIX+dk]:{};
+    var rules=(map[LRPT_KEY] && map[LRPT_KEY].length)?map[LRPT_KEY]:[];
     for(var j=0;j<rules.length;j++){
       var R=rules[j];
-      if(dnLineMatches(R,dk) && skips.indexOf(R.id)<0){ out.push({id:R.id,t:R.t,r:R.r,n:R.n,since:R.since,src:"rule",kind:null}); }
+      // v92: t is the override text when this date has one; bt is always the series text,
+      // so an untouched overridden line can be saved without rewriting the series.
+      // Revert lever — the v91 push (no override, no bt):
+      // if(dnLineMatches(R,dk) && skips.indexOf(R.id)<0){ out.push({id:R.id,t:R.t,r:R.r,n:R.n,since:R.since,src:"rule",kind:null}); }
+      if(dnLineMatches(R,dk) && skips.indexOf(R.id)<0){
+        var hasO=(ovr[R.id]!==undefined && ovr[R.id]!==null && String(ovr[R.id]).trim()!=="");
+        out.push({id:R.id,t:(hasO?String(ovr[R.id]):R.t),bt:R.t,ovr:hasO,r:R.r,n:R.n,since:R.since,src:"rule",kind:null});
+      }
     }
-    var keys=Object.keys(dayNotes);
+    var keys=Object.keys(map);
     for(var m=0;m<keys.length;m++){
       var k=keys[m]; if(!dnIsRuleKey(k)) continue;
-      var rule=dayNotes[k];
-      if(dnRuleMatches(rule,dk)){ out.push({id:k,t:rule.text,r:1,n:rule.rpt,since:rule.sinceKey,src:"legacyrule",kind:rule.kind||null}); }
+      var rule=map[k];
+      // v92 LEGACY SKIP-MIGRATION: legacy "@rpt:" rules now honor "@dnskip:" exactly like
+      // the new bucket rules do, so "Skip just this day" works on repeats created before
+      // the per-line system existed. They also honor per-date overrides. Revert lever:
+      // if(dnRuleMatches(rule,dk)){ out.push({id:k,t:rule.text,r:1,n:rule.rpt,since:rule.sinceKey,src:"legacyrule",kind:rule.kind||null}); }
+      if(dnRuleMatches(rule,dk) && skips.indexOf(k)<0){
+        var hasOL=(ovr[k]!==undefined && ovr[k]!==null && String(ovr[k]).trim()!=="");
+        out.push({id:k,t:(hasOL?String(ovr[k]):rule.text),bt:rule.text,ovr:hasOL,r:1,n:rule.rpt,since:rule.sinceKey,src:"legacyrule",kind:rule.kind||null});
+      }
     }
     return out;
   };
+  var resolveDayLines = function(dk){ return resolveDayLinesIn(dayNotes, dk); };
+  // v90 ORIGINAL resolveDayLines (revert lever — the same body, reading dayNotes directly.
+  // Restore by deleting resolveDayLinesIn + the one-line wrapper above and un-commenting):
+  // var resolveDayLines = function(dk){
+  //   var out=[];
+  //   var val=dayNotes[dk];
+  //   if(Array.isArray(val)){
+  //     for(var i=0;i<val.length;i++){ var L=val[i]; if(L&&L.t){ out.push({id:L.id||dnNewId(),t:L.t,r:0,n:0,since:dk,src:"once",kind:null}); } }
+  //   } else if(typeof val==="string"){
+  //     if(val) out.push({id:"legacy:"+dk,t:val,r:0,n:0,since:dk,src:"legacy",kind:null});
+  //   } else if(val && typeof val==="object" && !val.skip && val.text){
+  //     out.push({id:"legacy:"+dk,t:val.text,r:0,n:0,since:dk,src:"legacy",kind:val.kind||null});
+  //   }
+  //   var skips=(dayNotes[DNSKIP_PREFIX+dk] && dayNotes[DNSKIP_PREFIX+dk].length)?dayNotes[DNSKIP_PREFIX+dk]:[];
+  //   var rules=(dayNotes[LRPT_KEY] && dayNotes[LRPT_KEY].length)?dayNotes[LRPT_KEY]:[];
+  //   for(var j=0;j<rules.length;j++){
+  //     var R=rules[j];
+  //     if(dnLineMatches(R,dk) && skips.indexOf(R.id)<0){ out.push({id:R.id,t:R.t,r:R.r,n:R.n,since:R.since,src:"rule",kind:null}); }
+  //   }
+  //   var keys=Object.keys(dayNotes);
+  //   for(var m=0;m<keys.length;m++){
+  //     var k=keys[m]; if(!dnIsRuleKey(k)) continue;
+  //     var rule=dayNotes[k];
+  //     if(dnRuleMatches(rule,dk)){ out.push({id:k,t:rule.text,r:1,n:rule.rpt,since:rule.sinceKey,src:"legacyrule",kind:rule.kind||null}); }
+  //   }
+  //   return out;
+  // };
   // resolveDayNote — kept as the back-compat accessor the indicators/export use. Now a
   // thin wrapper over resolveDayLines: .text/.kind/.repeating still drive the ✎ pencil and
   // ↻ superscript exactly as before; .lines is the new per-line array the modal edits.
@@ -3925,12 +4074,25 @@ export default function TheList() {
   // --- v88 per-line writers ----------------------------------------------------
   // Build the editable rows for the modal from the resolved lines on dk (always leaves
   // at least one blank row to type into). Rows carry {id,t,r,n,since,src}.
-  var dnPrefillRows = function(dk){
-    var lines=resolveDayLines(dk);
-    var rows=lines.map(function(L){ return {id:L.id,t:L.t,r:L.r,n:L.n||1,since:L.since,src:L.src}; });
+  // v91: same split as resolveDayLines — an ...In(map, dk) form plus the original accessor.
+  var dnPrefillRowsIn = function(map, dk){
+    var lines=resolveDayLinesIn(map, dk);
+    // v92: rows now also carry ovr (this date shows a one-off wording) and bt (the series
+    // wording behind it), so the editor can tell an overridden line from a plain one and a
+    // Save can leave the series alone. Revert lever — the v91 mapping:
+    // var rows=lines.map(function(L){ return {id:L.id,t:L.t,r:L.r,n:L.n||1,since:L.since,src:L.src}; });
+    var rows=lines.map(function(L){ return {id:L.id,t:L.t,r:L.r,n:L.n||1,since:L.since,src:L.src,ovr:!!L.ovr,bt:(L.bt!==undefined?L.bt:L.t)}; });
     if(rows.length===0){ rows.push({id:dnNewId(),t:"",r:0,n:1,since:dk,src:"new"}); }
     return rows;
   };
+  var dnPrefillRows = function(dk){ return dnPrefillRowsIn(dayNotes, dk); };
+  // v90 ORIGINAL dnPrefillRows (revert lever):
+  // var dnPrefillRows = function(dk){
+  //   var lines=resolveDayLines(dk);
+  //   var rows=lines.map(function(L){ return {id:L.id,t:L.t,r:L.r,n:L.n||1,since:L.since,src:L.src}; });
+  //   if(rows.length===0){ rows.push({id:dnNewId(),t:"",r:0,n:1,since:dk,src:"new"}); }
+  //   return rows;
+  // };
   // Local (state-only) row edits inside the open modal — no dayNotes write until Save.
   var dnRowUpdate = function(id, patch){
     setNoteLines(function(rows){ return rows.map(function(r){ return r.id===id ? {...r,...patch} : r; }); });
@@ -3962,6 +4124,14 @@ export default function TheList() {
       n[key]=cur; return n;
     });
     setNoteLines(function(rows){ return rows.filter(function(r){ return r.id!==ruleId; }); });
+    // v92 CRITICAL: also drop it from the AT-OPEN snapshot. dnBuildLinesMap treats "was shown
+    // when the modal opened, and is gone now" as delete-from-all-occurrences — so after a skip,
+    // the very next Save (and since v91 a backdrop tap IS a save) wiped the entire series
+    // instead of suppressing one date. Removing it from noteOrigLines makes the reconciler see
+    // a rule it simply wasn't shown, which it leaves completely alone. The "@dnskip:" write
+    // above is then the only thing that happened. Revert lever: delete the setNoteOrigLines
+    // call below to return to the v91 behavior.
+    setNoteOrigLines(function(rows){ return rows.filter(function(r){ return r.id!==ruleId; }); });
     setNoteRepeatPopup(null);
   };
   // Save the day-note modal. Rebuilds this date's one-off array from the r===0 rows and
@@ -3971,15 +4141,28 @@ export default function TheList() {
   // and bucket rules for OTHER dates are left untouched. Lines newly made recurring are
   // appended (since = this date). Legacy "@rpt:" rules shown on this day migrate into the
   // bucket on save (their old key is removed) so nothing double-counts.
-  var dnCommitLines = function(){
-    var nm=noteModal; if(!nm||!nm.isDay) return;
-    var dk=nm.dayKey;
+  // v91: the reconciler is now a PURE builder — (previous dayNotes map, date, the editor's
+  // rows, the rows shown at open) -> the next dayNotes map. dnCommitLines below is the
+  // unchanged Save path (it just feeds this into setDayNotes). The arrow-key day paging
+  // added in v91 calls the builder directly against dayNotesRef.current so it can save the
+  // open day AND prefill the next day from the resulting map in the same keystroke.
+  // v92: a fifth argument, wordScope ("all" | "today" | null). It only matters when a
+  // RECURRING line's wording was edited in the box: "all" rewrites the series (the old
+  // behavior, and it clears any override this date was carrying), "today" leaves the series
+  // alone and records the new wording as a one-off override for this date only. null means
+  // no recurring line's wording changed, so it never comes up. dnCommitLines below asks
+  // (This day only / All repeats) before it picks one.
+  var dnBuildLinesMap = function(prevMap, dk, editorLines, origLines, wordScope){
     var rows=[];
-    for(var a=0;a<noteLines.length;a++){
-      var rw=noteLines[a]; var tt=(rw.t||"").trim(); if(!tt) continue;
+    var lines=editorLines||[]; var noteOrigLines=origLines||[];
+    for(var a=0;a<lines.length;a++){
+      var rw=lines[a]; var tt=(rw.t||"").trim(); if(!tt) continue;
       rows.push({id:rw.id,t:tt,r:rw.r||0,n:rw.n||1,since:rw.since||dk,src:rw.src||"new"});
     }
-    setDayNotes(function(prev){
+    // What each recurring row LOOKED LIKE when the modal opened (override text included).
+    var origById={}; for(var z=0;z<noteOrigLines.length;z++){ origById[noteOrigLines[z].id]=noteOrigLines[z]; }
+    var ovrSet={}; var ovrDel={}; var ovrTouched=false;
+    return (function(prev){
       var n={...prev};
       // 1) one-off lines for THIS date = the r===0 rows.
       var once=[];
@@ -3993,7 +4176,25 @@ export default function TheList() {
       var nextBucket=[];
       for(var d=0;d<bucket.length;d++){
         var B=bucket[d];
-        if(curRuleById[B.id]){ var rr=curRuleById[B.id]; nextBucket.push({id:B.id,since:B.since,r:rr.r,n:rr.n,t:rr.t}); }
+        if(curRuleById[B.id]){
+          var rr=curRuleById[B.id];
+          // v92: B.t is ALWAYS the series wording. rr.t is what's in the box right now — which,
+          // on a date carrying an override, started out as the override text, not the series
+          // text. So compare against what was SHOWN at open, not against the series.
+          //   untouched      -> series text stays, any override on this date stays
+          //   changed + all  -> series text becomes the new wording, this date's override cleared
+          //   changed + today-> series text untouched, the new wording stored as this date's override
+          // Revert lever — the v91 line (always rewrote the series):
+          // nextBucket.push({id:B.id,since:B.since,r:rr.r,n:rr.n,t:rr.t});
+          var oB=origById[B.id];
+          var shownB=(oB && oB.t!==undefined)?oB.t:rr.t;
+          var textB=B.t;
+          if(rr.t!==shownB){
+            if(wordScope==="today"){ ovrSet[B.id]=rr.t; ovrTouched=true; }
+            else { textB=rr.t; ovrDel[B.id]=true; ovrTouched=true; }
+          }
+          nextBucket.push({id:B.id,since:B.since,r:rr.r,n:rr.n,t:textB});
+        }
         else if(shownRuleIds[B.id]){ /* was shown on this day, now removed -> drop from all */ }
         else { nextBucket.push(B); }
       }
@@ -4007,12 +4208,74 @@ export default function TheList() {
       var curLegacyById={}; for(var f=0;f<rows.length;f++){ if(rows[f].r>0 && rows[f].src==="legacyrule"){ curLegacyById[rows[f].id]=rows[f]; } }
       for(var g=0;g<noteOrigLines.length;g++){
         var oid=noteOrigLines[g]; if(oid.src!=="legacyrule") continue;
-        if(curLegacyById[oid.id]){ var lr=curLegacyById[oid.id]; nextBucket.push({id:dnNewId(),since:oid.since||dk,r:lr.r,n:lr.n,t:lr.t}); }
+        if(curLegacyById[oid.id]){
+          // v92 LEGACY SKIP-MIGRATION, part two. The migrated rule now KEEPS ITS OWN ID (the
+          // old "@rpt:"+date key) instead of being handed a fresh one. Any "@dnskip:" or
+          // "@dnovr:" entry already written against that legacy rule therefore keeps pointing
+          // at it after the migration — otherwise a skipped day would quietly come back the
+          // first time any day of that series was saved. The top-level "@rpt:" key is still
+          // deleted below, so nothing double-counts (the legacy scan only reads top-level
+          // keys). Revert lever — the v91 line (a fresh id, orphaning the skips):
+          // var lr=curLegacyById[oid.id]; nextBucket.push({id:dnNewId(),since:oid.since||dk,r:lr.r,n:lr.n,t:lr.t});
+          var lr=curLegacyById[oid.id];
+          var seriesL=(prev[oid.id] && prev[oid.id].text) ? prev[oid.id].text : lr.t;
+          var shownL=(oid.t!==undefined)?oid.t:lr.t;
+          var textL=seriesL;
+          if(lr.t!==shownL){
+            if(wordScope==="today"){ ovrSet[oid.id]=lr.t; ovrTouched=true; }
+            else { textL=lr.t; ovrDel[oid.id]=true; ovrTouched=true; }
+          }
+          nextBucket.push({id:oid.id,since:oid.since||dk,r:lr.r,n:lr.n,t:textL});
+        }
         delete n[oid.id]; // oid.id is the "@rpt:"+date key
       }
       if(nextBucket.length){ n[LRPT_KEY]=nextBucket; } else { delete n[LRPT_KEY]; }
+      // 5) v92: write this date's override map, if the save touched it.
+      if(ovrTouched){
+        var okey=DNOVR_PREFIX+dk;
+        var obase=(n[okey] && typeof n[okey]==="object") ? {...n[okey]} : {};
+        var oks=Object.keys(ovrSet); var oi;
+        for(oi=0;oi<oks.length;oi++){ obase[oks[oi]]=ovrSet[oks[oi]]; }
+        var odk2=Object.keys(ovrDel);
+        for(oi=0;oi<odk2.length;oi++){ delete obase[odk2[oi]]; }
+        if(Object.keys(obase).length){ n[okey]=obase; } else { delete n[okey]; }
+      }
       return n;
-    });
+    })(prevMap);
+  };
+  // Save the open day-note modal: build the next map from the live rows, write it, close.
+  // v92: which RECURRING rows had their wording retyped in the box? (Blanking a line is a
+  // delete, not a wording change — the reconciler already treats an emptied recurring row as
+  // "remove from all occurrences" — so an emptied row is deliberately not counted here.)
+  var dnWordChanges = function(rows, orig){
+    var o={}; var i;
+    for(i=0;i<(orig||[]).length;i++){ var ol=orig[i]; if(ol.src==="rule"||ol.src==="legacyrule"){ o[ol.id]=ol; } }
+    var out=[];
+    for(i=0;i<(rows||[]).length;i++){
+      var r=rows[i];
+      if(!(r.r>0)) continue;
+      if(r.src!=="rule" && r.src!=="legacyrule") continue;
+      var base=o[r.id]; if(!base) continue;
+      var nt=(r.t||"").trim(); if(nt==="") continue;
+      if(nt!==(base.t||"").trim()) out.push(r.id);
+    }
+    return out;
+  };
+  // v92: dnCommitLines takes an optional wording scope. Called with nothing (Enter, backdrop
+  // tap, the ✎ closing) it first checks whether a repeating line's wording was retyped — if so
+  // it raises the This-day-only / All-repeats prompt instead of guessing, and the real save
+  // happens when that prompt is answered (dnApplyScope routes back in here with the scope).
+  // Nothing else about Save changed: one-off lines, new repeats, deletes and the standby list
+  // all still write straight through. Revert lever — the v91 body:
+  // var dnCommitLines = function(){ var nm=noteModal; if(!nm||!nm.isDay) return;
+  //   var dk=nm.dayKey; var lns=noteLines; var orig=noteOrigLines;
+  //   setDayNotes(function(prev){ return dnBuildLinesMap(prev, dk, lns, orig); }); dnCloseNoteModal(); };
+  var dnCommitLines = function(scopeArg){
+    var nm=noteModal; if(!nm||!nm.isDay) return;
+    var ws=(scopeArg==="all"||scopeArg==="today")?scopeArg:null;
+    var dk=nm.dayKey; var lns=noteLines; var orig=noteOrigLines;
+    if(!ws && dnWordChanges(lns,orig).length>0){ setNoteScopeAsk("lines"); return; }
+    setDayNotes(function(prev){ return dnBuildLinesMap(prev, dk, lns, orig, ws); });
     dnCloseNoteModal();
   };
   // --- v83 per-day STANDBY / cancellation waitlist -----------------------------
@@ -4048,6 +4311,58 @@ export default function TheList() {
     });
   };
   var dnCloseNoteModal = function(){ setNoteModal(null); setNoteDraft(""); setNoteKind(null); setNoteRepeat(0); setNoteWasRepeat(false); setNoteScopeAsk(null); setWlInput(""); setNoteLines([]); setNoteOrigLines([]); setNoteRepeatPopup(null); };
+  // v91: DISMISS NOW SAVES. Tapping the backdrop (or pressing Enter on an empty row) used
+  // to throw the edit away; now it commits, for BOTH note flavors. Undo (Cmd/Ctrl-Z) is the
+  // only way back — which is the point: nothing typed can be lost by a stray tap. The old
+  // Save-note / Cancel buttons are gone from the footer (kept there as commented levers).
+  var dnSaveAndClose = function(){
+    var nm=noteModal; if(!nm){ dnCloseNoteModal(); return; }
+    if(nm.isDay){ dnCommitLines(); return; }
+    var slots=[...getSlots(nm.dateKey)]; var s=slots[nm.idx];
+    if(s){ slots[nm.idx]={...s,note:noteDraft.trim(),noteKind:null}; setSlots(nm.dateKey,slots); }
+    dnCloseNoteModal();
+  };
+  // v91: the accounting popup's commitAll lives inside its render closure; this is the same
+  // write, hoisted so the arrow-key day paging can flush the typed drafts before it moves.
+  var acctCommitDraft = function(dk){
+    var base=accountingRef.current&&accountingRef.current[dk]?accountingRef.current[dk]:{cash:0,venmo:0,applepay:0,square:0,services:0,hours:0};
+    var r={...base};
+    ["cash","venmo","applepay","square","services","hours"].forEach(function(k){ if(acctAdd[k]!==undefined){ r[k]=acctNum(acctAdd[k]); } });
+    acctCommit(dk,r);
+  };
+  // v91: ARROW-KEY DAY PAGING WHILE A POPUP IS OPEN. With the day-note or accounting popup
+  // up and the caret NOT sitting in a field, ← / → step the popup itself to the previous /
+  // next day (Shift = a week), exactly like paging the schedule. The open day is SAVED on
+  // the way out, the schedule behind the popup follows along, and the popup re-prefills from
+  // the freshly-built map (not the pre-commit state), so a repeat you just created shows up
+  // immediately on the day it lands on. Month view doesn't drag its base date along, since
+  // there ← / → mean whole months.
+  var popupShiftDay = function(delta){
+    if (noteModal && noteModal.isDay){
+      // v92: paging saves the open day on the way out. If a REPEATING line's wording was
+      // retyped, saving means choosing between this-date-only and the whole series — so the
+      // page is held and the prompt is raised instead of guessing. Answer it and page again.
+      if (dnWordChanges(noteLines, noteOrigLines).length>0){ setNoteScopeAsk("lines"); return; }
+      var odk=noteModal.dayKey;
+      var nextMap=dnBuildLinesMap(dayNotesRef.current, odk, noteLines, noteOrigLines, null);
+      setDayNotes(nextMap);
+      var ndk=toDateKey(addDays(parseDateKey(odk), delta));
+      var rws=dnPrefillRowsIn(nextMap, ndk);
+      setNoteLines(rws); setNoteOrigLines(rws.slice());
+      setNoteRepeatPopup(null); setNoteScopeAsk(null); setWlInput("");
+      setNoteModal({dayKey:ndk,isDay:true,name:friendlyDateLong(ndk)});
+      if (view!=="Month") { setBaseDate(function(p){ return addDays(p, delta); }); }
+      return;
+    }
+    if (acctModal){
+      var adk=acctModal.dateKey;
+      acctCommitDraft(adk);
+      var ndk2=toDateKey(addDays(parseDateKey(adk), delta));
+      setAcctAdd({});
+      setAcctModal({dateKey:ndk2});
+      if (view!=="Month") { setBaseDate(function(p){ return addDays(p, delta); }); }
+    }
+  };
   // Commit from the day-note modal. If the note is already a repeat, defer to the
   // "this day / all repeats" prompt; otherwise write straight through.
   var dnCommitDayNote = function(action){
@@ -4060,6 +4375,11 @@ export default function TheList() {
   };
   var dnApplyScope = function(scope){
     var nm=noteModal; if(!nm||!nm.isDay){ setNoteScopeAsk(null); return; }
+    // v92: "lines" is the new per-line-editor prompt (a repeating line's wording was retyped).
+    // "This day only" writes a one-off override for this date; "All repeats" rewrites the series
+    // and clears any override this date was carrying. Everything below this line is the ORIGINAL
+    // v63 whole-note path, untouched, still serving the legacy single-note flow.
+    if(noteScopeAsk==="lines"){ setNoteScopeAsk(null); dnCommitLines(scope==="all"?"all":"today"); return; }
     var action=noteScopeAsk; var rk=nm.ruleKey;
     if(action==="clear"){
       if(scope==="all"){ if(rk) dnDeleteRule(rk); }
@@ -4217,6 +4537,87 @@ export default function TheList() {
     return {newSchedules:newSch,conflicts:conflicts};
   };
 
+  // v93 (whole-series DAY shift). A series is not a rule — it is materialized as real
+  // slots sitting on real future dates. So "he needed four weeks instead of three this
+  // once, push everything out" means physically relocating EVERY future occurrence by
+  // the same number of DAYS. The gap between visits is untouched (a 3-weekly client
+  // stays 3-weekly; the whole ladder just slides), and every occurrence also takes the
+  // dropped time — same as buildSeriesTimeShift already does on a same-day drop.
+  //
+  // A zero-day delta (a same-day drop = a pure retime) delegates straight back to
+  // buildSeriesTimeShift, so nothing about the shipping v92 path changes at all.
+  //
+  // TWO PASSES, and it has to be two. A WEEKLY client shifted +7 days lands each
+  // occurrence on the date its OWN next occurrence currently sits. Lifting the entire
+  // future series off the board first makes those self-collisions vanish, so only OTHER
+  // people can block a landing. A blocked occurrence is put back down exactly where it
+  // was and reported — never dropped, never duplicated.
+  const buildSeriesDayShift = function(name, fromDateKey, toDateKey, newTime) {
+    var dayDelta = dayShiftDelta(fromDateKey, toDateKey);
+    if (dayDelta === 0) {
+      var same = buildSeriesTimeShift(name, fromDateKey, newTime);
+      return {newSchedules:same.newSchedules, conflicts:same.conflicts, blocked:[], moved:0, dayDelta:0};
+    }
+    var lower=(name||"").toLowerCase();
+    var newSch={...schedulesRef.current};
+    var blank=function(){ return DEFAULT_TIMES.map(function(t){ return {time:t,name:"",price:"",done:false,recurWeeks:null}; }); };
+    var findOcc=function(ds){ var z; for(z=0;z<ds.length;z++){ if(ds[z].name && ds[z].name.toLowerCase()===lower && !ds[z].done) return z; } return -1; };
+    var picked=[];
+    Object.keys(newSch).forEach(function(dk){
+      if (dk < fromDateKey) return;
+      var ds=newSch[dk]; if(!ds) return;
+      var oi=findOcc(ds); if (oi<0) return;
+      picked.push({dk:dk, slot:{...ds[oi]}});
+    });
+    if (picked.length===0) return {newSchedules:newSch, conflicts:[], blocked:[], moved:0, dayDelta:dayDelta};
+    // PASS 1 — lift the whole future series off the board. Vacate rule is the proven
+    // one from buildSeriesTimeShift: a LONE default time is blanked in place (keeps the
+    // grid row); a shared time, or any custom time, is spliced out so it collapses.
+    picked.forEach(function(p){
+      var ds=[...newSch[p.dk]];
+      var oi=findOcc(ds); if (oi<0) return;
+      var oT=ds[oi].time;
+      var shared=ds.some(function(s,si){ return si!==oi && s.time===oT; });
+      if (DEFAULT_TIMES.indexOf(oT)>=0 && !shared) ds[oi]={time:oT,name:"",price:"",done:false,recurWeeks:null};
+      else ds.splice(oi,1);
+      newSch[p.dk]=ds;
+    });
+    // PASS 2 — set it back down, each occurrence dayDelta days from where it was.
+    // Ascending for a forward shift, descending for a backward one: that keeps a
+    // restored (blocked) occurrence always BEHIND the placement cursor, so a later
+    // occurrence can never land on top of one that was just put back.
+    picked.sort(function(a,b){ if (a.dk===b.dk) return 0; if (dayDelta>0) return a.dk<b.dk?-1:1; return a.dk<b.dk?1:-1; });
+    var blocked=[]; var moved=0;
+    var isStillDefault=DEFAULT_TIMES.indexOf(newTime)>=0;
+    picked.forEach(function(p){
+      var occ=p.slot;
+      var tk=formatDateKey(addDays(parseDateKey(p.dk), dayDelta));
+      var ds=newSch[tk]?[...newSch[tk]]:blank();
+      var ti=ds.findIndex(function(s){ return s.time===newTime; });
+      if (ti>=0 && ds[ti].name) {
+        // Somebody else owns that spot. Put this one back down where it came from and
+        // say so afterwards — a silently vanished haircut is the one unacceptable outcome.
+        blocked.push({dateKey:tk, time:newTime, existingName:ds[ti].name, fromDateKey:p.dk});
+        var bs=newSch[p.dk]?[...newSch[p.dk]]:blank();
+        var bi=bs.findIndex(function(s){ return s.time===occ.time && !s.name; });
+        if (bi>=0) bs[bi]={...occ}; else bs.push({...occ});
+        bs.sort(function(a,b){ return timeToAbsMinutes(a.time)-timeToAbsMinutes(b.time); });
+        newSch[p.dk]=bs;
+        return;
+      }
+      var wasCustom=occ.isCustom===true||(occ.isCustom===undefined&&DEFAULT_TIMES.indexOf(occ.time)===-1);
+      var baseTime=occ.defaultBaseTime||(!wasCustom?occ.time:null);
+      // groupId is dropped: he is leaving the day, so a link to people who stayed behind
+      // would dangle. Same call applySeriesDrop("one") already makes on a cross-day drop.
+      var landed={...occ, time:newTime, isException:true, groupId:null, customTime:(wasCustom&&!isStillDefault), defaultBaseTime:(!wasCustom?baseTime:occ.defaultBaseTime)};
+      if (ti>=0) ds[ti]=landed; else ds.push(landed);
+      ds.sort(function(a,b){ return timeToAbsMinutes(a.time)-timeToAbsMinutes(b.time); });
+      newSch[tk]=ds;
+      moved++;
+    });
+    return {newSchedules:newSch, conflicts:[], blocked:blocked, moved:moved, dayDelta:dayDelta};
+  };
+
   const setRecurring = function(dateKey, idx, weeks) {
     var srcSlots=[...getSlots(dateKey)]; var srcSlot=srcSlots[idx];
     if (weeks && !srcSlot.recurWeeks && srcSlot.name && recurringNameConflict(srcSlot.name, dateKey, idx)) {
@@ -4330,12 +4731,28 @@ export default function TheList() {
     var m=seriesEditModal; if(!m) return;
     if (scope==="one") {
       var slots=[...getSlots(m.dateKey)]; var p=slots[m.idx];
-      if (slots.some(function(s,i){ return i!==m.idx && s.time===m.newTime; })) { setSeriesEditModal(null); return; }
+      // v92 GROUP TIME CASCADE, this-day-only branch. Same rule as commitTimeEdit: if the
+      // person being moved is the FIRST member of a group, the rest of the group slides by
+      // the same number of minutes ON THIS DAY. Their future occurrences are untouched —
+      // this is the "just this one" branch, so every moved member becomes an exception for
+      // this date, exactly as the leader already did. ("All of X's appointments" still moves
+      // X's series only; a whole-series group shift is a separate recurring-engine job.)
+      var cIdxs=groupCascadeIdxs(slots, m.idx);
+      var dMin=timeToAbsMinutes(m.newTime)-timeToAbsMinutes(p.time);
+      var mIdxs=[m.idx].concat(cIdxs);
+      var wantFor={}; var q;
+      for(q=0;q<mIdxs.length;q++){ wantFor[mIdxs[q]]=absMinutesToTime(timeToAbsMinutes(slots[mIdxs[q]].time)+dMin); }
+      var movingS={}; for(q=0;q<mIdxs.length;q++){ movingS[mIdxs[q]]=true; }
+      var blockedS=false;
+      for(q=0;q<mIdxs.length;q++){ var wT=wantFor[mIdxs[q]]; if(slots.some(function(s,i){ return !movingS[i] && s.time===wT; })) { blockedS=true; } }
+      if (blockedS) { setSeriesEditModal(null); return; }
+      // Revert lever — the v91 single-slot write this replaced:
+      // var isStillDefault=DEFAULT_TIMES.indexOf(m.newTime)>=0;
+      // var wasCustom=p.isCustom===true||(p.isCustom===undefined&&DEFAULT_TIMES.indexOf(p.time)===-1);
+      // var baseTime=p.defaultBaseTime||(!wasCustom?p.time:null);
+      // slots[m.idx]={...p,time:m.newTime,isException:true,customTime:wasCustom&&!isStillDefault,defaultBaseTime:(!wasCustom?baseTime:p.defaultBaseTime)};
       var snap={schedules:JSON.parse(JSON.stringify(schedulesRef.current))}; pushUndo(snap);
-      var isStillDefault=DEFAULT_TIMES.indexOf(m.newTime)>=0;
-      var wasCustom=p.isCustom===true||(p.isCustom===undefined&&DEFAULT_TIMES.indexOf(p.time)===-1);
-      var baseTime=p.defaultBaseTime||(!wasCustom?p.time:null);
-      slots[m.idx]={...p,time:m.newTime,isException:true,customTime:wasCustom&&!isStillDefault,defaultBaseTime:(!wasCustom?baseTime:p.defaultBaseTime)};
+      for(q=0;q<mIdxs.length;q++){ var tq=mIdxs[q]; slots[tq]=retimeSlot(slots[tq], wantFor[tq], {isException:true}); }
       slots.sort(function(a,b){ return timeToAbsMinutes(a.time)-timeToAbsMinutes(b.time); });
       setSlots(m.dateKey,slots);
       setSeriesEditModal(null);
@@ -4383,11 +4800,22 @@ export default function TheList() {
       setSeriesEditModal(null);
     } else {
       var snap2={schedules:JSON.parse(JSON.stringify(schedulesRef.current))}; pushUndo(snap2);
-      var res=buildSeriesTimeShift(m.name, m.dateKey, m.newTime);
+      // v93: revert lever — v92 shifted the TIME only and pinned every occurrence to its
+      // own day, so a cross-day drop could never push the series out a week:
+      //   var res=buildSeriesTimeShift(m.name, m.dateKey, m.newTime);
+      // buildSeriesDayShift is identical to that call whenever the drop stayed on the
+      // same day (it delegates straight back to it), so the same-day path is unchanged.
+      var res=buildSeriesDayShift(m.name, m.dateKey, m.targetDateKey, m.newTime);
       setSeriesEditModal(null);
       if (res.conflicts.length>0) {
         setConflictModal({conflicts:res.conflicts, pending:res.newSchedules, client:{name:m.name,price:m.price||"",recurWeeks:m.recurWeeks}, history:{type:"edited",time:m.newTime,name:m.name,prevName:m.name,dateKey:m.dateKey}});
-      } else { setSchedules(res.newSchedules); }
+      } else {
+        setSchedules(res.newSchedules);
+        if (res.dayDelta!==0) {
+          addHistoryEntry({type:"rescheduled",time:m.newTime,name:m.name,price:m.price,dateKey:m.targetDateKey});
+          if (res.blocked.length>0) setSeriesShiftReport({name:m.name, moved:res.moved, blocked:res.blocked, phrase:dayShiftPhrase(m.dateKey, m.targetDateKey)});
+        }
+      }
     }
   };
 
@@ -4974,6 +5402,19 @@ export default function TheList() {
       return;
     }
     if (client.originalDateKey === targetDateKey && client.originalIdx === targetIdx) { setPlacingClient(null); return; }
+    // v93 SILENT-MOVE HOLE #1. A recurring client moved through TAP-TO-PLACE — which is
+    // where a live drag lands the moment it crosses out of the source day's column, i.e.
+    // exactly what happens when you drag somebody onto a DIFFERENT DAY — used to move
+    // without asking anything. Only the two direct-drop paths raised the question, so
+    // the series silently stayed put and every future visit was left on the old day.
+    // Every move path now asks the same this-one / whole-series question.
+    // Revert lever: delete this block and the old silent move resumes.
+    if (client.recurWeeks != null && client.originalDateKey && client.originalIdx !== undefined) {
+      var srcP = getSlots(client.originalDateKey)[client.originalIdx] || {};
+      setSeriesEditModal({field:"drop", dateKey:client.originalDateKey, idx:client.originalIdx, targetDateKey:targetDateKey, targetIdx:targetIdx, name:client.name, price:client.price, recurWeeks:client.recurWeeks, pending:!!srcP.pending, oldTime:srcP.time||"", newTime:targetSlot.time});
+      setPlacingClient(null);
+      return;
+    }
     var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
     pushUndo(snapshot);
     if (client.originalDateKey === targetDateKey) {
@@ -5260,6 +5701,20 @@ export default function TheList() {
       if (!mine(e)) return;
       var px = e.clientX; var py = e.clientY;
       dragPosRef.current = {x:px, y:py};
+      // v90 (#8): THE POST-MOVE DAY-JUMP FIX. The root div's swipe-to-navigate gesture
+      // records a start point on touchstart and, on touchend, pages the day if the
+      // finger travelled 55px+ mostly-horizontally. A drag ALSO starts with a touchstart
+      // on that same root div (the arm is silent, so nothing is live yet and the
+      // touchstart guard lets it through), and dragging an appointment sideways into
+      // another column is exactly a 55px+ mostly-horizontal travel. The touchend guards
+      // (!isLiveDraggingRef.current && !dragState) are all cleared by the pointerup
+      // handler below, which fires BEFORE touchend — so the swipe fired on every
+      // cross-column drop. That is why a same-day (vertical) move never jumped and a
+      // cross-day (horizontal) move always did, instantly, by one day in whichever
+      // direction the finger travelled. Killing the recorded start point the moment a
+      // real drag moves disarms the swipe for this gesture only. Nothing that
+      // intentionally opens a day (tap-to-place, month-cell drop, quick-book) is touched.
+      swipeNavStart.current = null;
       if (!dragMovedRef.current && dragStartPosRef.current) {
         if (Math.abs(px - dragStartPosRef.current.x) > 10 || Math.abs(py - dragStartPosRef.current.y) > 10) {
           dragMovedRef.current = true;
@@ -5360,6 +5815,7 @@ export default function TheList() {
         }
       }
       releaseDragPointer();
+      swipeNavStart.current = null; // v90 (#8): second belt on the day-jump — pointerup lands before touchend
       setIsLiveDragging(false); dragLiftedRef.current = false; setDragLifted(false);
       dragOverRef.current = null; setDragOverKey(null);
       if (!keepDragForCal) setDragState(null); // v82 (#4): keep the group alive for the day picker
@@ -5371,6 +5827,7 @@ export default function TheList() {
       // tap-to-place and a group/multi move to the picker.
       if (profileHoldTimer.current) { clearTimeout(profileHoldTimer.current); profileHoldTimer.current = null; }
       releaseDragPointer();
+      swipeNavStart.current = null; // v90 (#8): same disarm on an OS-cancelled drag
       setIsLiveDragging(false); dragLiftedRef.current = false; setDragLifted(false);
       var overKey = dragOverRef.current;
       dragOverRef.current = null; setDragOverKey(null);
@@ -5475,6 +5932,19 @@ export default function TheList() {
     var client = reassignMode.client; var rc = reassignMode.remainingConflicts;
     var slots = [...getSlots(dateKey)]; var slot = slots[idx];
     if (slot.name) return;
+    // v93 SILENT-MOVE HOLE #2. Same question on the drag-calendar path (pick somebody up,
+    // drop them on a day in the little calendar, then tap the slot). Scoped hard to a
+    // LONE recurring client actually being MOVED: not a group, not a queue drain, and not
+    // a conflict jump or a fresh check-off placement — those carry no originalDateKey, so
+    // the guard excludes them and they behave exactly as before.
+    // Revert lever: delete this block.
+    if (client.recurWeeks != null && reassignMode.originalDateKey && reassignMode.originalIdx !== undefined
+        && reassignQueue.length === 0 && !(reassignMode.groupSize > 1) && !client.groupId && rc.length === 0) {
+      var srcQ = getSlots(reassignMode.originalDateKey)[reassignMode.originalIdx] || {};
+      setSeriesEditModal({field:"drop", dateKey:reassignMode.originalDateKey, idx:reassignMode.originalIdx, targetDateKey:dateKey, targetIdx:idx, name:client.name, price:client.price, recurWeeks:client.recurWeeks, pending:!!srcQ.pending, oldTime:srcQ.time||"", newTime:slot.time});
+      setReassignMode(null); setReassignQueue([]);
+      return;
+    }
     var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))}; pushUndo(snapshot);
     // v78: groupId travels with the queued client (a joint group placed via
     // tap-to-place re-joins as each member lands); explicitly null for everyone
@@ -5642,6 +6112,11 @@ export default function TheList() {
         // is active or a slot is being edited. A drag needs a 500ms long-press to lift
         // and any finger movement cancels that timer, so a quick horizontal swipe can
         // never start a drag — it is safe to let the swipe run even over slot rows.
+        // v90 (#8): the reverse case was the bug. A drag that ENDS here has already had
+        // its live/dragState flags cleared by pointerup (pointerup precedes touchend), so
+        // those two guards were useless and a sideways drop read as a swipe. The drag now
+        // nulls swipeNavStart.current on its first real movement, so this whole block is
+        // skipped for any gesture that became a drag. The guards below are kept as-is.
         if (swipeNavStart.current && !isLiveDraggingRef.current && !dragState && !editingCell && e.changedTouches.length===1) {
           var dx = e.changedTouches[0].clientX - swipeNavStart.current.x;
           var dy = e.changedTouches[0].clientY - swipeNavStart.current.y;
@@ -5661,7 +6136,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v89</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v93</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -5907,12 +6382,35 @@ export default function TheList() {
         </div>
       )}
 
+      {/* v93: aftermath of a whole-series day shift. Only appears when at least one future
+          visit could NOT be slid because somebody else already owns that spot on the new
+          date. Those visits were left exactly where they were — nothing is ever silently
+          dropped — and this says which ones so they can be sorted out by hand. */}
+      {seriesShiftReport && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",zIndex:1160,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px",boxSizing:"border-box"}} onClick={function(){ setSeriesShiftReport(null); }}>
+          <div style={{background:"#ffffff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"26px 26px 22px",width:"min(400px,92vw)",maxHeight:"80vh",overflowY:"auto"}} onClick={function(e){ e.stopPropagation(); }}>
+            <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#c0392b",marginBottom:"8px"}}>Series moved</div>
+            <div style={{fontSize:"15px",color:"#1a1a1a",marginBottom:"6px"}}>{seriesShiftReport.moved} visit{seriesShiftReport.moved===1?"":"s"} slid {seriesShiftReport.phrase}. {seriesShiftReport.blocked.length} could not.</div>
+            <div style={{fontSize:"12px",color:"#888",marginBottom:"16px"}}>Somebody else was already in that spot on the new date, so {(seriesShiftReport.name||"this client")} was left where he was on these dates. Move them by hand.</div>
+            <div style={{marginBottom:"16px"}}>
+              {seriesShiftReport.blocked.map(function(b,i){ return (
+                <div key={i} style={{padding:"9px 10px",marginBottom:"4px",background:"#fff5f4",border:"1px solid #f0d0cc",borderRadius:"6px"}}>
+                  <div style={{fontSize:"12px",color:"#1a1a1a"}}>{friendlyDate(b.fromDateKey)} {"\u2192"} {friendlyDate(b.dateKey)} {"\u00b7"} {b.time}</div>
+                  <div style={{fontSize:"11px",color:"#c0392b",marginTop:"2px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{b.existingName} is already here</div>
+                </div>
+              ); })}
+            </div>
+            <button onClick={function(){ setSeriesShiftReport(null); }} style={{width:"100%",padding:"10px",background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Got it</button>
+          </div>
+        </div>
+      )}
+
       {seriesEditModal && (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:1150,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px",boxSizing:"border-box"}} onClick={function(){ setSeriesEditModal(null); }}>
           <div style={{background:"#f8f8f6",border:"1px solid #d8d8d6",borderRadius:"12px",padding:"26px 26px 22px",width:"min(360px,92vw)"}} onClick={function(e){ e.stopPropagation(); }}>
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#4a8a9a",marginBottom:"8px"}}>Recurring appointment</div>
             <div style={{fontSize:"16px",color:"#1a1a1a",marginBottom:"6px"}}>{seriesEditModal.field==="time"?"Move this time for…":seriesEditModal.field==="drop"?"Move this appointment…":seriesEditModal.field==="lock"?"Lock in…":"Apply this change to…"}</div>
-            <div style={{fontSize:"12px",color:"#888",marginBottom:"20px"}}>{seriesEditModal.field==="time"?((seriesEditModal.name||"This client")+" moves from "+seriesEditModal.oldTime+" to "+seriesEditModal.newTime+"."):seriesEditModal.field==="drop"?((seriesEditModal.name||"This client")+" moves to "+seriesEditModal.newTime+". \u201cAll\u201d shifts the whole series to this time (each stays on its own day)."):seriesEditModal.field==="lock"?((seriesEditModal.name||"This client")+" is penciled in"+(seriesEditModal.time?(" at "+seriesEditModal.time):"")+"."):((seriesEditModal.oldName||"This client")+(seriesEditModal.newName&&seriesEditModal.newName!==seriesEditModal.oldName?(" \u2192 "+seriesEditModal.newName):"")+".")}</div>
+            <div style={{fontSize:"12px",color:"#888",marginBottom:"20px"}}>{seriesEditModal.field==="time"?((seriesEditModal.name||"This client")+" moves from "+seriesEditModal.oldTime+" to "+seriesEditModal.newTime+"."):seriesEditModal.field==="drop"?seriesDropBlurb(seriesEditModal):seriesEditModal.field==="lock"?((seriesEditModal.name||"This client")+" is penciled in"+(seriesEditModal.time?(" at "+seriesEditModal.time):"")+"."):((seriesEditModal.oldName||"This client")+(seriesEditModal.newName&&seriesEditModal.newName!==seriesEditModal.oldName?(" \u2192 "+seriesEditModal.newName):"")+".")}</div>
             <button onClick={function(){ if(seriesEditModal.field==="time"){ applySeriesTime("all"); } else if(seriesEditModal.field==="drop"){ applySeriesDrop("all"); } else if(seriesEditModal.field==="lock"){ applySeriesLock("all"); } else { applySeriesNamePrice("all"); } }} style={{display:"block",width:"100%",padding:"12px",background:"#1a1a1a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",marginBottom:"10px"}}>All of {(seriesEditModal.field==="nameprice"?seriesEditModal.oldName:seriesEditModal.name)||"this client"}'s appointments</button>
             <button onClick={function(){ if(seriesEditModal.field==="time"){ applySeriesTime("one"); } else if(seriesEditModal.field==="drop"){ applySeriesDrop("one"); } else if(seriesEditModal.field==="lock"){ applySeriesLock("one"); } else { applySeriesNamePrice("one"); } }} style={{display:"block",width:"100%",padding:"12px",background:"#ffffff",border:"1px solid #d0d0ce",borderRadius:"8px",color:"#1a1a1a",cursor:"pointer",fontFamily:"inherit",fontSize:"14px",marginBottom:"14px"}}>Just this one</button>
             <button onClick={function(){ setSeriesEditModal(null); }} style={{display:"block",width:"100%",padding:"8px",background:"none",border:"none",color:"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>Cancel</button>
@@ -6390,14 +6888,20 @@ export default function TheList() {
                 </div>
               </div>
             )}
+            {/* v91: the DONE button is gone. Enter in any field, and tapping outside the popup,
+                both already ran commitAll — so the button was only ever a third way to do the
+                same thing. Revert lever:
             <button onClick={closeAcct} style={{display:"block",width:"100%",padding:"11px",background:"#1a1a1a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Done</button>
+            */}
           </div>
         </div>
         );
       })()}
 
       {noteModal && (
-        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px"}} onClick={function(){ dnCloseNoteModal(); }}>
+        /* v91: backdrop tap SAVES (dnSaveAndClose) — it used to discard (dnCloseNoteModal).
+           Revert lever: swap dnSaveAndClose() back to dnCloseNoteModal() on the line below. */
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px"}} onClick={function(){ dnSaveAndClose(); }}>
           <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"24px",width:"min(360px,92vw)"}} onClick={function(e){ e.stopPropagation(); }}>
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#a07830",marginBottom:"8px"}}>{noteModal.isDay?"Day Note":"Note"}</div>
             <div style={{fontSize:"16px",color:"#1a1a1a",marginBottom:"14px"}}>{noteModal.name}</div>
@@ -6426,12 +6930,38 @@ export default function TheList() {
             {noteModal.isDay && (
               <div style={{marginBottom:"12px"}}>
                 {noteLines.map(function(row, idx){
-                  var chipLbl = row.r===0 ? "once" : (row.r===2 ? (row.n>1?("↻ "+row.n+"mo"):"↻ mo") : (row.n>1?("↻ "+row.n+"w"):"↻ wk"));
+                  // v91: the repeat chip now MIRRORS the recurring-customer badge — number
+                  // first, then the ↺ arrow (same glyph, same direction, same 12px/16px
+                  // sizes), gold on plain white with no box. A non-repeating line no longer
+                  // reads "once"; it shows the same ↺, greyed out. Old boxed-chip label kept
+                  // as a revert lever:
+                  // var chipLbl = row.r===0 ? "once" : (row.r===2 ? ("↻ "+row.n+"mo") : ("↻ "+row.n+"w"));
                   var chipOn = row.r>0;
+                  var chipNum = !chipOn ? "" : (row.r===2 ? ((row.n||1)+"mo") : ((row.n||1)+"w"));
+                  var chipCol = chipOn ? "#a07830" : "#c8c8c4";
                   return (
                     <div key={row.id} style={{display:"flex",alignItems:"center",gap:"6px",marginBottom:"6px"}}>
-                      <input ref={function(el){ if(el){ noteRowRefs.current[row.id]=el; } else { delete noteRowRefs.current[row.id]; } }} autoFocus={idx===0} value={row.t} onChange={function(e){ dnRowUpdate(row.id,{t:e.target.value}); }} onKeyDown={function(ev){
-                          if(ev.key==="Enter"){ ev.preventDefault(); var nid=dnNewId(); var dk=(noteModal&&noteModal.dayKey)||"";
+                      {/* v91: autoFocus={idx===0} REMOVED — opening a day note no longer drops the
+                          caret into the end of the first existing line (which both hijacked the
+                          keyboard and put the arrows to work moving the text cursor). Tap a line to
+                          edit it. This is also what frees ← / → to page the day. Revert lever: put
+                          autoFocus={idx===0} back on the input below. */}
+                      <input ref={function(el){ if(el){ noteRowRefs.current[row.id]=el; } else { delete noteRowRefs.current[row.id]; } }} value={row.t} onChange={function(e){ dnRowUpdate(row.id,{t:e.target.value}); }} onKeyDown={function(ev){
+                          // v92: ENTER ALWAYS SAVES AND CLOSES — empty line or full line, no
+                          // difference. Adding/reaching another row is now ↓ / ↑ (hop between the
+                          // boxes), Tab (native), Shift+Enter (open a fresh row right below), or
+                          // the "+ line" button. Revert lever — the v91 pair (Enter on a line with
+                          // text opened the next line; Enter on an empty line saved):
+                          // if(ev.key==="Enter" && (row.t||"").trim()===""){ ev.preventDefault(); dnCommitLines(); return; }
+                          // if(ev.key==="Enter"){ ev.preventDefault(); var nid=dnNewId(); ...add row... }
+                          if(ev.key==="Enter" && !ev.shiftKey){ ev.preventDefault(); dnCommitLines(); return; }
+                          if(ev.key==="ArrowDown" || ev.key==="ArrowUp"){
+                            var here=-1; for(var h=0;h<noteLines.length;h++){ if(noteLines[h].id===row.id){ here=h; break; } }
+                            var want= ev.key==="ArrowDown" ? here+1 : here-1;
+                            if(here>=0 && want>=0 && want<noteLines.length){ ev.preventDefault(); var elh=noteRowRefs.current[noteLines[want].id]; if(elh){ elh.focus(); } }
+                            return;
+                          }
+                          if(ev.key==="Enter" && ev.shiftKey){ ev.preventDefault(); var nid=dnNewId(); var dk=(noteModal&&noteModal.dayKey)||"";
                             setNoteLines(function(rows){ var out=[]; for(var i=0;i<rows.length;i++){ out.push(rows[i]); if(rows[i].id===row.id){ out.push({id:nid,t:"",r:0,n:1,since:dk,src:"new"}); } } return out; });
                             setTimeout(function(){ var el=noteRowRefs.current[nid]; if(el){ el.focus(); } },0);
                           } else if(ev.key==="Backspace" && (row.t||"")==="" && noteLines.length>1){ ev.preventDefault();
@@ -6441,7 +6971,10 @@ export default function TheList() {
                             if(prevId){ setTimeout(function(){ var el2=noteRowRefs.current[prevId]; if(el2){ el2.focus(); } },0); }
                           }
                         }} placeholder={idx===0?"Add a note…":"…"} style={{flex:1,minWidth:0,boxSizing:"border-box",background:"#efefed",border:"1px solid #d8d8d6",borderRadius:"6px",padding:"9px 10px",fontSize:"14px",fontFamily:"Georgia,serif",color:"#1a1a1a",outline:"none"}}/>
-                      <button onClick={function(){ setNoteRepeatPopup(row.id); }} title="Repeat setting for this line" style={{flexShrink:0,padding:"7px 9px",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",whiteSpace:"nowrap",border:"1px solid "+(chipOn?"#c9a96e":"#e0e0de"),background:chipOn?"#c9a96e":"transparent",color:chipOn?"#fff":"#999"}}>{chipLbl}</button>
+                      <button onClick={function(){ setNoteRepeatPopup(row.id); }} title={chipOn?"Repeating — tap to change":"Not repeating — tap to set a repeat"} style={{flexShrink:0,display:"flex",alignItems:"center",justifyContent:"flex-end",gap:"2px",minWidth:"46px",padding:"4px 2px",background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap",color:chipCol,lineHeight:1}}>
+                        {chipOn?<span style={{fontSize:"12px",fontWeight:"500",letterSpacing:"0.01em",lineHeight:1}}>{chipNum}</span>:null}
+                        <span style={{fontSize:"16px",fontWeight:"500",lineHeight:1}}>{"↺"}</span>
+                      </button>
                       <button onClick={function(){ dnRowDelete(row.id); }} title="Remove this line" style={{flexShrink:0,background:"none",border:"none",cursor:"pointer",color:"#c0392b",fontSize:"18px",lineHeight:1,padding:"0 2px"}}>{"×"}</button>
                     </div>
                   );
@@ -6517,7 +7050,10 @@ export default function TheList() {
             )}
             {noteModal.isDay && noteScopeAsk ? (
               <div>
-                <div style={{fontSize:"12px",color:"#777",marginBottom:"10px"}}>{noteScopeAsk==="clear"?"Remove this repeating note…":"Apply your change…"}</div>
+                {/* v92: "lines" is the per-line wording prompt — you retyped a repeating line, so
+                    the app asks whether that new wording is a one-off for this date or the new
+                    wording for the whole series. "clear"/"save" are the original legacy prompts. */}
+                <div style={{fontSize:"12px",color:"#777",marginBottom:"10px"}}>{noteScopeAsk==="lines"?"You changed the wording of a repeating line. Where should the new wording apply?":(noteScopeAsk==="clear"?"Remove this repeating note…":"Apply your change…")}</div>
                 <div style={{display:"flex",gap:"8px"}}>
                   <button onClick={function(){ dnApplyScope("today"); }} style={{flex:1,padding:"10px",background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>This day only</button>
                   <button onClick={function(){ dnApplyScope("all"); }} style={{flex:1,padding:"10px",background:"#c9a96e",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>All repeats</button>
@@ -6534,19 +7070,22 @@ export default function TheList() {
                   <button onClick={function(){ addSlotToEnd(noteModal.dayKey); }} style={{padding:"10px 12px",background:"transparent",border:"1px solid #e6e6e4",borderRadius:"6px",color:"#999",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",letterSpacing:"0.04em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#f4f4f2"; }} onMouseLeave={function(e){ e.currentTarget.style.background="transparent"; }}>+PM</button>
                 )}
                 {/* v84 (#4): Clear button removed per request. Clear a note by emptying the text and pressing Save (an empty note commits as a clear: day notes route through dnWriteToday/scope-prompt, appointment notes save note:""). To restore, re-add a button calling dnCommitDayNote("clear") for day notes, or setting the slot note:"" for appointment notes. */}
+                {/* v91: SAVE NOTE and CANCEL are gone as buttons. Enter (or Enter on an empty
+                    line, for the day-note row editor) and tapping outside the popup both SAVE
+                    — see dnSaveAndClose. Undo (Cmd/Ctrl-Z) is the only way back out of a change
+                    you didn't want. Both buttons are preserved below as revert levers:
                 <button onClick={function(){
                   var nm=noteModal;
                   if (nm.isDay) { dnCommitLines(); }
                   else {
                     var slots=[...getSlots(nm.dateKey)]; var s=slots[nm.idx];
-                    // v89 revert lever — old kind-carrying write:
-                    // slots[nm.idx]={...s,note:noteDraft.trim(),noteKind:noteDraft.trim()?noteKind:null};
                     slots[nm.idx]={...s,note:noteDraft.trim(),noteKind:null};
                     setSlots(nm.dateKey,slots);
                     setNoteModal(null); setNoteDraft(""); setNoteKind(null);
                   }
                 }} style={{marginLeft:"auto",padding:"10px 16px",background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Save note</button>
                 <button onClick={function(){ dnCloseNoteModal(); }} style={{padding:"10px 14px",background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Cancel</button>
+                */}
               </div>
             )}
           </div>
@@ -6560,7 +7099,12 @@ export default function TheList() {
         var trow=null; for(var i=0;i<noteLines.length;i++){ if(noteLines[i].id===noteRepeatPopup){ trow=noteLines[i]; break; } }
         if(!trow) return null;
         var dk=noteModal.dayKey;
-        var isInheritedRule = (trow.src==="rule" && trow.since && trow.since!==dk);
+        // v92 LEGACY SKIP-MIGRATION, part three: "Skip just this day" now offers itself on
+        // legacy "@rpt:" repeats too (src "legacyrule"), not just the new per-line bucket rules.
+        // resolveDayLinesIn honors "@dnskip:" for both now, and a migrated legacy rule keeps its
+        // id, so the skip sticks. Revert lever — the v91 condition (bucket rules only):
+        // var isInheritedRule = (trow.src==="rule" && trow.since && trow.since!==dk);
+        var isInheritedRule = ((trow.src==="rule" || trow.src==="legacyrule") && trow.since && trow.since!==dk);
         var setR=function(rr,nn){ dnRowUpdate(noteRepeatPopup,{r:rr,n:nn}); setNoteRepeatPopup(null); };
         var fullBtn=function(on){ return {display:"block",width:"100%",boxSizing:"border-box",textAlign:"left",padding:"9px 10px",marginBottom:"6px",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",border:"1px solid "+(on?"#c9a96e":"#e0e0de"),background:on?"#c9a96e":"transparent",color:on?"#fff":"#555"}; };
         return (
@@ -6639,6 +7183,12 @@ export default function TheList() {
         var tmBase = slot.defaultBaseTime || timeEditModal.original;
         var tmShift = (!tmIsCustom && tmBase && workingTime!==tmBase) ? (timeToAbsMinutes(workingTime)<timeToAbsMinutes(tmBase) ? "earlier" : "later") : null;
         var tmColor = tmShift ? ADJ_BLUE : tmIsCustom ? "#2f7d8a" : "#1a1a1a";
+        // v92: tell the user, before they confirm, that this move will carry the rest of the
+        // group with it — i.e. that they're holding the FIRST member of a linked run. Nothing
+        // shows for the 2nd/3rd member (groupCascadeIdxs returns [] there) or for a lone slot.
+        var tmSlots = getSlots(timeEditModal.dateKey);
+        var tmCascIdxs = groupCascadeIdxs(tmSlots, timeEditModal.idx);
+        var tmCascNames = tmCascIdxs.map(function(gi){ var gs=tmSlots[gi]; return gs.name || gs.blockLabel || "blocked"; });
         // Inverted on purpose: the +5/+1 buttons subtract and the −5/−1 buttons add,
         // keeping the same labels and positions but flipping the effect.
         var nudge = function(delta){ return function(){ setTimeEditMinutes(function(m){ return m - delta; }); }; };
@@ -6653,7 +7203,10 @@ export default function TheList() {
               {tmShift&&<div style={{fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",color:tmColor}}>{tmShift}</div>}
               {!tmShift&&tmIsCustom&&<div style={{fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",color:"#2f7d8a"}}>custom</div>}
             </div>
-            <div style={{fontSize:"12px",color:"#aaa",marginBottom:"18px"}}>Default was {timeEditModal.original}</div>
+            <div style={{fontSize:"12px",color:"#aaa",marginBottom:tmCascNames.length?"6px":"18px"}}>Default was {timeEditModal.original}</div>
+            {tmCascNames.length>0 && (
+              <div style={{fontSize:"11px",color:"#a07830",marginBottom:"18px",lineHeight:1.35}}>{"Group — "+tmCascNames.join(", ")+(tmCascNames.length>1?" move":" moves")+" with this by the same amount."}</div>
+            )}
             <div style={{display:"flex",gap:"8px",marginBottom:"8px"}}>
               <button onClick={nudge(5)} style={nudgeBtn}>+5 min</button>
               <button onClick={nudge(-5)} style={nudgeBtn}>−5 min</button>
@@ -7106,7 +7659,7 @@ export default function TheList() {
                       </div>
                     ); })()}
                     {(function(){ var rN=resolveDayNote(dk); var hasN=!!rN.text; var k=rN.text?rN.kind:null; var rep=rN.repeating; var col=!hasN?"#cfcccc":(k==="personal"?TODAY_BLUE:"#c9a96e"); return (
-                      <button onClick={function(e){ e.stopPropagation(); var rws=dnPrefillRows(dk); setNoteLines(rws); setNoteOrigLines(rws.slice()); setNoteRepeatPopup(null); setNoteScopeAsk(null); setNoteModal({dayKey:dk,isDay:true,name:friendlyDateLong(dk)}); }} onMouseDown={function(e){ e.stopPropagation(); }} onTouchStart={function(e){ e.stopPropagation(); }} title={hasN?"Day note":"Add a day note"} style={{position:"absolute",bottom:"2px",right:"3px",background:"none",border:"none",cursor:"pointer",padding:"2px 3px",color:col,fontSize:isPhone?"13px":"15px",lineHeight:1,opacity:outside?0.6:1,WebkitTextStroke:"0.4px currentColor"}}>{"✎"}{rep?<sup style={{fontSize:"7px",marginLeft:"1px",opacity:0.85,WebkitTextStroke:"0px"}}>{"↻"}</sup>:null}</button>
+                      <button onClick={function(e){ e.stopPropagation(); var rws=dnPrefillRows(dk); setNoteLines(rws); setNoteOrigLines(rws.slice()); setNoteRepeatPopup(null); setNoteScopeAsk(null); setNoteModal({dayKey:dk,isDay:true,name:friendlyDateLong(dk)}); }} onMouseDown={function(e){ e.stopPropagation(); }} onTouchStart={function(e){ e.stopPropagation(); }} title={hasN?"Day note":"Add a day note"} style={{position:"absolute",bottom:"2px",right:"3px",background:"none",border:"none",cursor:"pointer",padding:"2px 3px",color:col,fontSize:isPhone?"13px":"15px",lineHeight:1,opacity:outside?0.6:1,WebkitTextStroke:"0.4px currentColor"}}>{"✎"}{rep?<sup style={{fontSize:"7px",marginLeft:"1px",opacity:0.85,WebkitTextStroke:"0px"}}>{"↺"}</sup>:null}</button>
                     ); })()}
                   </div>
                 );
@@ -7152,7 +7705,7 @@ export default function TheList() {
                     );
                   })()}
                   <button onClick={function(e){ e.stopPropagation(); setAcctAdd({}); setAcctModal({dateKey:dateKey}); }} title="Accounting for the day" style={{background:"none",border:"none",cursor:"pointer",padding:(getDayCount()>3?"0 2px":"0 4px 0 2px"),color:acctHasData(dateKey)?"#c9a96e":"#bbb",fontSize:"19px",fontWeight:"bold",lineHeight:1,flexShrink:0,fontFamily:"Georgia,serif"}}>{"$"}</button>
-                  <button onClick={function(e){ e.stopPropagation(); var rws=dnPrefillRows(dateKey); setNoteLines(rws); setNoteOrigLines(rws.slice()); setNoteRepeatPopup(null); setNoteScopeAsk(null); setNoteModal({dayKey:dateKey,isDay:true,name:friendlyDateLong(dateKey)}); }} title="Note for the day" style={{background:"none",border:"none",cursor:"pointer",padding:(getDayCount()>3?"0 2px":"0 9px 0 2px"),color:dayNoteText(dateKey)?"#c9a96e":"#bbb"/* v89 uniform gold. Revert lever: dayNoteText(dateKey)?(dayNoteKind(dateKey)==="personal"?TODAY_BLUE:"#c9a96e"):"#bbb" */,fontSize:"22px",lineHeight:1,flexShrink:0,WebkitTextStroke:"0.5px currentColor"}}>{"✎"}{dayNoteRepeating(dateKey)?<sup style={{fontSize:"9px",marginLeft:"1px",opacity:0.85,WebkitTextStroke:"0px"}}>{"↻"}</sup>:null}</button>
+                  <button onClick={function(e){ e.stopPropagation(); var rws=dnPrefillRows(dateKey); setNoteLines(rws); setNoteOrigLines(rws.slice()); setNoteRepeatPopup(null); setNoteScopeAsk(null); setNoteModal({dayKey:dateKey,isDay:true,name:friendlyDateLong(dateKey)}); }} title="Note for the day" style={{background:"none",border:"none",cursor:"pointer",padding:(getDayCount()>3?"0 2px":"0 9px 0 2px"),color:dayNoteText(dateKey)?"#c9a96e":"#bbb"/* v89 uniform gold. Revert lever: dayNoteText(dateKey)?(dayNoteKind(dateKey)==="personal"?TODAY_BLUE:"#c9a96e"):"#bbb" */,fontSize:"22px",lineHeight:1,flexShrink:0,WebkitTextStroke:"0.5px currentColor"}}>{"✎"}{dayNoteRepeating(dateKey)?<sup style={{fontSize:"9px",marginLeft:"1px",opacity:0.85,WebkitTextStroke:"0px"}}>{"↺"}</sup>:null}</button>
                 </div>
                 <div data-slotscroll="1" style={{flex:(slots.length+" 1 0px"),minHeight:0,paddingBottom:"0px",overflowX:"hidden",overscrollBehavior:"contain",display:"flex",flexDirection:"column"}}
                   onTouchMove={function(e){
