@@ -650,6 +650,10 @@ export default function TheList() {
   const [noteWasRepeat, setNoteWasRepeat] = useState(false); // v63: true if the opened day-note is governed by a repeat rule
   const [noteScopeAsk, setNoteScopeAsk] = useState(null); // v63: null | "save" | "clear" — pending action awaiting "this day / all repeats"
   const [wlInput, setWlInput] = useState(""); // v83: day-note standby list — text of the pending (not-yet-added) new entry
+  // v89: standby search now behaves exactly like the all-contacts search — arrow keys walk
+  // the suggestion list and each row shows the client's price. wlIdx = highlighted row
+  // (-1 = none, so Enter falls through to adding the free-typed text, same as before).
+  const [wlIdx, setWlIdx] = useState(-1);
   // v88 per-line day notes. Each day-note line is edited as its own structured row with
   // its own repeat setting (once | every N weeks | every N months). noteLines is the
   // working set of rows in the open day-note modal; noteOrigLines is the snapshot taken
@@ -792,6 +796,10 @@ export default function TheList() {
   const [searchText, setSearchText] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchExpanded, setSearchExpanded] = useState(false);
+  // v89: arrow-key nav for the header search, so it matches the standby search exactly.
+  // searchIdx = highlighted match (-1 = none; Enter then falls back to the first match,
+  // which is the old behavior).
+  const [searchIdx, setSearchIdx] = useState(-1);
   const searchInputRef = useRef(null);
   const [searchHit, setSearchHit] = useState(null);
   const searchHitTimer = useRef(null);
@@ -2154,7 +2162,12 @@ export default function TheList() {
       if (!c || !c.name) return;
       if (!c.phone || !String(c.phone).trim()) return; // #6: only phoned profiles
       var ln = c.name.toLowerCase();
-      if (seen[ln] || ln===t) return;
+      // v89: the old gate also dropped an EXACT full-name match (|| ln===t), so the
+      // suggestion vanished the instant the whole name was typed — in the schedule name
+      // field, the standby search, and anywhere else computeSuggestions feeds. Now an
+      // exact match stays listed (and stays arrow-selectable). Revert lever — old line:
+      // if (seen[ln] || ln===t) return;
+      if (seen[ln]) return;
       var pos = ln.indexOf(t);
       if (pos===0) { starts.push(c); seen[ln]=true; }
       else if (pos>0) { contains.push(c); seen[ln]=true; }
@@ -4062,9 +4075,16 @@ export default function TheList() {
     }
     dnCloseNoteModal();
   };
-  // Note color by kind: personal -> signature blue, business -> gold, otherwise dark.
-  var noteColorFor = function(kind){ return kind==="personal"?TODAY_BLUE:(kind==="business"?"#a07830":"#1a1a1a"); };
-  var notePencilColor = function(kind, hasNote){ if(!hasNote) return null; return kind==="personal"?TODAY_BLUE:"#c9a96e"; };
+  // v89: Personal/Business is fully retired — for day notes (v88) AND appointment notes.
+  // Every note now renders the same: gold pencil, dark text. LEGACY notes that still carry
+  // a stored kind no longer show blue/gold; the color is simply ignored at render, so no
+  // data migration and no "edit the day to fix it" step is needed. The stored kind is left
+  // on the record harmlessly (it just never colors anything again).
+  // Revert lever — old kind-driven colors:
+  // var noteColorFor = function(kind){ return kind==="personal"?TODAY_BLUE:(kind==="business"?"#a07830":"#1a1a1a"); };
+  // var notePencilColor = function(kind, hasNote){ if(!hasNote) return null; return kind==="personal"?TODAY_BLUE:"#c9a96e"; };
+  var noteColorFor = function(kind){ return "#1a1a1a"; };
+  var notePencilColor = function(kind, hasNote){ if(!hasNote) return null; return "#c9a96e"; };
 
   const startLongPress = function(name) { longPressTimer.current=setTimeout(function(){ openClientProfile(name); },600); };
   const cancelLongPress = function() { if(longPressTimer.current){ clearTimeout(longPressTimer.current); longPressTimer.current=null; } };
@@ -5641,7 +5661,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v88</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v89</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -6381,17 +6401,25 @@ export default function TheList() {
           <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"24px",width:"min(360px,92vw)"}} onClick={function(e){ e.stopPropagation(); }}>
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#a07830",marginBottom:"8px"}}>{noteModal.isDay?"Day Note":"Note"}</div>
             <div style={{fontSize:"16px",color:"#1a1a1a",marginBottom:"14px"}}>{noteModal.name}</div>
-            {/* Appointment note: unchanged free-form textarea + Personal/Business (day notes
-                dropped the P/B kind in v88; see the structured line editor below). */}
+            {/* Appointment note: free-form textarea. v89 dropped Personal/Business here too
+                (v88 had dropped it for day notes only), so notes are uniform everywhere —
+                no kind, no blue, gold pencil. Saves now always write noteKind:null. The
+                P/B button row that used to sit below is preserved just beneath as a
+                commented revert lever. */}
             {!noteModal.isDay && (
-              <textarea autoFocus data-noteinput="1" value={noteDraft} onChange={function(e){ setNoteDraft(e.target.value); }} onKeyDown={function(e){ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); var nm=noteModal; var slots=[...getSlots(nm.dateKey)]; var s=slots[nm.idx]; slots[nm.idx]={...s,note:noteDraft.trim(),noteKind:noteDraft.trim()?noteKind:null}; setSlots(nm.dateKey,slots); setNoteModal(null); setNoteDraft(""); setNoteKind(null); } }} placeholder={"Add a note for this appointment..."} style={{width:"100%",boxSizing:"border-box",minHeight:"96px",resize:"vertical",background:"#efefed",border:"1px solid #d8d8d6",borderRadius:"6px",padding:"10px",fontSize:"14px",fontFamily:"Georgia,serif",color:noteColorFor(noteKind),outline:"none",marginBottom:"12px"}}/>
+              <textarea autoFocus data-noteinput="1" value={noteDraft} onChange={function(e){ setNoteDraft(e.target.value); }} onKeyDown={function(e){ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); var nm=noteModal; var slots=[...getSlots(nm.dateKey)]; var s=slots[nm.idx]; /* v89 revert lever — old kind-carrying write: slots[nm.idx]={...s,note:noteDraft.trim(),noteKind:noteDraft.trim()?noteKind:null}; */ slots[nm.idx]={...s,note:noteDraft.trim(),noteKind:null}; setSlots(nm.dateKey,slots); setNoteModal(null); setNoteDraft(""); setNoteKind(null); } }} placeholder={"Add a note for this appointment..."} style={{width:"100%",boxSizing:"border-box",minHeight:"96px",resize:"vertical",background:"#efefed",border:"1px solid #d8d8d6",borderRadius:"6px",padding:"10px",fontSize:"14px",fontFamily:"Georgia,serif",color:noteColorFor(noteKind),outline:"none",marginBottom:"12px"}}/>
             )}
+            {/* v89 REMOVED — Personal/Business toggle for appointment notes. Restore by
+                un-commenting this block (the noteKind state and setNoteKind are still live,
+                so it drops straight back in; you'd also revert the two noteKind:null writes
+                and the two "uniform gold" pencil colors):
             {!noteModal.isDay && (
               <div style={{display:"flex",alignItems:"center",gap:"8px",marginBottom:"14px"}}>
                 <button onClick={function(){ setNoteKind(noteKind==="personal"?null:"personal"); }} style={{flex:1,padding:"8px",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",letterSpacing:"0.06em",border:"1px solid "+TODAY_BLUE,background:noteKind==="personal"?TODAY_BLUE:"transparent",color:noteKind==="personal"?"#fff":TODAY_BLUE}}>Personal</button>
                 <button onClick={function(){ setNoteKind(noteKind==="business"?null:"business"); }} style={{flex:1,padding:"8px",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",letterSpacing:"0.06em",border:"1px solid #a07830",background:noteKind==="business"?"#a07830":"transparent",color:noteKind==="business"?"#fff":"#a07830"}}>Business</button>
               </div>
             )}
+            */}
             {/* v88 day-note structured line editor: each line is its own row with a ↻ chip
                 that opens the per-line repeat popup. Enter adds a row; Backspace on an empty
                 row removes it. Save routes through dnCommitLines. */}
@@ -6443,7 +6471,27 @@ export default function TheList() {
                 })()}
                 <div>
                   <div style={{display:"flex",gap:"8px"}}>
-                    <input value={wlInput} onChange={function(e){ setWlInput(e.target.value); }} onKeyDown={function(e){ if(e.key==="Enter"){ e.preventDefault(); wlAdd(noteModal.dayKey, wlInput); setWlInput(""); } }} placeholder="Add a name…" style={{flex:1,boxSizing:"border-box",background:"#efefed",border:"1px solid #d8d8d6",borderRadius:"6px",padding:"8px 10px",fontSize:"14px",fontFamily:"Georgia,serif",color:"#1a1a1a",outline:"none"}}/>
+                    {/* v89: arrow-key nav. Down/Up move the highlight through the suggestions;
+                        Enter adds the highlighted client if one is selected, otherwise it adds
+                        exactly what was typed (unchanged free-type behavior). Escape drops the
+                        highlight. Revert lever — old Enter-only handler:
+                        onKeyDown={function(e){ if(e.key==="Enter"){ e.preventDefault(); wlAdd(noteModal.dayKey, wlInput); setWlInput(""); } }} */}
+                    <input value={wlInput} onChange={function(e){ setWlInput(e.target.value); setWlIdx(-1); }} onKeyDown={function(e){
+                      var sg = computeSuggestions(wlInput);
+                      if (sg.length>0 && (e.key==="ArrowDown"||e.key==="ArrowUp")) {
+                        e.preventDefault();
+                        if (e.key==="ArrowDown") { setWlIdx(Math.min(wlIdx+1, sg.length-1)); }
+                        else { setWlIdx(wlIdx<=0 ? -1 : wlIdx-1); }
+                        return;
+                      }
+                      if (e.key==="Escape") { setWlIdx(-1); return; }
+                      if (e.key==="Enter") {
+                        e.preventDefault();
+                        if (sg.length>0 && wlIdx>=0 && wlIdx<sg.length) { wlAdd(noteModal.dayKey, sg[wlIdx].name); }
+                        else { wlAdd(noteModal.dayKey, wlInput); }
+                        setWlInput(""); setWlIdx(-1);
+                      }
+                    }} placeholder="Add a name…" style={{flex:1,boxSizing:"border-box",background:"#efefed",border:"1px solid #d8d8d6",borderRadius:"6px",padding:"8px 10px",fontSize:"14px",fontFamily:"Georgia,serif",color:"#1a1a1a",outline:"none"}}/>
                     <button onClick={function(){ wlAdd(noteModal.dayKey, wlInput); setWlInput(""); }} style={{padding:"8px 14px",background:"#c9a96e",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",flexShrink:0}}>{"Add"}</button>
                   </div>
                   {/* v84 (#1): slot/search-style type-ahead. Same computeSuggestions used by the schedule name field (saved, phoned client profiles only, 3+ chars). Tapping a suggestion adds them by name; a free-typed name still works via Enter/Add, exactly like a slot. */}
@@ -6452,8 +6500,14 @@ export default function TheList() {
                     if (!wlSugg.length) return null;
                     return (
                       <div style={{marginTop:"6px",border:"1px solid #e4e0d6",borderRadius:"6px",overflow:"hidden",background:"#fff"}}>
-                        {wlSugg.map(function(c){
-                          return (<button key={"wlsug:"+c.name} onClick={function(){ wlAdd(noteModal.dayKey, c.name); setWlInput(""); }} style={{display:"block",width:"100%",boxSizing:"border-box",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid #f2efe6",cursor:"pointer",fontFamily:"Georgia,serif",fontSize:"13px",color:"#1a1a1a",padding:"8px 10px"}}>{c.name}</button>);
+                        {/* v89: name on the left, price on the right — same row shape as the
+                            all-contacts header search. Highlighted row (arrow keys) gets the
+                            gold tint. Revert lever — old plain name-only row:
+                            return (<button key={"wlsug:"+c.name} onClick={function(){ wlAdd(noteModal.dayKey, c.name); setWlInput(""); }} style={{display:"block",width:"100%",boxSizing:"border-box",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid #f2efe6",cursor:"pointer",fontFamily:"Georgia,serif",fontSize:"13px",color:"#1a1a1a",padding:"8px 10px"}}>{c.name}</button>); */}
+                        {wlSugg.map(function(c,ci){
+                          var wlPr = (c.price && String(c.price).trim()) ? c.price : getClientPrice(c.name);
+                          var wlOn = (ci===wlIdx);
+                          return (<button key={"wlsug:"+c.name} onClick={function(){ wlAdd(noteModal.dayKey, c.name); setWlInput(""); setWlIdx(-1); }} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px",width:"100%",boxSizing:"border-box",textAlign:"left",background:wlOn?"#f1e6c6":"none",border:"none",borderBottom:"1px solid #f2efe6",cursor:"pointer",fontFamily:"Georgia,serif",fontSize:"13px",color:"#1a1a1a",padding:"8px 10px"}}><span style={{whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",minWidth:0}}>{c.name}</span>{wlPr?<span style={{fontSize:"11px",color:"#a07830",flexShrink:0}}>{wlPr}</span>:null}</button>);
                         })}
                       </div>
                     );
@@ -6485,7 +6539,9 @@ export default function TheList() {
                   if (nm.isDay) { dnCommitLines(); }
                   else {
                     var slots=[...getSlots(nm.dateKey)]; var s=slots[nm.idx];
-                    slots[nm.idx]={...s,note:noteDraft.trim(),noteKind:noteDraft.trim()?noteKind:null};
+                    // v89 revert lever — old kind-carrying write:
+                    // slots[nm.idx]={...s,note:noteDraft.trim(),noteKind:noteDraft.trim()?noteKind:null};
+                    slots[nm.idx]={...s,note:noteDraft.trim(),noteKind:null};
                     setSlots(nm.dateKey,slots);
                     setNoteModal(null); setNoteDraft(""); setNoteKind(null);
                   }
@@ -6937,10 +6993,29 @@ export default function TheList() {
             ) : (
               <div style={{position:"relative",width:"100%",maxWidth:"300px"}}>
                 <input ref={searchInputRef} value={searchText}
-                  onChange={function(e){ setSearchText(e.target.value); setSearchOpen(true); }}
+                  onChange={function(e){ setSearchText(e.target.value); setSearchOpen(true); setSearchIdx(-1); }}
                   onFocus={function(){ setSearchOpen(true); }}
-                  onBlur={function(){ setTimeout(function(){ setSearchOpen(false); setSearchExpanded(false); setSearchText(""); }, 150); }}
-                  onKeyDown={function(e){ if(e.key==="Enter"){ var m=searchMatches(searchText); if(m.length>0) runClientSearch(m[0]); } else if(e.key==="Escape"){ setSearchText(""); setSearchOpen(false); setSearchExpanded(false); } }}
+                  onBlur={function(){ setTimeout(function(){ setSearchOpen(false); setSearchExpanded(false); setSearchText(""); setSearchIdx(-1); }, 150); }}
+                  onKeyDown={function(e){
+                    // v89 revert lever — old Enter-picks-first-only handler was:
+                    // if(e.key==="Enter"){ var m=searchMatches(searchText); if(m.length>0) runClientSearch(m[0]); }
+                    // else if(e.key==="Escape"){ setSearchText(""); setSearchOpen(false); setSearchExpanded(false); }
+                    var mm = searchMatches(searchText);
+                    if (mm.length>0 && (e.key==="ArrowDown"||e.key==="ArrowUp")) {
+                      e.preventDefault();
+                      if (e.key==="ArrowDown") { setSearchIdx(Math.min(searchIdx+1, mm.length-1)); }
+                      else { setSearchIdx(searchIdx<=0 ? -1 : searchIdx-1); }
+                      return;
+                    }
+                    if (e.key==="Enter") {
+                      if (mm.length===0) return;
+                      var pickNm = (searchIdx>=0 && searchIdx<mm.length) ? mm[searchIdx] : mm[0];
+                      setSearchIdx(-1);
+                      runClientSearch(pickNm);
+                      return;
+                    }
+                    if (e.key==="Escape") { setSearchText(""); setSearchOpen(false); setSearchExpanded(false); setSearchIdx(-1); }
+                  }}
                   placeholder="Search a name…"
                   style={{width:"100%",boxSizing:"border-box",padding:"5px 12px",border:"1px solid #e0e0de",borderRadius:"14px",background:"#f6f6f4",fontFamily:"inherit",fontSize:"12px",color:"#1a1a1a",outline:"none"}} />
                 {searchOpen && searchText.trim() && (function(){
@@ -6949,12 +7024,12 @@ export default function TheList() {
                     <div style={{position:"absolute",top:"30px",left:0,right:0,background:"#fff",border:"1px solid #e0e0de",borderRadius:"8px",boxShadow:"0 6px 20px rgba(0,0,0,0.12)",zIndex:200,overflow:"hidden",maxHeight:"50vh",overflowY:"auto"}}>
                       {matches.length===0 ? (
                         <div style={{padding:"8px 12px",fontSize:"12px",color:"#aaa"}}>No matches</div>
-                      ) : matches.map(function(nm){ var pr=getClientPrice(nm); return (
+                      ) : matches.map(function(nm,mi){ var pr=getClientPrice(nm); var mOn=(mi===searchIdx); return (
                         /* #6: name on the left, their price on the right (same styling as the
                            inline name-edit suggestions). Rows with no known price just show the
                            name. Revert lever — restore the plain name-only row:
                            <div key={nm} onMouseDown={function(e){ e.preventDefault(); }} onClick={function(){ runClientSearch(nm); }} style={{padding:"9px 12px",fontSize:"13px",color:"#1a1a1a",cursor:"pointer",borderBottom:"1px solid #f2f2f0",fontFamily:"Georgia,serif"}}>{nm}</div> */
-                        <div key={nm} onMouseDown={function(e){ e.preventDefault(); }} onClick={function(){ runClientSearch(nm); }} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px",padding:"9px 12px",fontSize:"13px",color:"#1a1a1a",cursor:"pointer",borderBottom:"1px solid #f2f2f0",fontFamily:"Georgia,serif"}}><span style={{whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{nm}</span>{pr?<span style={{fontSize:"11px",color:"#a07830",flexShrink:0}}>{pr}</span>:null}</div>
+                        <div key={nm} onMouseDown={function(e){ e.preventDefault(); }} onClick={function(){ setSearchIdx(-1); runClientSearch(nm); }} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px",padding:"9px 12px",fontSize:"13px",color:"#1a1a1a",cursor:"pointer",borderBottom:"1px solid #f2f2f0",fontFamily:"Georgia,serif",background:mOn?"#f1e6c6":"transparent"}}><span style={{whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{nm}</span>{pr?<span style={{fontSize:"11px",color:"#a07830",flexShrink:0}}>{pr}</span>:null}</div>
                       ); })}
                     </div>
                   );
@@ -7077,7 +7152,7 @@ export default function TheList() {
                     );
                   })()}
                   <button onClick={function(e){ e.stopPropagation(); setAcctAdd({}); setAcctModal({dateKey:dateKey}); }} title="Accounting for the day" style={{background:"none",border:"none",cursor:"pointer",padding:(getDayCount()>3?"0 2px":"0 4px 0 2px"),color:acctHasData(dateKey)?"#c9a96e":"#bbb",fontSize:"19px",fontWeight:"bold",lineHeight:1,flexShrink:0,fontFamily:"Georgia,serif"}}>{"$"}</button>
-                  <button onClick={function(e){ e.stopPropagation(); var rws=dnPrefillRows(dateKey); setNoteLines(rws); setNoteOrigLines(rws.slice()); setNoteRepeatPopup(null); setNoteScopeAsk(null); setNoteModal({dayKey:dateKey,isDay:true,name:friendlyDateLong(dateKey)}); }} title="Note for the day" style={{background:"none",border:"none",cursor:"pointer",padding:(getDayCount()>3?"0 2px":"0 9px 0 2px"),color:dayNoteText(dateKey)?(dayNoteKind(dateKey)==="personal"?TODAY_BLUE:"#c9a96e"):"#bbb",fontSize:"22px",lineHeight:1,flexShrink:0,WebkitTextStroke:"0.5px currentColor"}}>{"✎"}{dayNoteRepeating(dateKey)?<sup style={{fontSize:"9px",marginLeft:"1px",opacity:0.85,WebkitTextStroke:"0px"}}>{"↻"}</sup>:null}</button>
+                  <button onClick={function(e){ e.stopPropagation(); var rws=dnPrefillRows(dateKey); setNoteLines(rws); setNoteOrigLines(rws.slice()); setNoteRepeatPopup(null); setNoteScopeAsk(null); setNoteModal({dayKey:dateKey,isDay:true,name:friendlyDateLong(dateKey)}); }} title="Note for the day" style={{background:"none",border:"none",cursor:"pointer",padding:(getDayCount()>3?"0 2px":"0 9px 0 2px"),color:dayNoteText(dateKey)?"#c9a96e":"#bbb"/* v89 uniform gold. Revert lever: dayNoteText(dateKey)?(dayNoteKind(dateKey)==="personal"?TODAY_BLUE:"#c9a96e"):"#bbb" */,fontSize:"22px",lineHeight:1,flexShrink:0,WebkitTextStroke:"0.5px currentColor"}}>{"✎"}{dayNoteRepeating(dateKey)?<sup style={{fontSize:"9px",marginLeft:"1px",opacity:0.85,WebkitTextStroke:"0px"}}>{"↻"}</sup>:null}</button>
                 </div>
                 <div data-slotscroll="1" style={{flex:(slots.length+" 1 0px"),minHeight:0,paddingBottom:"0px",overflowX:"hidden",overscrollBehavior:"contain",display:"flex",flexDirection:"column"}}
                   onTouchMove={function(e){
@@ -7277,7 +7352,7 @@ export default function TheList() {
                                     }
                                     return <button onClick={function(e){ e.stopPropagation(); setPhoneModal({name:slot.name,phone:""}); }} title={"Add a number for "+slot.name} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 1px 2px 4px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={20} color="#c6c6c6"/></button>;
                                   })()}
-                                  {!compactIcons&&filled&&<button onClick={function(e){ e.stopPropagation(); setNoteDraft(slot.note||""); setNoteKind(slot.noteKind||null); setNoteRepeat(0); setNoteWasRepeat(false); setNoteScopeAsk(null); setNoteModal({dateKey,idx,name:slot.name}); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 5px",color:slot.note?(slot.noteKind==="personal"?TODAY_BLUE:"#c9a96e"):"#bbb",fontSize:"24px",fontWeight:"bold",lineHeight:1,WebkitTextStroke:"0.6px currentColor"}}>{"✎"}</button>}
+                                  {!compactIcons&&filled&&<button onClick={function(e){ e.stopPropagation(); setNoteDraft(slot.note||""); setNoteKind(slot.noteKind||null); setNoteRepeat(0); setNoteWasRepeat(false); setNoteScopeAsk(null); setNoteModal({dateKey,idx,name:slot.name}); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 5px",color:slot.note?"#c9a96e":"#bbb"/* v89 uniform gold. Revert lever: slot.note?(slot.noteKind==="personal"?TODAY_BLUE:"#c9a96e"):"#bbb" */,fontSize:"24px",fontWeight:"bold",lineHeight:1,WebkitTextStroke:"0.6px currentColor"}}>{"✎"}</button>}
                                 </div>
                               )}
                               {isEditing&&editChromeReady&&<input value={editValues.price} onChange={function(e){ setEditValues(function(v){ return {...v,price:e.target.value}; }); }} onKeyDown={function(e){ if(e.key==="Tab"&&!e.shiftKey){ var nmT=stripLeadingNumbers(((editValuesRef.current&&editValuesRef.current.name)||"").trim()); if(nmT){ e.preventDefault(); commitPenciled(dateKey,idx); return; } } handleKeyDown(e,dateKey,idx); }} onBlur={handleBlur} data-rowkey={rowKey} placeholder="$" style={{width:view==="Week"?"26px":"52px",fontSize:isPhone?"16px":"13px",color:"#1a1a1a",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"4px",outline:"none",padding:view==="Week"?"2px 3px":"2px 5px",fontFamily:"Georgia,serif",WebkitAppearance:"none",appearance:"none"}}/>}
