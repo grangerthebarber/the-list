@@ -1,7 +1,7 @@
  import { useState, useRef, useCallback, useEffect } from "react";
 import { initializeApp } from "firebase/app";
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail, signOut } from "firebase/auth";
-import { getFirestore, doc, onSnapshot, setDoc, serverTimestamp } from "firebase/firestore";
+import { getFirestore, doc, onSnapshot, setDoc, updateDoc, serverTimestamp } from "firebase/firestore";
 
 var firebaseConfig = {
   apiKey: "AIzaSyBJhakukEUD2n84bo6ccdV4I2bwVYY8arM",
@@ -650,6 +650,14 @@ export default function TheList() {
   const [noteWasRepeat, setNoteWasRepeat] = useState(false); // v63: true if the opened day-note is governed by a repeat rule
   const [noteScopeAsk, setNoteScopeAsk] = useState(null); // v63: null | "save" | "clear" — pending action awaiting "this day / all repeats"
   const [wlInput, setWlInput] = useState(""); // v83: day-note standby list — text of the pending (not-yet-added) new entry
+  // v88 per-line day notes. Each day-note line is edited as its own structured row with
+  // its own repeat setting (once | every N weeks | every N months). noteLines is the
+  // working set of rows in the open day-note modal; noteOrigLines is the snapshot taken
+  // at open (used to detect which recurring rules a Save removed); noteRepeatPopup holds
+  // the row id whose repeat mini-popup is open (or null).
+  const [noteLines, setNoteLines] = useState([]);
+  const [noteOrigLines, setNoteOrigLines] = useState([]);
+  const [noteRepeatPopup, setNoteRepeatPopup] = useState(null);
   const [dayNotes, setDayNotes] = useState(function() { return loadFromStorage("tl_daynotes", {}); });
   // #13 accounting: per-day takings keyed by dateKey -> {cash,venmo,applepay,square,services,hours}.
   // Rides the same Firebase sync as the other data fields (added as the LAST key in the
@@ -935,6 +943,7 @@ export default function TheList() {
   shareSavedStateRef.current = shareSavedState;
   const lastSyncRef = useRef(null);
   const saveTimer = useRef(null);
+  const noteRowRefs = useRef({}); // v88: id -> input element, so Enter/Backspace can move focus between day-note line rows
 
   // Single source of truth for two layout concerns that CSS can't handle on iOS:
   //  1. Phantom scrolling — toggle each list column's overflowY to "auto" ONLY when
@@ -1054,7 +1063,26 @@ export default function TheList() {
     if (saveTimer.current) clearTimeout(saveTimer.current);
     var uid = authUser.uid;
     saveTimer.current = setTimeout(function() {
-      try { setDoc(doc(fbDb, "users", uid), {schedules:payload.schedules, clients:payload.clients, holidays:payload.holidays, history:payload.history, dayNotes:payload.dayNotes, accounting:payload.accounting, shareDrafts:payload.shareDrafts, shareActiveDraftId:payload.shareActiveDraftId, quickMsgs:payload.quickMsgs, shareSavedChecks:payload.shareSavedChecks, shareSavedState:payload.shareSavedState, updatedAt:serverTimestamp()}, {merge:true}); } catch(e) {}
+      // v85 write-path fix. setDoc(...,{merge:true}) DEEP-MERGES nested maps, so a key
+      // deleted locally (a cleared day note, a removed repeat rule, the last standby
+      // name) is never removed on the server and resurrects via the next snapshot
+      // (the "x pops back on the other device" bug). updateDoc REPLACES each named
+      // field wholesale — including the dayNotes / accounting / schedules maps — so a
+      // deleted key is actually gone. It leaves any unnamed server field untouched, so
+      // nothing else is clobbered. updateDoc rejects if the doc does not exist yet
+      // (brand-new account, first-ever write still in flight); in that one case we fall
+      // back to a create via setDoc(...,{merge:true}), which makes the document.
+      var writeRef = doc(fbDb, "users", uid);
+      var writeBody = {schedules:payload.schedules, clients:payload.clients, holidays:payload.holidays, history:payload.history, dayNotes:payload.dayNotes, accounting:payload.accounting, shareDrafts:payload.shareDrafts, shareActiveDraftId:payload.shareActiveDraftId, quickMsgs:payload.quickMsgs, shareSavedChecks:payload.shareSavedChecks, shareSavedState:payload.shareSavedState, updatedAt:serverTimestamp()};
+      try {
+        updateDoc(writeRef, writeBody).catch(function() {
+          try { setDoc(writeRef, writeBody, {merge:true}); } catch(e2) {}
+        });
+      } catch(e) {
+        try { setDoc(writeRef, writeBody, {merge:true}); } catch(e3) {}
+      }
+      // v84 ORIGINAL (revert lever — restore this single line and remove the block above to undo):
+      // try { setDoc(doc(fbDb, "users", uid), {schedules:payload.schedules, clients:payload.clients, holidays:payload.holidays, history:payload.history, dayNotes:payload.dayNotes, accounting:payload.accounting, shareDrafts:payload.shareDrafts, shareActiveDraftId:payload.shareActiveDraftId, quickMsgs:payload.quickMsgs, shareSavedChecks:payload.shareSavedChecks, shareSavedState:payload.shareSavedState, updatedAt:serverTimestamp()}, {merge:true}); } catch(e) {}
     }, 600);
   }, [schedules, clientMemory, customHolidays, history, dayNotes, accounting, shareDrafts, shareActiveDraftId, quickMsgs, shareSavedChecks, shareSavedState, hydrated, authUser]);
 
@@ -2148,7 +2176,7 @@ export default function TheList() {
           e.preventDefault();
           var pick = sugs[suggestIdxRef.current];
           setSuggestHide(true); setSuggestIdx(-1);
-          doCommit(dateKey, idx, {name:pick.name, price:(pick.price||editValuesRef.current.price||"")});
+          doCommit(dateKey, idx, {name:pick.name, price:(pick.price||getClientPrice(pick.name)||editValuesRef.current.price||"")});
           return;
         }
       }
@@ -3755,21 +3783,97 @@ export default function TheList() {
     var days=Math.round(diff/86400000); if(days%7!==0) return false;
     return (days/7)%rule.rpt===0;
   };
-  var resolveDayNote = function(dk){
-    var rec = dayNotes[dk];
-    if (rec && typeof rec==="object" && rec.skip) return {text:"",kind:null,repeating:false,rpt:0,ruleKey:null};
-    if (rec){
-      if (typeof rec==="string") return {text:rec,kind:null,repeating:false,rpt:0,ruleKey:null};
-      if (rec.text) return {text:rec.text,kind:rec.kind||null,repeating:false,rpt:0,ruleKey:null};
+  // --- v88 per-line day notes --------------------------------------------------
+  // The whole-note kind (personal/business) is retired for day notes; each LINE now
+  // carries its own repeat setting instead of one setting governing the whole note.
+  // New storage shapes, all riding the same synced dayNotes map (updateDoc replaces the
+  // field wholesale, so nested deletes propagate across devices — the v85 write-path):
+  //   dayNotes[dk]           = [ {id,t}, ... ]        per-date ONE-OFF lines (r=0 implied)
+  //   dayNotes["@lrpt"]      = [ {id,since,r,n,t} ]   central RECURRING line rules
+  //         r=1 weeks-family every n weeks (n=1 weekly); r=2 months-family every n months
+  //   dayNotes["@dnskip:"+dk]= [ ruleId, ... ]        occurrences suppressed on that date only
+  // Legacy shapes still READ untouched: "text" | {text,kind} | {skip:true} | "@rpt:" rules.
+  // A legacy note keeps its kind color until that day is edited & saved (then it converts
+  // to the new shapes and drops the color, per "no more business/personal notation").
+  var LRPT_KEY = "@lrpt";
+  var DNSKIP_PREFIX = "@dnskip:";
+  var dnNewId = function(){ return "ln_"+Date.now().toString(36)+"_"+Math.floor(Math.random()*1000000).toString(36); };
+  // Does recurring line/rule R (anchored at R.since) fire on date dk? r=1 weeks, r=2 months.
+  var dnLineMatches = function(R, dk){
+    if(!R || !R.t || !R.r || !R.n || !R.since) return false;
+    var dD=parseDateKey(dk); var sD=parseDateKey(R.since);
+    if(dD.getTime()<sD.getTime()) return false;
+    if(R.r===1){
+      if(dD.getDay()!==sD.getDay()) return false;
+      var days=Math.round((dD.getTime()-sD.getTime())/86400000);
+      if(days%7!==0) return false;
+      return ((days/7)%R.n)===0;
+    }
+    if(R.r===2){
+      if(dD.getDate()!==sD.getDate()) return false; // same calendar date; months without that day never match
+      var months=(dD.getFullYear()-sD.getFullYear())*12+(dD.getMonth()-sD.getMonth());
+      if(months<0) return false;
+      return (months%R.n)===0;
+    }
+    return false;
+  };
+  // Resolve the ordered lines shown on date dk. Each: {id,t,r,n,since,src,kind}
+  //   src: "once" (new per-date array) | "rule" (central @lrpt) | "legacy" | "legacyrule"
+  var resolveDayLines = function(dk){
+    var out=[];
+    var val=dayNotes[dk];
+    if(Array.isArray(val)){
+      for(var i=0;i<val.length;i++){ var L=val[i]; if(L&&L.t){ out.push({id:L.id||dnNewId(),t:L.t,r:0,n:0,since:dk,src:"once",kind:null}); } }
+    } else if(typeof val==="string"){
+      if(val) out.push({id:"legacy:"+dk,t:val,r:0,n:0,since:dk,src:"legacy",kind:null});
+    } else if(val && typeof val==="object" && !val.skip && val.text){
+      out.push({id:"legacy:"+dk,t:val.text,r:0,n:0,since:dk,src:"legacy",kind:val.kind||null});
+    }
+    var skips=(dayNotes[DNSKIP_PREFIX+dk] && dayNotes[DNSKIP_PREFIX+dk].length)?dayNotes[DNSKIP_PREFIX+dk]:[];
+    var rules=(dayNotes[LRPT_KEY] && dayNotes[LRPT_KEY].length)?dayNotes[LRPT_KEY]:[];
+    for(var j=0;j<rules.length;j++){
+      var R=rules[j];
+      if(dnLineMatches(R,dk) && skips.indexOf(R.id)<0){ out.push({id:R.id,t:R.t,r:R.r,n:R.n,since:R.since,src:"rule",kind:null}); }
     }
     var keys=Object.keys(dayNotes);
-    for(var i=0;i<keys.length;i++){
-      var k=keys[i]; if(!dnIsRuleKey(k)) continue;
+    for(var m=0;m<keys.length;m++){
+      var k=keys[m]; if(!dnIsRuleKey(k)) continue;
       var rule=dayNotes[k];
-      if(dnRuleMatches(rule,dk)) return {text:rule.text,kind:rule.kind||null,repeating:true,rpt:rule.rpt,ruleKey:k};
+      if(dnRuleMatches(rule,dk)){ out.push({id:k,t:rule.text,r:1,n:rule.rpt,since:rule.sinceKey,src:"legacyrule",kind:rule.kind||null}); }
     }
-    return {text:"",kind:null,repeating:false,rpt:0,ruleKey:null};
+    return out;
   };
+  // resolveDayNote — kept as the back-compat accessor the indicators/export use. Now a
+  // thin wrapper over resolveDayLines: .text/.kind/.repeating still drive the ✎ pencil and
+  // ↻ superscript exactly as before; .lines is the new per-line array the modal edits.
+  var resolveDayNote = function(dk){
+    var lines=resolveDayLines(dk);
+    var texts=[]; var kind=null; var repeating=false; var rpt=0;
+    for(var i=0;i<lines.length;i++){
+      var L=lines[i];
+      if(L.t) texts.push(L.t);
+      if(kind===null && L.kind) kind=L.kind;         // legacy color only; new lines carry no kind
+      if(L.r>0){ repeating=true; if(rpt===0) rpt=L.n; }
+    }
+    return {text:texts.join("; "),kind:kind,repeating:repeating,rpt:rpt,ruleKey:null,lines:lines};
+  };
+  // v63 ORIGINAL resolveDayNote (revert lever — restore this and remove the wrapper +
+  // v88 block above to return to whole-note kind + single repeat rule):
+  // var resolveDayNote = function(dk){
+  //   var rec = dayNotes[dk];
+  //   if (rec && typeof rec==="object" && rec.skip) return {text:"",kind:null,repeating:false,rpt:0,ruleKey:null};
+  //   if (rec){
+  //     if (typeof rec==="string") return {text:rec,kind:null,repeating:false,rpt:0,ruleKey:null};
+  //     if (rec.text) return {text:rec.text,kind:rec.kind||null,repeating:false,rpt:0,ruleKey:null};
+  //   }
+  //   var keys=Object.keys(dayNotes);
+  //   for(var i=0;i<keys.length;i++){
+  //     var k=keys[i]; if(!dnIsRuleKey(k)) continue;
+  //     var rule=dayNotes[k];
+  //     if(dnRuleMatches(rule,dk)) return {text:rule.text,kind:rule.kind||null,repeating:true,rpt:rule.rpt,ruleKey:k};
+  //   }
+  //   return {text:"",kind:null,repeating:false,rpt:0,ruleKey:null};
+  // };
   var dayNoteText = function(dk){ return resolveDayNote(dk).text; };
   var dayNoteKind = function(dk){ var r=resolveDayNote(dk); return r.text?r.kind:null; };
   var dayNoteRepeating = function(dk){ return resolveDayNote(dk).repeating; };
@@ -3805,6 +3909,99 @@ export default function TheList() {
       return n;
     });
   };
+  // --- v88 per-line writers ----------------------------------------------------
+  // Build the editable rows for the modal from the resolved lines on dk (always leaves
+  // at least one blank row to type into). Rows carry {id,t,r,n,since,src}.
+  var dnPrefillRows = function(dk){
+    var lines=resolveDayLines(dk);
+    var rows=lines.map(function(L){ return {id:L.id,t:L.t,r:L.r,n:L.n||1,since:L.since,src:L.src}; });
+    if(rows.length===0){ rows.push({id:dnNewId(),t:"",r:0,n:1,since:dk,src:"new"}); }
+    return rows;
+  };
+  // Local (state-only) row edits inside the open modal — no dayNotes write until Save.
+  var dnRowUpdate = function(id, patch){
+    setNoteLines(function(rows){ return rows.map(function(r){ return r.id===id ? {...r,...patch} : r; }); });
+  };
+  var dnRowAddAfter = function(id){
+    setNoteLines(function(rows){
+      var dk=(noteModal&&noteModal.dayKey)||""; var fresh={id:dnNewId(),t:"",r:0,n:1,since:dk,src:"new"};
+      var out=[]; var added=false;
+      for(var i=0;i<rows.length;i++){ out.push(rows[i]); if(rows[i].id===id){ out.push(fresh); added=true; } }
+      if(!added) out.push(fresh);
+      return out;
+    });
+  };
+  var dnRowDelete = function(id){
+    setNoteLines(function(rows){
+      var dk=(noteModal&&noteModal.dayKey)||"";
+      var out=rows.filter(function(r){ return r.id!==id; });
+      if(out.length===0) out.push({id:dnNewId(),t:"",r:0,n:1,since:dk,src:"new"});
+      return out;
+    });
+  };
+  // Suppress a single recurring occurrence on this date only (bucket rules only). Writes
+  // the id into "@dnskip:"+dk and drops the row from the open modal immediately.
+  var dnSkipOccurrence = function(dk, ruleId){
+    setDayNotes(function(prev){
+      var n={...prev}; var key=DNSKIP_PREFIX+dk;
+      var cur=(n[key] && n[key].length)? n[key].slice() : [];
+      if(cur.indexOf(ruleId)<0) cur.push(ruleId);
+      n[key]=cur; return n;
+    });
+    setNoteLines(function(rows){ return rows.filter(function(r){ return r.id!==ruleId; }); });
+    setNoteRepeatPopup(null);
+  };
+  // Save the day-note modal. Rebuilds this date's one-off array from the r===0 rows and
+  // reconciles the central recurring bucket ("@lrpt") against the rows: existing bucket
+  // rules referenced by a row are updated (edit = all occurrences), bucket rules that were
+  // shown on this day at open but are now gone are dropped (delete = all occurrences),
+  // and bucket rules for OTHER dates are left untouched. Lines newly made recurring are
+  // appended (since = this date). Legacy "@rpt:" rules shown on this day migrate into the
+  // bucket on save (their old key is removed) so nothing double-counts.
+  var dnCommitLines = function(){
+    var nm=noteModal; if(!nm||!nm.isDay) return;
+    var dk=nm.dayKey;
+    var rows=[];
+    for(var a=0;a<noteLines.length;a++){
+      var rw=noteLines[a]; var tt=(rw.t||"").trim(); if(!tt) continue;
+      rows.push({id:rw.id,t:tt,r:rw.r||0,n:rw.n||1,since:rw.since||dk,src:rw.src||"new"});
+    }
+    setDayNotes(function(prev){
+      var n={...prev};
+      // 1) one-off lines for THIS date = the r===0 rows.
+      var once=[];
+      for(var i=0;i<rows.length;i++){ if(rows[i].r===0){ var kid=(rows[i].src==="once"||rows[i].src==="new")?rows[i].id:dnNewId(); once.push({id:kid,t:rows[i].t}); } }
+      if(once.length){ n[dk]=once; } else { delete n[dk]; }
+      // 2) reconcile the recurring bucket.
+      var bucket=(n[LRPT_KEY] && n[LRPT_KEY].length)? n[LRPT_KEY].slice() : [];
+      // current rule-rows (already in the bucket) by id, and the ids shown at open.
+      var curRuleById={}; for(var b=0;b<rows.length;b++){ if(rows[b].r>0 && rows[b].src==="rule"){ curRuleById[rows[b].id]=rows[b]; } }
+      var shownRuleIds={}; for(var c=0;c<noteOrigLines.length;c++){ if(noteOrigLines[c].src==="rule"){ shownRuleIds[noteOrigLines[c].id]=true; } }
+      var nextBucket=[];
+      for(var d=0;d<bucket.length;d++){
+        var B=bucket[d];
+        if(curRuleById[B.id]){ var rr=curRuleById[B.id]; nextBucket.push({id:B.id,since:B.since,r:rr.r,n:rr.n,t:rr.t}); }
+        else if(shownRuleIds[B.id]){ /* was shown on this day, now removed -> drop from all */ }
+        else { nextBucket.push(B); }
+      }
+      // 3) rows newly made recurring (brand-new, or a once/legacy line switched to repeat).
+      for(var e=0;e<rows.length;e++){
+        var R2=rows[e];
+        if(R2.r>0 && (R2.src==="new"||R2.src==="once"||R2.src==="legacy")){ nextBucket.push({id:dnNewId(),since:dk,r:R2.r,n:R2.n,t:R2.t}); }
+      }
+      // 4) legacy "@rpt:" rows shown at open: migrate the kept ones into the bucket and
+      //    remove every shown legacy key (kept -> moved here; removed -> gone).
+      var curLegacyById={}; for(var f=0;f<rows.length;f++){ if(rows[f].r>0 && rows[f].src==="legacyrule"){ curLegacyById[rows[f].id]=rows[f]; } }
+      for(var g=0;g<noteOrigLines.length;g++){
+        var oid=noteOrigLines[g]; if(oid.src!=="legacyrule") continue;
+        if(curLegacyById[oid.id]){ var lr=curLegacyById[oid.id]; nextBucket.push({id:dnNewId(),since:oid.since||dk,r:lr.r,n:lr.n,t:lr.t}); }
+        delete n[oid.id]; // oid.id is the "@rpt:"+date key
+      }
+      if(nextBucket.length){ n[LRPT_KEY]=nextBucket; } else { delete n[LRPT_KEY]; }
+      return n;
+    });
+    dnCloseNoteModal();
+  };
   // --- v83 per-day STANDBY / cancellation waitlist -----------------------------
   // Manual line-item list of clients wanting an opening on a given day. Entries are
   // added by hand (no auto-capture — the removal/recurring paths are untouched).
@@ -3837,7 +4034,7 @@ export default function TheList() {
       return n;
     });
   };
-  var dnCloseNoteModal = function(){ setNoteModal(null); setNoteDraft(""); setNoteKind(null); setNoteRepeat(0); setNoteWasRepeat(false); setNoteScopeAsk(null); setWlInput(""); };
+  var dnCloseNoteModal = function(){ setNoteModal(null); setNoteDraft(""); setNoteKind(null); setNoteRepeat(0); setNoteWasRepeat(false); setNoteScopeAsk(null); setWlInput(""); setNoteLines([]); setNoteOrigLines([]); setNoteRepeatPopup(null); };
   // Commit from the day-note modal. If the note is already a repeat, defer to the
   // "this day / all repeats" prompt; otherwise write straight through.
   var dnCommitDayNote = function(action){
@@ -4889,7 +5086,11 @@ export default function TheList() {
       var first = conflicts[0]; var rest = conflicts.slice(1);
       setBaseDate(parseDateKey(targetDateKey)); setView(isPhone?"Day":"3-Day");
       setReassignQueue(rest);
-      setReassignMode({client:{name:first.name,price:first.price,recurWeeks:first.recurWeeks},currentDateKey:targetDateKey,remainingConflicts:[],originalDateKey:first.originalDateKey,originalIdx:first.originalIdx});
+      // v87 (#5b): capture the ORIGINAL tap-to-place batch size (this one + queue) so the
+      // banner count stays fixed instead of counting down as members land. 1+rest.length
+      // = conflicts.length here. Preserved verbatim through the advance in
+      // handleReassignSlotTapWithQueue; the banner falls back to the live count if absent.
+      setReassignMode({client:{name:first.name,price:first.price,recurWeeks:first.recurWeeks},currentDateKey:targetDateKey,remainingConflicts:[],groupSize:(1+rest.length),originalDateKey:first.originalDateKey,originalIdx:first.originalIdx});
     } else {
       var mvNames = clients.map(function(c){ return c.name; }).filter(function(n){ return !!n; });
       var mvLabel = mvNames.length<=2 ? mvNames.join(" & ") : (mvNames.slice(0,-1).join(", ")+" & "+mvNames[mvNames.length-1]);
@@ -4952,7 +5153,10 @@ export default function TheList() {
       var first = conflicts[0]; var rest = conflicts.slice(1);
       setBaseDate(parseDateKey(targetDateKey)); setView(isPhone?"Day":"3-Day");
       setReassignQueue(rest);
-      setReassignMode({client:{name:first.name,price:first.price,recurWeeks:first.recurWeeks,groupId:(first.groupId||null)},currentDateKey:targetDateKey,remainingConflicts:[],originalDateKey:first.originalDateKey,originalIdx:first.originalIdx});
+      // v87 (#5b): fixed original batch size for the banner (see companion note at the
+      // multi-date create above). Only the overflow members reach tap-to-place here, so
+      // 1+rest.length = conflicts.length is exactly the batch Granger will tap in.
+      setReassignMode({client:{name:first.name,price:first.price,recurWeeks:first.recurWeeks,groupId:(first.groupId||null)},currentDateKey:targetDateKey,remainingConflicts:[],groupSize:(1+rest.length),originalDateKey:first.originalDateKey,originalIdx:first.originalIdx});
     } else {
       var mvNames2 = clients.map(function(c){ return c.name; }).filter(function(n){ return !!n; });
       var mvLabel2 = mvNames2.length<=2 ? mvNames2.join(" & ") : (mvNames2.slice(0,-1).join(", ")+" & "+mvNames2[mvNames2.length-1]);
@@ -4979,7 +5183,9 @@ export default function TheList() {
     setBaseDate(parseDateKey(targetDateKey)); setView(isPhone?"Day":"3-Day");
     var first = withGid[0]; var rest = withGid.slice(1);
     setReassignQueue(rest);
-    setReassignMode({client:{name:first.name,price:first.price,recurWeeks:first.recurWeeks,groupId:first.groupId},currentDateKey:targetDateKey,remainingConflicts:[],originalDateKey:first.originalDateKey,originalIdx:first.originalIdx});
+    // v87 (#5b): fixed original batch size for the banner (see companion note above). The
+    // whole group is tap-placed here, so 1+rest.length = withGid.length = the full group.
+    setReassignMode({client:{name:first.name,price:first.price,recurWeeks:first.recurWeeks,groupId:first.groupId},currentDateKey:targetDateKey,remainingConflicts:[],groupSize:(1+rest.length),originalDateKey:first.originalDateKey,originalIdx:first.originalIdx});
   };
 
   useEffect(function() {
@@ -5265,7 +5471,10 @@ export default function TheList() {
     if (reassignQueue.length > 0) {
       var next = reassignQueue[0]; var rest = reassignQueue.slice(1);
       setReassignQueue(rest);
-      setReassignMode({client:{name:next.name,price:next.price,recurWeeks:next.recurWeeks,groupId:(next.groupId||null)},currentDateKey:dateKey,remainingConflicts:[],originalDateKey:next.originalDateKey,originalIdx:next.originalIdx});
+      // v87 (#5b): carry the ORIGINAL groupSize forward unchanged as the queue drains, so
+      // the banner keeps showing the fixed batch size (e.g. "all 5") rather than the
+      // shrinking remaining count. (Absent groupSize -> banner falls back to live count.)
+      setReassignMode({client:{name:next.name,price:next.price,recurWeeks:next.recurWeeks,groupId:(next.groupId||null)},currentDateKey:dateKey,remainingConflicts:[],groupSize:reassignMode.groupSize,originalDateKey:next.originalDateKey,originalIdx:next.originalIdx});
     } else {
       setReassignMode(null);
       if (rc.length > 0) setReassignApplyAll({altTime:slot.time,remainingConflicts:rc,client});
@@ -5432,7 +5641,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v83</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v88</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -5740,8 +5949,17 @@ export default function TheList() {
             {/* v80 lever — revert to this exact line to drop the pair-aware "both/all" wording and return to the "(+N more)" count:
             <div style={{fontSize:"14px"}}>Tap any open slot for <strong>{reassignMode.client.name}</strong>{reassignQueue.length>0?(" (+"+(reassignQueue.length)+" more)"):""}{(reassignQueue.length>0&&reassignQueue[0]&&reassignQueue[0].name)?(" · next: "+reassignQueue[0].name):""} on {friendlyDate(reassignMode.currentDateKey)}</div>
             */}
-            {/* v82 (#5b): pair-aware group wording. "still to place" at render = 1 (this one) + reassignQueue.length. Reflects the LIVE remaining count so the word always matches the actual number left: exactly two -> "both", three or more -> "all N". Drops to just the name on the last one. To use the FIXED original group size instead, the original count would need to be captured into reassignMode at drop time (extra plumbing) — flagged in the handoff. */}
-            <div style={{fontSize:"14px"}}>Tap any open slot for <strong>{reassignMode.client.name}</strong>{reassignQueue.length===1?" — placing both":(reassignQueue.length>=2?(" — placing all "+(reassignQueue.length+1)):"")}{(reassignQueue.length>0&&reassignQueue[0]&&reassignQueue[0].name)?(" · next: "+reassignQueue[0].name):""} on {friendlyDate(reassignMode.currentDateKey)}</div>
+            {/* v87 (#5b): FIXED original group size (Granger's choice over live-remaining). gs is
+               captured into reassignMode.groupSize at queue-create (three paths) and carried
+               through the advance, so a group of 5 reads "all 5" for every placement and a pair
+               reads "both" the whole way — the count does NOT count down. The "· next:" part stays
+               LIVE (real next person; vanishes on the last placement). Falls back to the old live
+               count (reassignQueue.length+1) when groupSize is absent (e.g. a conflict-only reassign
+               that never set it) so nothing regresses.
+               v82 lever — revert to LIVE remaining count (count down as members land):
+               <div style={{fontSize:"14px"}}>Tap any open slot for <strong>{reassignMode.client.name}</strong>{reassignQueue.length===1?" — placing both":(reassignQueue.length>=2?(" — placing all "+(reassignQueue.length+1)):"")}{(reassignQueue.length>0&&reassignQueue[0]&&reassignQueue[0].name)?(" · next: "+reassignQueue[0].name):""} on {friendlyDate(reassignMode.currentDateKey)}</div>
+            */}
+            <div style={{fontSize:"14px"}}>Tap any open slot for <strong>{reassignMode.client.name}</strong>{(function(){ var gs=(typeof reassignMode.groupSize==="number"?reassignMode.groupSize:(reassignQueue.length+1)); return gs===2?" — placing both":(gs>=3?(" — placing all "+gs):""); })()}{(reassignQueue.length>0&&reassignQueue[0]&&reassignQueue[0].name)?(" · next: "+reassignQueue[0].name):""} on {friendlyDate(reassignMode.currentDateKey)}</div>
           </div>
           <button onClick={function(){ setReassignMode(null); setReassignQueue([]); }} style={{background:"none",border:"1px solid #444",borderRadius:"6px",color:"#888",padding:"6px 12px",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>Cancel</button>
         </div>
@@ -6163,26 +6381,47 @@ export default function TheList() {
           <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"24px",width:"min(360px,92vw)"}} onClick={function(e){ e.stopPropagation(); }}>
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#a07830",marginBottom:"8px"}}>{noteModal.isDay?"Day Note":"Note"}</div>
             <div style={{fontSize:"16px",color:"#1a1a1a",marginBottom:"14px"}}>{noteModal.name}</div>
-            <textarea autoFocus data-noteinput="1" value={noteDraft} onChange={function(e){ setNoteDraft(e.target.value); }} onKeyDown={function(e){ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); var nm=noteModal; if(nm.isDay){ dnCommitDayNote("save"); } else { var slots=[...getSlots(nm.dateKey)]; var s=slots[nm.idx]; slots[nm.idx]={...s,note:noteDraft.trim(),noteKind:noteDraft.trim()?noteKind:null}; setSlots(nm.dateKey,slots); setNoteModal(null); setNoteDraft(""); setNoteKind(null); } } }} placeholder={noteModal.isDay?"":"Add a note for this appointment..."} style={{width:"100%",boxSizing:"border-box",minHeight:"96px",resize:"vertical",background:"#efefed",border:"1px solid #d8d8d6",borderRadius:"6px",padding:"10px",fontSize:"14px",fontFamily:"Georgia,serif",color:noteColorFor(noteKind),outline:"none",marginBottom:"12px"}}/>
-            <div style={{display:"flex",alignItems:"center",gap:"8px",marginBottom:"14px"}}>
-              <button onClick={function(){ setNoteKind(noteKind==="personal"?null:"personal"); }} style={{flex:1,padding:"8px",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",letterSpacing:"0.06em",border:"1px solid "+TODAY_BLUE,background:noteKind==="personal"?TODAY_BLUE:"transparent",color:noteKind==="personal"?"#fff":TODAY_BLUE}}>Personal</button>
-              <button onClick={function(){ setNoteKind(noteKind==="business"?null:"business"); }} style={{flex:1,padding:"8px",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",letterSpacing:"0.06em",border:"1px solid #a07830",background:noteKind==="business"?"#a07830":"transparent",color:noteKind==="business"?"#fff":"#a07830"}}>Business</button>
-            </div>
+            {/* Appointment note: unchanged free-form textarea + Personal/Business (day notes
+                dropped the P/B kind in v88; see the structured line editor below). */}
+            {!noteModal.isDay && (
+              <textarea autoFocus data-noteinput="1" value={noteDraft} onChange={function(e){ setNoteDraft(e.target.value); }} onKeyDown={function(e){ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); var nm=noteModal; var slots=[...getSlots(nm.dateKey)]; var s=slots[nm.idx]; slots[nm.idx]={...s,note:noteDraft.trim(),noteKind:noteDraft.trim()?noteKind:null}; setSlots(nm.dateKey,slots); setNoteModal(null); setNoteDraft(""); setNoteKind(null); } }} placeholder={"Add a note for this appointment..."} style={{width:"100%",boxSizing:"border-box",minHeight:"96px",resize:"vertical",background:"#efefed",border:"1px solid #d8d8d6",borderRadius:"6px",padding:"10px",fontSize:"14px",fontFamily:"Georgia,serif",color:noteColorFor(noteKind),outline:"none",marginBottom:"12px"}}/>
+            )}
+            {!noteModal.isDay && (
+              <div style={{display:"flex",alignItems:"center",gap:"8px",marginBottom:"14px"}}>
+                <button onClick={function(){ setNoteKind(noteKind==="personal"?null:"personal"); }} style={{flex:1,padding:"8px",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",letterSpacing:"0.06em",border:"1px solid "+TODAY_BLUE,background:noteKind==="personal"?TODAY_BLUE:"transparent",color:noteKind==="personal"?"#fff":TODAY_BLUE}}>Personal</button>
+                <button onClick={function(){ setNoteKind(noteKind==="business"?null:"business"); }} style={{flex:1,padding:"8px",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",letterSpacing:"0.06em",border:"1px solid #a07830",background:noteKind==="business"?"#a07830":"transparent",color:noteKind==="business"?"#fff":"#a07830"}}>Business</button>
+              </div>
+            )}
+            {/* v88 day-note structured line editor: each line is its own row with a ↻ chip
+                that opens the per-line repeat popup. Enter adds a row; Backspace on an empty
+                row removes it. Save routes through dnCommitLines. */}
             {noteModal.isDay && (
-              <div style={{display:"flex",alignItems:"center",gap:"6px",marginBottom:"14px",flexWrap:"wrap"}}>
-                <span style={{fontSize:"10px",letterSpacing:"0.12em",color:"#a07830",marginRight:"2px"}}>{"REPEAT"}</span>
-                {[[0,"Once"],[1,"Weekly"],[2,"2 wks"],[3,"3 wks"],[4,"4 wks"]].map(function(opt){
-                  var v=opt[0]; var lbl=opt[1]; var on=noteRepeat===v;
-                  return (<button key={"rpt"+v} onClick={function(){ setNoteRepeat(v); }} style={{padding:"5px 9px",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",border:"1px solid "+(on?"#c9a96e":"#e0e0de"),background:on?"#c9a96e":"transparent",color:on?"#fff":"#999"}}>{lbl}</button>);
+              <div style={{marginBottom:"12px"}}>
+                {noteLines.map(function(row, idx){
+                  var chipLbl = row.r===0 ? "once" : (row.r===2 ? (row.n>1?("↻ "+row.n+"mo"):"↻ mo") : (row.n>1?("↻ "+row.n+"w"):"↻ wk"));
+                  var chipOn = row.r>0;
+                  return (
+                    <div key={row.id} style={{display:"flex",alignItems:"center",gap:"6px",marginBottom:"6px"}}>
+                      <input ref={function(el){ if(el){ noteRowRefs.current[row.id]=el; } else { delete noteRowRefs.current[row.id]; } }} autoFocus={idx===0} value={row.t} onChange={function(e){ dnRowUpdate(row.id,{t:e.target.value}); }} onKeyDown={function(ev){
+                          if(ev.key==="Enter"){ ev.preventDefault(); var nid=dnNewId(); var dk=(noteModal&&noteModal.dayKey)||"";
+                            setNoteLines(function(rows){ var out=[]; for(var i=0;i<rows.length;i++){ out.push(rows[i]); if(rows[i].id===row.id){ out.push({id:nid,t:"",r:0,n:1,since:dk,src:"new"}); } } return out; });
+                            setTimeout(function(){ var el=noteRowRefs.current[nid]; if(el){ el.focus(); } },0);
+                          } else if(ev.key==="Backspace" && (row.t||"")==="" && noteLines.length>1){ ev.preventDefault();
+                            var pidx=-1; for(var j=0;j<noteLines.length;j++){ if(noteLines[j].id===row.id){ pidx=j; break; } }
+                            var prevId= pidx>0 ? noteLines[pidx-1].id : null;
+                            dnRowDelete(row.id);
+                            if(prevId){ setTimeout(function(){ var el2=noteRowRefs.current[prevId]; if(el2){ el2.focus(); } },0); }
+                          }
+                        }} placeholder={idx===0?"Add a note…":"…"} style={{flex:1,minWidth:0,boxSizing:"border-box",background:"#efefed",border:"1px solid #d8d8d6",borderRadius:"6px",padding:"9px 10px",fontSize:"14px",fontFamily:"Georgia,serif",color:"#1a1a1a",outline:"none"}}/>
+                      <button onClick={function(){ setNoteRepeatPopup(row.id); }} title="Repeat setting for this line" style={{flexShrink:0,padding:"7px 9px",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",whiteSpace:"nowrap",border:"1px solid "+(chipOn?"#c9a96e":"#e0e0de"),background:chipOn?"#c9a96e":"transparent",color:chipOn?"#fff":"#999"}}>{chipLbl}</button>
+                      <button onClick={function(){ dnRowDelete(row.id); }} title="Remove this line" style={{flexShrink:0,background:"none",border:"none",cursor:"pointer",color:"#c0392b",fontSize:"18px",lineHeight:1,padding:"0 2px"}}>{"×"}</button>
+                    </div>
+                  );
                 })}
+                <button onClick={function(){ dnRowAddAfter(noteLines.length?noteLines[noteLines.length-1].id:null); }} style={{marginTop:"2px",padding:"6px 10px",background:"transparent",border:"1px dashed #d8d8d6",borderRadius:"6px",color:"#999",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>{"+ line"}</button>
               </div>
             )}
-            {noteModal.isDay && (
-              <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:"8px",marginBottom:"14px"}}>
-                <button onClick={function(){ addSlotToBeginning(noteModal.dayKey); }} style={{padding:"4px 10px",background:"transparent",border:"1px solid #e6e6e4",borderRadius:"6px",color:"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.04em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#f4f4f2"; }} onMouseLeave={function(e){ e.currentTarget.style.background="transparent"; }}>+AM</button>
-                <button onClick={function(){ addSlotToEnd(noteModal.dayKey); }} style={{padding:"4px 10px",background:"transparent",border:"1px solid #e6e6e4",borderRadius:"6px",color:"#aaa",cursor:"pointer",fontFamily:"inherit",fontSize:"11px",letterSpacing:"0.04em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#f4f4f2"; }} onMouseLeave={function(e){ e.currentTarget.style.background="transparent"; }}>+PM</button>
-              </div>
-            )}
+            {/* v84 (#4): the standalone +AM/+PM row was removed from here and relocated into the bottom action row (see footer below). Same addSlotToBeginning/addSlotToEnd calls, day-notes only. */}
             {noteModal.isDay && !noteScopeAsk && (
               <div style={{borderTop:"1px solid #ececea",marginTop:"2px",marginBottom:"14px",paddingTop:"12px"}}>
                 <div style={{fontSize:"10px",letterSpacing:"0.12em",color:"#a07830",marginBottom:"8px"}}>{"STANDBY LIST"}</div>
@@ -6194,7 +6433,7 @@ export default function TheList() {
                       {items.map(function(it){
                         return (
                           <div key={it.id} style={{display:"flex",alignItems:"center",gap:"8px",padding:"6px 8px",background:"#f6f4ef",border:"1px solid #ece7dc",borderRadius:"6px",marginBottom:"6px"}}>
-                            <span style={{flex:1,fontSize:"14px",color:"#1a1a1a",fontFamily:"Georgia,serif",wordBreak:"break-word"}}>{it.name}</span>
+                            <button onClick={function(){ openClientProfile(it.name); }} title="Open client profile" style={{flex:1,minWidth:0,textAlign:"left",background:"none",border:"none",cursor:"pointer",fontSize:"14px",color:"#1a1a1a",fontFamily:"Georgia,serif",wordBreak:"break-word",padding:0}}>{it.name}</button>
                             <button onClick={function(){ wlRemove(noteModal.dayKey, it.id); }} title="Remove from standby" style={{background:"none",border:"none",cursor:"pointer",color:"#c0392b",fontSize:"18px",lineHeight:1,padding:"0 4px",flexShrink:0}}>{"×"}</button>
                           </div>
                         );
@@ -6202,9 +6441,23 @@ export default function TheList() {
                     </div>
                   );
                 })()}
-                <div style={{display:"flex",gap:"8px"}}>
-                  <input value={wlInput} onChange={function(e){ setWlInput(e.target.value); }} onKeyDown={function(e){ if(e.key==="Enter"){ e.preventDefault(); wlAdd(noteModal.dayKey, wlInput); setWlInput(""); } }} placeholder="Add a name…" style={{flex:1,boxSizing:"border-box",background:"#efefed",border:"1px solid #d8d8d6",borderRadius:"6px",padding:"8px 10px",fontSize:"14px",fontFamily:"Georgia,serif",color:"#1a1a1a",outline:"none"}}/>
-                  <button onClick={function(){ wlAdd(noteModal.dayKey, wlInput); setWlInput(""); }} style={{padding:"8px 14px",background:"#c9a96e",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",flexShrink:0}}>{"Add"}</button>
+                <div>
+                  <div style={{display:"flex",gap:"8px"}}>
+                    <input value={wlInput} onChange={function(e){ setWlInput(e.target.value); }} onKeyDown={function(e){ if(e.key==="Enter"){ e.preventDefault(); wlAdd(noteModal.dayKey, wlInput); setWlInput(""); } }} placeholder="Add a name…" style={{flex:1,boxSizing:"border-box",background:"#efefed",border:"1px solid #d8d8d6",borderRadius:"6px",padding:"8px 10px",fontSize:"14px",fontFamily:"Georgia,serif",color:"#1a1a1a",outline:"none"}}/>
+                    <button onClick={function(){ wlAdd(noteModal.dayKey, wlInput); setWlInput(""); }} style={{padding:"8px 14px",background:"#c9a96e",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",flexShrink:0}}>{"Add"}</button>
+                  </div>
+                  {/* v84 (#1): slot/search-style type-ahead. Same computeSuggestions used by the schedule name field (saved, phoned client profiles only, 3+ chars). Tapping a suggestion adds them by name; a free-typed name still works via Enter/Add, exactly like a slot. */}
+                  {(function(){
+                    var wlSugg = computeSuggestions(wlInput);
+                    if (!wlSugg.length) return null;
+                    return (
+                      <div style={{marginTop:"6px",border:"1px solid #e4e0d6",borderRadius:"6px",overflow:"hidden",background:"#fff"}}>
+                        {wlSugg.map(function(c){
+                          return (<button key={"wlsug:"+c.name} onClick={function(){ wlAdd(noteModal.dayKey, c.name); setWlInput(""); }} style={{display:"block",width:"100%",boxSizing:"border-box",textAlign:"left",background:"none",border:"none",borderBottom:"1px solid #f2efe6",cursor:"pointer",fontFamily:"Georgia,serif",fontSize:"13px",color:"#1a1a1a",padding:"8px 10px"}}>{c.name}</button>);
+                        })}
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
             )}
@@ -6218,35 +6471,65 @@ export default function TheList() {
                 </div>
               </div>
             ) : (
-              <div style={{display:"flex",gap:"8px"}}>
+              <div style={{display:"flex",alignItems:"center",gap:"8px",flexWrap:"wrap"}}>
+                {/* v84 (#4): +AM/+PM relocated here from their old standalone row; day-notes only, same addSlotToBeginning/addSlotToEnd calls. */}
+                {noteModal.isDay && (
+                  <button onClick={function(){ addSlotToBeginning(noteModal.dayKey); }} style={{padding:"10px 12px",background:"transparent",border:"1px solid #e6e6e4",borderRadius:"6px",color:"#999",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",letterSpacing:"0.04em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#f4f4f2"; }} onMouseLeave={function(e){ e.currentTarget.style.background="transparent"; }}>+AM</button>
+                )}
+                {noteModal.isDay && (
+                  <button onClick={function(){ addSlotToEnd(noteModal.dayKey); }} style={{padding:"10px 12px",background:"transparent",border:"1px solid #e6e6e4",borderRadius:"6px",color:"#999",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",letterSpacing:"0.04em"}} onMouseEnter={function(e){ e.currentTarget.style.background="#f4f4f2"; }} onMouseLeave={function(e){ e.currentTarget.style.background="transparent"; }}>+PM</button>
+                )}
+                {/* v84 (#4): Clear button removed per request. Clear a note by emptying the text and pressing Save (an empty note commits as a clear: day notes route through dnWriteToday/scope-prompt, appointment notes save note:""). To restore, re-add a button calling dnCommitDayNote("clear") for day notes, or setting the slot note:"" for appointment notes. */}
                 <button onClick={function(){
                   var nm=noteModal;
-                  if (nm.isDay) { dnCommitDayNote("save"); }
+                  if (nm.isDay) { dnCommitLines(); }
                   else {
                     var slots=[...getSlots(nm.dateKey)]; var s=slots[nm.idx];
                     slots[nm.idx]={...s,note:noteDraft.trim(),noteKind:noteDraft.trim()?noteKind:null};
                     setSlots(nm.dateKey,slots);
                     setNoteModal(null); setNoteDraft(""); setNoteKind(null);
                   }
-                }} style={{flex:1,padding:"10px",background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Save note</button>
-                {noteModal && (function(){ if(noteModal.isDay) return !!dayNoteText(noteModal.dayKey); var s=getSlots(noteModal.dateKey)[noteModal.idx]; return s&&s.note; })() && (
-                  <button onClick={function(){
-                    var nm=noteModal;
-                    if (nm.isDay) { dnCommitDayNote("clear"); }
-                    else {
-                      var slots=[...getSlots(nm.dateKey)]; var s=slots[nm.idx];
-                      slots[nm.idx]={...s,note:"",noteKind:null};
-                      setSlots(nm.dateKey,slots);
-                      setNoteModal(null); setNoteDraft(""); setNoteKind(null);
-                    }
-                  }} style={{padding:"10px 14px",background:"none",border:"1px solid #e0b0a8",borderRadius:"6px",color:"#c0392b",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Clear</button>
-                )}
+                }} style={{marginLeft:"auto",padding:"10px 16px",background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Save note</button>
                 <button onClick={function(){ dnCloseNoteModal(); }} style={{padding:"10px 14px",background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Cancel</button>
               </div>
             )}
           </div>
         </div>
       )}
+
+      {/* v88 per-line repeat popup — sits above the note modal (zIndex 1300). Applies a
+          repeat setting to the single day-note line whose ↻ chip was tapped. Background tap
+          closes only this popup, not the note modal. */}
+      {noteModal && noteModal.isDay && noteRepeatPopup && (function(){
+        var trow=null; for(var i=0;i<noteLines.length;i++){ if(noteLines[i].id===noteRepeatPopup){ trow=noteLines[i]; break; } }
+        if(!trow) return null;
+        var dk=noteModal.dayKey;
+        var isInheritedRule = (trow.src==="rule" && trow.since && trow.since!==dk);
+        var setR=function(rr,nn){ dnRowUpdate(noteRepeatPopup,{r:rr,n:nn}); setNoteRepeatPopup(null); };
+        var fullBtn=function(on){ return {display:"block",width:"100%",boxSizing:"border-box",textAlign:"left",padding:"9px 10px",marginBottom:"6px",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",border:"1px solid "+(on?"#c9a96e":"#e0e0de"),background:on?"#c9a96e":"transparent",color:on?"#fff":"#555"}; };
+        return (
+          <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.35)",zIndex:1300,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px"}} onClick={function(){ setNoteRepeatPopup(null); }}>
+            <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"18px",width:"min(300px,90vw)"}} onClick={function(e){ e.stopPropagation(); }}>
+              <div style={{fontSize:"10px",letterSpacing:"0.14em",textTransform:"uppercase",color:"#a07830",marginBottom:"10px"}}>{"Repeat this line"}</div>
+              <button onClick={function(){ setR(0,1); }} style={fullBtn(trow.r===0)}>{"Once (no repeat)"}</button>
+              <button onClick={function(){ setR(1,1); }} style={fullBtn(trow.r===1&&trow.n===1)}>{"Weekly"}</button>
+              <div style={{fontSize:"10px",letterSpacing:"0.12em",color:"#bbb",margin:"10px 0 5px"}}>{"EVERY N WEEKS"}</div>
+              <div style={{display:"flex",flexWrap:"wrap",gap:"5px",marginBottom:"6px"}}>
+                {[2,3,4,5,6,7,8].map(function(k){ var on=(trow.r===1&&trow.n===k); return (<button key={"wk"+k} onClick={function(){ setR(1,k); }} style={{padding:"6px 10px",borderRadius:"6px",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",border:"1px solid "+(on?"#c9a96e":"#e0e0de"),background:on?"#c9a96e":"transparent",color:on?"#fff":"#888"}}>{k+"w"}</button>); })}
+              </div>
+              <div style={{fontSize:"10px",letterSpacing:"0.12em",color:"#bbb",margin:"10px 0 5px"}}>{"MONTHLY — every N months, same date"}</div>
+              <select value={trow.r===2?String(trow.n):""} onChange={function(e){ var v=e.target.value; if(v===""){ return; } setR(2,parseInt(v,10)); }} style={{width:"100%",boxSizing:"border-box",padding:"8px",borderRadius:"6px",border:"1px solid "+(trow.r===2?"#c9a96e":"#d8d8d6"),background:trow.r===2?"#faf5ea":"#fff",fontFamily:"inherit",fontSize:"13px",color:"#1a1a1a"}}>
+                <option value="">{"— pick months —"}</option>
+                {[1,2,3,4,5,6,7,8,9,10,11,12].map(function(mn){ return (<option key={"mo"+mn} value={String(mn)}>{mn===1?"Every month":("Every "+mn+" months")}</option>); })}
+              </select>
+              {isInheritedRule && (
+                <button onClick={function(){ dnSkipOccurrence(dk, trow.id); }} style={{marginTop:"12px",width:"100%",padding:"9px",background:"transparent",border:"1px solid #e0d2d2",borderRadius:"6px",color:"#c0392b",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>{"Skip just this day"}</button>
+              )}
+              <button onClick={function(){ setNoteRepeatPopup(null); }} style={{marginTop:"10px",width:"100%",padding:"9px",background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>{"Done"}</button>
+            </div>
+          </div>
+        );
+      })()}
 
       {quickMsgModal && (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1250,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px"}} onClick={function(){ setQuickMsgModal(false); setQuickMsgOpenId(null); }}>
@@ -6748,7 +7031,7 @@ export default function TheList() {
                       </div>
                     ); })()}
                     {(function(){ var rN=resolveDayNote(dk); var hasN=!!rN.text; var k=rN.text?rN.kind:null; var rep=rN.repeating; var col=!hasN?"#cfcccc":(k==="personal"?TODAY_BLUE:"#c9a96e"); return (
-                      <button onClick={function(e){ e.stopPropagation(); var r=resolveDayNote(dk); setNoteDraft(r.text); setNoteKind(r.text?r.kind:null); setNoteRepeat(r.rpt); setNoteWasRepeat(r.repeating); setNoteScopeAsk(null); setNoteModal({dayKey:dk,isDay:true,name:friendlyDateLong(dk),ruleKey:r.ruleKey}); }} onMouseDown={function(e){ e.stopPropagation(); }} onTouchStart={function(e){ e.stopPropagation(); }} title={hasN?"Day note":"Add a day note"} style={{position:"absolute",bottom:"2px",right:"3px",background:"none",border:"none",cursor:"pointer",padding:"2px 3px",color:col,fontSize:isPhone?"13px":"15px",lineHeight:1,opacity:outside?0.6:1,WebkitTextStroke:"0.4px currentColor"}}>{"✎"}{rep?<sup style={{fontSize:"7px",marginLeft:"1px",opacity:0.85,WebkitTextStroke:"0px"}}>{"↻"}</sup>:null}</button>
+                      <button onClick={function(e){ e.stopPropagation(); var rws=dnPrefillRows(dk); setNoteLines(rws); setNoteOrigLines(rws.slice()); setNoteRepeatPopup(null); setNoteScopeAsk(null); setNoteModal({dayKey:dk,isDay:true,name:friendlyDateLong(dk)}); }} onMouseDown={function(e){ e.stopPropagation(); }} onTouchStart={function(e){ e.stopPropagation(); }} title={hasN?"Day note":"Add a day note"} style={{position:"absolute",bottom:"2px",right:"3px",background:"none",border:"none",cursor:"pointer",padding:"2px 3px",color:col,fontSize:isPhone?"13px":"15px",lineHeight:1,opacity:outside?0.6:1,WebkitTextStroke:"0.4px currentColor"}}>{"✎"}{rep?<sup style={{fontSize:"7px",marginLeft:"1px",opacity:0.85,WebkitTextStroke:"0px"}}>{"↻"}</sup>:null}</button>
                     ); })()}
                   </div>
                 );
@@ -6794,7 +7077,7 @@ export default function TheList() {
                     );
                   })()}
                   <button onClick={function(e){ e.stopPropagation(); setAcctAdd({}); setAcctModal({dateKey:dateKey}); }} title="Accounting for the day" style={{background:"none",border:"none",cursor:"pointer",padding:(getDayCount()>3?"0 2px":"0 4px 0 2px"),color:acctHasData(dateKey)?"#c9a96e":"#bbb",fontSize:"19px",fontWeight:"bold",lineHeight:1,flexShrink:0,fontFamily:"Georgia,serif"}}>{"$"}</button>
-                  <button onClick={function(e){ e.stopPropagation(); var r=resolveDayNote(dateKey); setNoteDraft(r.text); setNoteKind(r.text?r.kind:null); setNoteRepeat(r.rpt); setNoteWasRepeat(r.repeating); setNoteScopeAsk(null); setNoteModal({dayKey:dateKey,isDay:true,name:friendlyDateLong(dateKey),ruleKey:r.ruleKey}); }} title="Note for the day" style={{background:"none",border:"none",cursor:"pointer",padding:(getDayCount()>3?"0 2px":"0 9px 0 2px"),color:dayNoteText(dateKey)?(dayNoteKind(dateKey)==="personal"?TODAY_BLUE:"#c9a96e"):"#bbb",fontSize:"22px",lineHeight:1,flexShrink:0,WebkitTextStroke:"0.5px currentColor"}}>{"✎"}{dayNoteRepeating(dateKey)?<sup style={{fontSize:"9px",marginLeft:"1px",opacity:0.85,WebkitTextStroke:"0px"}}>{"↻"}</sup>:null}</button>
+                  <button onClick={function(e){ e.stopPropagation(); var rws=dnPrefillRows(dateKey); setNoteLines(rws); setNoteOrigLines(rws.slice()); setNoteRepeatPopup(null); setNoteScopeAsk(null); setNoteModal({dayKey:dateKey,isDay:true,name:friendlyDateLong(dateKey)}); }} title="Note for the day" style={{background:"none",border:"none",cursor:"pointer",padding:(getDayCount()>3?"0 2px":"0 9px 0 2px"),color:dayNoteText(dateKey)?(dayNoteKind(dateKey)==="personal"?TODAY_BLUE:"#c9a96e"):"#bbb",fontSize:"22px",lineHeight:1,flexShrink:0,WebkitTextStroke:"0.5px currentColor"}}>{"✎"}{dayNoteRepeating(dateKey)?<sup style={{fontSize:"9px",marginLeft:"1px",opacity:0.85,WebkitTextStroke:"0px"}}>{"↻"}</sup>:null}</button>
                 </div>
                 <div data-slotscroll="1" style={{flex:(slots.length+" 1 0px"),minHeight:0,paddingBottom:"0px",overflowX:"hidden",overscrollBehavior:"contain",display:"flex",flexDirection:"column"}}
                   onTouchMove={function(e){
@@ -7006,12 +7289,13 @@ export default function TheList() {
                                   <div onClick={function(e){ e.stopPropagation(); }} style={{position:"absolute",top:"100%",left:"0",marginTop:"2px",minWidth:"150px",maxWidth:"240px",maxHeight:"176px",overflowY:"auto",background:"#ffffff",border:"1px solid #d8d8d6",borderRadius:"8px",boxShadow:"0 6px 18px rgba(0,0,0,0.16)",zIndex:60,padding:"3px",WebkitOverflowScrolling:"touch"}}>
                                     {sugs.map(function(sug,si){
                                       var hot=si===suggestIdx;
+                                      var sugPrice=sug.price||getClientPrice(sug.name)||""; // v86: dropdown price falls back to a booking scan when the profile card's default is blank, matching the header search
                                       return (
                                         <div key={si}
-                                          onPointerDown={function(e){ e.preventDefault(); e.stopPropagation(); setSuggestHide(true); setSuggestIdx(-1); doCommit(dateKey,idx,{name:sug.name,price:(sug.price||editValues.price||"")}); }}
+                                          onPointerDown={function(e){ e.preventDefault(); e.stopPropagation(); setSuggestHide(true); setSuggestIdx(-1); doCommit(dateKey,idx,{name:sug.name,price:(sugPrice||editValues.price||"")}); }}
                                           style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:"8px",padding:"7px 9px",borderRadius:"6px",cursor:"pointer",background:hot?"#f0ebdd":"transparent"}}>
                                           <span style={{fontSize:"13px",color:"#1a1a1a",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",fontFamily:"Georgia,serif"}}>{sug.name}</span>
-                                          {sug.price?<span style={{fontSize:"11px",color:"#a07830",flexShrink:0}}>{sug.price}</span>:null}
+                                          {sugPrice?<span style={{fontSize:"11px",color:"#a07830",flexShrink:0}}>{sugPrice}</span>:null}
                                         </div>
                                       );
                                     })}
