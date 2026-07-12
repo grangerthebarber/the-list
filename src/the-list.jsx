@@ -829,6 +829,13 @@ export default function TheList() {
   const [renamingProfile, setRenamingProfile] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const [phoneModal, setPhoneModal] = useState(null);
+  // v100 (#1): TWO CARDS, ONE NUMBER. Holds {editing, phone, others:[names]} the moment a
+  // number typed onto one card is found already saved on somebody else's. Display only —
+  // it never blocks the save and never asks a question. phoneTwinSeenRef remembers which
+  // name+number pairs have already been shown this session so the panel cannot re-raise
+  // itself on every further keystroke in the same field.
+  const [phoneTwins, setPhoneTwins] = useState(null);
+  const phoneTwinSeenRef = useRef({});
   const [checkoffCalMonth, setCheckoffCalMonth] = useState(null);
   const [editingOccupied, setEditingOccupied] = useState(false);
   const [monthLongPress, setMonthLongPress] = useState(null);
@@ -1480,7 +1487,7 @@ export default function TheList() {
       // While ANY popup is open the arrows belong to the popup, not the schedule behind
       // it — so they never page the day or jump the background to today. (Undo/redo above
       // still work.) Each modal's own handlers take over the arrows from here.
-      var anyOverlay = !!(acctModal||noteModal||checkoffModal||confirmDelete||phoneModal||blockLabelModal||clientProfile||renameRequiredModal||recurringModal||conflictModal||groupRecurModal||holidayModal||groupScheduleModal||timeEditModal||seriesEditModal||seriesShiftReport||importConfirm||profilePriceModal);
+      var anyOverlay = !!(acctModal||noteModal||checkoffModal||confirmDelete||phoneModal||blockLabelModal||clientProfile||renameRequiredModal||recurringModal||conflictModal||groupRecurModal||holidayModal||groupScheduleModal||timeEditModal||seriesEditModal||seriesShiftReport||importConfirm||profilePriceModal||phoneTwins); /* v100 (#1): phoneTwins joins the list. In practice it is always raised OVER phoneModal or clientProfile (both already here), so this changes nothing today — it is here so it stays correct if it is ever raised from somewhere else. */
       // Left/Right arrows page through days (months in Month view), mirroring the
       // on-screen ‹ / › buttons. Ignored while a field is focused — there the arrows
       // move the text cursor / hop slot rows, and Shift+Arrow nudges the time.
@@ -3890,6 +3897,50 @@ export default function TheList() {
       if (i>=0) { var u=[...mem]; u[i]={...u[i],phone:phone}; return u; }
       return [...mem,{name:name,price:"",phone:phone}];
     });
+  };
+
+  // v100 (#1): DUPLICATE NUMBER — SHOW ME THE CARDS. Nothing has ever stopped the same
+  // number living on two client cards, and nothing here starts: family members share a
+  // phone, and a block would be wrong. But silence is how a "Kyle" card and a "Kyle Shaw"
+  // card both ended up on one number with nobody the wiser. So: no prompt, no question,
+  // no change to what gets saved. The instant the number being typed lands EXACTLY on a
+  // number already sitting on another card, the other cards are put in front of Granger
+  // and he decides.
+  //   findPhoneTwins  — digits-only comparison, so formatting is irrelevant ((555) 123-4567
+  //                     and 5551234567 are the same number). Requires 7+ digits so a
+  //                     half-typed number cannot collide with a short one by accident, and
+  //                     skips the card being edited (matched by lower-cased name, the same
+  //                     identity rule getClientPhone/setClientPhone already use).
+  //   checkPhoneTwins — the trigger, called from the two and only two places a number can
+  //                     be typed: the add-a-number prompt (phoneModal) and the profile card.
+  //                     Both of those save on every keystroke, so this fires the moment the
+  //                     full number is in. The seen-ref makes it once per name+number.
+  // Reads clientMemoryRef.current, not the clientMemory state, so the keystroke that just
+  // called setClientPhone cannot hand this a stale-vs-fresh mismatch — and the edited card
+  // is excluded by name anyway, so which of the two it sees does not change the answer.
+  const findPhoneTwins = function(name, raw) {
+    var d = String(raw || "").replace(/[^0-9]/g, "");
+    if (d.length < 7) return [];
+    var lo = String(name || "").toLowerCase();
+    var mem = clientMemoryRef.current || [];
+    var out = [];
+    for (var i = 0; i < mem.length; i++) {
+      var c = mem[i];
+      if (!c || !c.name || !c.phone) continue;
+      if (String(c.name).toLowerCase() === lo) continue;
+      if (String(c.phone).replace(/[^0-9]/g, "") === d) out.push(c.name);
+    }
+    return out;
+  };
+  const checkPhoneTwins = function(name, raw) {
+    if (!name) return;
+    var d = String(raw || "").replace(/[^0-9]/g, "");
+    var key = String(name).toLowerCase() + "|" + d;
+    if (phoneTwinSeenRef.current[key]) return;
+    var others = findPhoneTwins(name, raw);
+    if (!others.length) return;
+    phoneTwinSeenRef.current[key] = true;
+    setPhoneTwins({editing:name, phone:raw, others:others});
   };
 
   // v98 THE NOTE NOW BELONGS TO THE PERSON, NOT THE APPOINTMENT. Until now the only
@@ -6511,7 +6562,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v99</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v100</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -6679,7 +6730,7 @@ export default function TheList() {
             <div style={{fontSize:"16px",color:"#1a1a1a",marginBottom:"4px"}}>{phoneModal.name}</div>
             <div style={{fontSize:"12px",color:"#999",marginBottom:"14px"}}>Add a mobile number to text them. It's saved to their profile.</div>
             <input autoFocus type="tel" inputMode="tel" autoComplete="off" value={phoneModal.phone||""} placeholder="Phone number"
-              onChange={function(e){ var v=e.target.value; setPhoneModal(function(p){ return p?{...p,phone:v}:p; }); setClientPhone(phoneModal.name, v); }}
+              onChange={function(e){ var v=e.target.value; setPhoneModal(function(p){ return p?{...p,phone:v}:p; }); setClientPhone(phoneModal.name, v); /* v100 (#1): the save above is unchanged and unconditional — this only LOOKS. */ checkPhoneTwins(phoneModal.name, v); }}
               onKeyDown={function(e){ if(e.key==="Escape") setPhoneModal(null); }}
               style={{...inputStyle,width:"100%",boxSizing:"border-box",marginBottom:"14px",fontSize:"15px"}} />
             <div style={{display:"flex",gap:"8px"}}>
@@ -6688,6 +6739,35 @@ export default function TheList() {
                 : <button disabled style={{flex:1,padding:"10px",background:"#ececeb",border:"none",borderRadius:"6px",color:"#bbb",cursor:"default",fontFamily:"inherit",fontSize:"13px"}}>Message</button>}
               <button onClick={function(){ setPhoneModal(null); }} style={{padding:"10px 16px",background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Done</button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* v100 (#1): TWO CARDS, ONE NUMBER. Raised by checkPhoneTwins the instant a number
+          typed on one card exactly matches one already saved on another. It asks nothing
+          and blocks nothing — the number is already saved by the time this appears. It
+          just shows whose cards those are and opens them on a tap.
+          zIndex 1400 because it is spawned BY the surfaces below it: phoneModal is 1300,
+          the day-note popup 1200, the client profile 1100. Anything lower and it would
+          open behind the very field that raised it.
+          Revert lever — delete this whole block plus the two checkPhoneTwins() calls in
+          the phone inputs and the helpers above; nothing else in the file depends on it,
+          and no data shape changed, so there is nothing to migrate back. */}
+      {phoneTwins && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1400,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px"}} onClick={function(){ setPhoneTwins(null); }}>
+          <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"24px",width:"min(340px,92vw)",maxHeight:"72vh",overflowY:"auto",boxSizing:"border-box"}} onClick={function(e){ e.stopPropagation(); }}>
+            <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#aaa",marginBottom:"8px"}}>Same number</div>
+            <div style={{fontSize:"15px",color:"#1a1a1a",marginBottom:"4px",lineHeight:1.4}}>{"That number is already on "+(phoneTwins.others.length===1?"another card":(phoneTwins.others.length+" other cards"))+"."}</div>
+            <div style={{fontSize:"12px",color:"#999",marginBottom:"16px",lineHeight:1.4}}>{"Saved to "+phoneTwins.editing+" anyway — nothing was blocked. Open a card below if you want to sort it out."}</div>
+            {phoneTwins.others.map(function(nm){
+              return (
+                <button key={nm} onClick={function(){ setPhoneTwins(null); setPhoneModal(null); openClientProfile(nm); }} style={{display:"block",width:"100%",boxSizing:"border-box",textAlign:"left",padding:"11px 12px",marginBottom:"8px",background:"#fcfcfb",border:"1px solid #d8d8d6",borderRadius:"8px",color:"#1a1a1a",cursor:"pointer",fontFamily:"inherit",fontSize:"14px"}}>
+                  <span style={{display:"block"}}>{nm}</span>
+                  <span style={{display:"block",fontSize:"11px",color:"#999",marginTop:"3px"}}>{getClientPhone(nm)}</span>
+                </button>
+              );
+            })}
+            <button onClick={function(){ setPhoneTwins(null); }} style={{width:"100%",boxSizing:"border-box",padding:"10px",marginTop:"6px",background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Leave them both</button>
           </div>
         </div>
       )}
@@ -6982,7 +7062,7 @@ export default function TheList() {
             <button onClick={function(){ jumpToDateForBooking(toDateKey(addWeeks(new Date(),2)), clientProfile); setClientProfile(null); }} style={{padding:"10px",background:"#c9a96e",border:"none",borderRadius:"8px",color:"#0f0f0f",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",marginBottom:"14px"}}>Book next appointment</button>
             <div style={{display:"flex",gap:"6px",alignItems:"center",marginBottom:"14px"}}>
               <input type="tel" inputMode="tel" autoComplete="off" value={clientProfile.phone||""} placeholder="Phone number"
-                onChange={function(e){ var v=e.target.value; setClientProfile(function(p){ return p?{...p,phone:v}:p; }); setClientPhone(clientProfile.name, v); }}
+                onChange={function(e){ var v=e.target.value; setClientProfile(function(p){ return p?{...p,phone:v}:p; }); setClientPhone(clientProfile.name, v); /* v100 (#1): the save above is unchanged and unconditional — this only LOOKS. */ checkPhoneTwins(clientProfile.name, v); }}
                 style={{flex:1,padding:"8px 10px",border:"1px solid #d8d8d6",borderRadius:"8px",fontFamily:"inherit",fontSize:"13px",color:"#1a1a1a",background:"#fcfcfb",minWidth:0,userSelect:"text",WebkitUserSelect:"text"}} />
               {(clientProfile.phone||"").replace(/[^0-9+]/g,"")?<button onClick={function(){ window.location.href="sms:"+(clientProfile.phone||"").replace(/[^0-9+]/g,""); }} style={{padding:"8px 12px",background:"#2a6a2a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",flexShrink:0}}>Message</button>:null}
               {(clientProfile.phone||"").replace(/[^0-9+]/g,"")?<button onClick={function(){ window.location.href="tel:"+(clientProfile.phone||"").replace(/[^0-9+]/g,""); }} style={{padding:"8px 12px",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"8px",color:"#555",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",flexShrink:0}}>Call</button>:null}
