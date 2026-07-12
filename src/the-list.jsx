@@ -164,6 +164,57 @@ function unlieAnchor(slots, i) {
   return out;
 }
 
+// v96. AN EMPTY ROW MUST NEVER WEAR SOMEBODY ELSE'S NUDGE.
+// A nudge belongs to a PERSON — "book him ten minutes early, at 7:26, in the 7:36 slot."
+// When that person is cancelled the slot goes back to being the day's plain 7:36 opening,
+// but older builds blanked the row in place, so it sat there empty and still LABELLED
+// 7:26. On screen that is indistinguishable from a real open 7:26 slot (grey 7:26 vs grey
+// 7:36 is one digit), and dropping a recurring client onto it hands the WHOLE SERIES the
+// label "7:26" — which is precisely how Bobby ended up at 7:26 on every future Saturday,
+// standing beside Kelly's 7:36 instead of sharing it.
+//
+// v95's vacateSlotCollapsing stopped these rows being BORN. This sweeps up the ones
+// already written into the book (11 of them on 2026-07-12), and it runs inside
+// migrateSchedules, so it heals on load, on every cloud snapshot, and on import — no
+// separate repair file to remember.
+//
+// The rules are deliberately narrow. It only ever touches a row that is EMPTY, unblocked,
+// unmarked, and carries an anchor:
+//   - anchor === its own label  -> the anchor is pure noise; drop it, label untouched.
+//   - anchor points elsewhere   -> the label is the stale nudge. Snap the row back to its
+//                                 anchor (7:26 -> 7:36) and drop the anchor. If some OTHER
+//                                 row on the day already claims that anchor, this row is a
+//                                 duplicate of it and is spliced out instead.
+// A NAMED row, a lunch/blocked row, an Available/Overtime-marked row, and a genuine
+// hand-made custom row (no anchor at all) are all left exactly as they are. Pure — builds
+// a new array and never mutates the input.
+// Revert lever — un-comment to make this a no-op and ship the old behavior:
+// function deNudgeEmptyRows(arr) { return arr; }
+function deNudgeEmptyRows(arr) {
+  if (!arr || !arr.length) return arr;
+  var out = []; var changed = false; var i, j, s, anchor, taken;
+  for (i = 0; i < arr.length; i++) {
+    s = arr[i];
+    if (!s || !s.defaultBaseTime || (s.name && String(s.name).trim()) || s.blocked || s.availStatus) { out.push(s); continue; }
+    anchor = s.defaultBaseTime;
+    if (anchor === s.time) {
+      var same = {...s}; delete same.defaultBaseTime; same.customTime = false;
+      out.push(same); changed = true; continue;
+    }
+    taken = false;
+    for (j = 0; j < arr.length; j++) {
+      if (j !== i && arr[j] && ((arr[j].defaultBaseTime || arr[j].time) === anchor || arr[j].time === anchor)) { taken = true; break; }
+    }
+    if (taken) { changed = true; continue; }
+    var snapped = {...s, time:anchor, isCustom:false, customTime:false};
+    delete snapped.defaultBaseTime;
+    out.push(snapped); changed = true;
+  }
+  if (!changed) return arr;
+  out.sort(function(a,b){ return timeToAbsMinutes(a.time) - timeToAbsMinutes(b.time); });
+  return out;
+}
+
 var _gid = 1;
 function newGroupId() { return "g"+(_gid++); }
 
@@ -401,6 +452,11 @@ function migrateSchedules(raw) {
     // #15: applied to BOTH branches so the reset day and the topped-up day both
     // end up with 3:06; the idempotent guard means it is never added twice.
     result[dk] = ensure306(result[dk]);
+    // v96: last, sweep off any stale nudge left on an EMPTY row (see deNudgeEmptyRows).
+    // Idempotent — a clean day comes back byte-for-byte identical, so this cannot loop or
+    // cause a needless cloud write. Revert lever — un-comment to skip the sweep entirely:
+    // /* v96 sweep off */
+    result[dk] = deNudgeEmptyRows(result[dk]);
   }
   return result;
 }
@@ -4726,10 +4782,22 @@ export default function TheList() {
         // Revert lever — the v94 wall (blocked-and-restore, for ANY occupant):
         // blocked.push({dateKey:tk, time:newTime, existingName:ds[ti].name, fromDateKey:p.dk}); ...restore to p.dk...; return;
         var host=ds[ti];
-        var shareRow={...occ, time:newTime, name:occ.name, price:occ.price, recurWeeks:occ.recurWeeks, done:false, isException:true, groupId:null, pending:!!occ.pending, availStatus:null, blocked:false, isCustom:host.isCustom===true, customTime:host.customTime===true};
+        // v96 THE SHARE THAT WASN'T. v95 wrote the share row at newTime — the LABEL of
+        // the row he dropped on. That is wrong the moment the two disagree, and they do
+        // disagree exactly when it matters: he dropped on a row showing 7:26 that is really
+        // the day's 7:36 slot, so Bobby was written at 7:26 while Kelly sat at 7:36. Same
+        // slot underneath, two different displayed times — and the render only pairs rows
+        // whose TIME matches, so instead of one shared row he got an extra row beside her.
+        // Sharing means occupying the SAME time as the host. Full stop. The host row is on
+        // the board already and is the truth about what that time reads as on this day, so
+        // the visitor takes the host's time along with the host's identity descriptors.
+        // Revert lever — the v95 line, which took the dropped label instead:
+        // var shareRow={...occ, time:newTime, name:occ.name, ...};
+        var shareTime=host.time;
+        var shareRow={...occ, time:shareTime, name:occ.name, price:occ.price, recurWeeks:occ.recurWeeks, done:false, isException:true, groupId:null, pending:!!occ.pending, availStatus:null, blocked:false, isCustom:host.isCustom===true, customTime:host.customTime===true};
         if (host.defaultBaseTime) shareRow.defaultBaseTime=host.defaultBaseTime; else delete shareRow.defaultBaseTime;
         ds.splice(ti+1,0,shareRow);
-        shared.push({dateKey:tk, time:newTime, existingName:host.name, fromDateKey:p.dk});
+        shared.push({dateKey:tk, time:shareTime, existingName:host.name, fromDateKey:p.dk});
         ds.sort(function(a,b){ return timeToAbsMinutes(a.time)-timeToAbsMinutes(b.time); });
         newSch[tk]=ds;
         moved++;
@@ -6298,7 +6366,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v95</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v96</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
