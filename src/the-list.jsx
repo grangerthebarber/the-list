@@ -3832,7 +3832,9 @@ export default function TheList() {
     var recurWeeks = recurFound ? recurFound.recurWeeks : null;
     setRenamingProfile(false); setRenameValue("");
     setClientDeleteMsg(""); setClientDeleteConfirm(false);
-    setClientProfile({name,recurWeeks,usualTime,bookings,phone:getClientPhone(name)});
+    // v98: the client-level note rides along with the phone. Revert lever — the pre-v98
+    // seed, with no note field: setClientProfile({name,recurWeeks,usualTime,bookings,phone:getClientPhone(name)});
+    setClientProfile({name,recurWeeks,usualTime,bookings,phone:getClientPhone(name),note:getClientNote(name)});
   };
 
   // #9: optional phone number kept on the client-memory entry so the profile can offer
@@ -3875,6 +3877,32 @@ export default function TheList() {
       var i=mem.findIndex(function(c){ return c.name && c.name.toLowerCase()===name.toLowerCase(); });
       if (i>=0) { var u=[...mem]; u[i]={...u[i],phone:phone}; return u; }
       return [...mem,{name:name,price:"",phone:phone}];
+    });
+  };
+
+  // v98 THE NOTE NOW BELONGS TO THE PERSON, NOT THE APPOINTMENT. Until now the only
+  // note was slot.note — one note per client PER DATE PER TIME — reached by a pencil on
+  // the schedule row. That made "Cliff's note" a thing that existed six times over and
+  // could disagree with itself. A note is a fact about a man, not about a Tuesday, so it
+  // moves onto the client-memory card beside his phone and price, and the only door to it
+  // is his profile. New field, so everybody starts with a blank one.
+  // NOTE: the old slot.note data is deliberately LEFT WHERE IT IS, untouched and inert.
+  // It is not migrated and it is not wiped, because line 49 (isEmptyPlaceholder) treats a
+  // note as a REASON TO KEEP AN EMPTY ROW — blanking notes in the data would strip that
+  // protection and let migrateSchedules prune rows out from under the grid. Hiding the
+  // door costs nothing; emptying the room costs rows.
+  const getClientNote = function(name) {
+    var lower=(name||"").toLowerCase();
+    if (!lower) return "";
+    var e=clientMemoryRef.current.find(function(c){ return c.name && c.name.toLowerCase()===lower; });
+    return (e && e.note) ? e.note : "";
+  };
+  const setClientNote = function(name, note) {
+    if (!name) return;
+    setClientMemory(function(mem) {
+      var i=mem.findIndex(function(c){ return c.name && c.name.toLowerCase()===name.toLowerCase(); });
+      if (i>=0) { var u=[...mem]; u[i]={...u[i],note:note}; return u; }
+      return [...mem,{name:name,price:"",phone:"",note:note}];
     });
   };
 
@@ -4447,6 +4475,36 @@ export default function TheList() {
       return n;
     });
   };
+  // v98 TAPPING A STANDBY NAME NOW ARMS THE SLOT, NOT A SECOND POPUP. It used to call
+  // openClientProfile, which opened the profile UNDERNEATH the day-note modal — invisible,
+  // and worse than useless. What the name actually means when you tap it is "put this man
+  // in a hole on this day", so that is now what it does: the day note is SAVED (same commit
+  // the backdrop-tap performs — nothing typed is lost), the popup closes, the schedule jumps
+  // to the standby day, and tap-to-place arms with his name. Tap an open slot and he lands.
+  // If a REPEATING note line's wording was retyped, we hold exactly like popupShiftDay does
+  // and raise the this-date/whole-series question first — answer it, then tap the name again.
+  // wlFrom rides on placingClient so that placeClientInSlot can strike him off the standby
+  // list the moment he's placed (Granger's call: placed means no longer waiting).
+  // Revert lever — the v83 behavior was simply: openClientProfile(it.name);
+  var wlStartPlacement = function(dk, it){
+    if (!dk || !it || !it.name) return;
+    if (dnWordChanges(noteLines, noteOrigLines).length>0){ setNoteScopeAsk("lines"); return; }
+    setDayNotes(function(prev){ return dnBuildLinesMap(prev, dk, noteLines, noteOrigLines, null); });
+    dnCloseNoteModal();
+    setPlacingClient({
+      name:it.name, price:getClientPrice(it.name)||"",
+      originalDateKey:null, originalIdx:null,
+      recurBook:false,
+      wlFrom:{dayKey:dk, id:it.id}
+    });
+    setBaseDate(parseDateKey(dk)); setView(isPhone?"Day":"3-Day");
+  };
+  // v98: the standby list can reach Messages directly, exactly like a schedule row does —
+  // same getClientPhone lookup, same sms: hand-off. No number on file gives the grey icon,
+  // which opens the same add-a-number prompt the schedule row uses. NOTE: phoneModal shipped
+  // at z-index 1100 — BELOW the day-note popup's 1200 — so it would have opened behind the
+  // popup exactly as the client profile did. It is lifted to 1300 (see its render block).
+  var wlPhone = function(name){ return getClientPhone(name).replace(/[^0-9+]/g,""); };
   var dnCloseNoteModal = function(){ setNoteModal(null); setNoteDraft(""); setNoteKind(null); setNoteRepeat(0); setNoteWasRepeat(false); setNoteScopeAsk(null); setWlInput(""); setNoteLines([]); setNoteOrigLines([]); setNoteRepeatPopup(null); };
   // v91: DISMISS NOW SAVES. Tapping the backdrop (or pressing Enter on an empty row) used
   // to throw the edit away; now it commits, for BOTH note flavors. Undo (Cmd/Ctrl-Z) is the
@@ -5659,6 +5717,25 @@ export default function TheList() {
       if (ok) setPlacingClient(null);
       return;
     }
+    // v98 A PLACEMENT WITH NO ORIGIN. Every caller before now armed placingClient FROM an
+    // existing slot, so both paths below assume there is a source row to vacate. The standby
+    // list has no source row — the man is on a waiting list, not on the grid — and with a
+    // null originalDateKey the else-branch below would call getSlots(null) (which quietly
+    // hands back a fresh default day) and then setSlots(null, ...), writing a literal "null"
+    // key into schedules and syncing it to Firebase. So a no-origin placement gets its own
+    // branch: write the target, vacate nothing, and strike him off the standby list he came
+    // from (wlFrom). Undo-able like any other booking.
+    if (client.originalDateKey == null) {
+      var snapNO = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
+      pushUndo(snapNO);
+      var tsNO = [...getSlots(targetDateKey)];
+      tsNO[targetIdx] = {...tsNO[targetIdx],name:client.name,price:client.price||"",done:false};
+      setSlots(targetDateKey, tsNO);
+      if (client.wlFrom && client.wlFrom.dayKey) { wlRemove(client.wlFrom.dayKey, client.wlFrom.id); }
+      addHistoryEntry({type:"added",time:targetSlot.time,name:client.name,price:client.price||"",dateKey:targetDateKey});
+      setPlacingClient(null);
+      return;
+    }
     if (client.originalDateKey === targetDateKey && client.originalIdx === targetIdx) { setPlacingClient(null); return; }
     // v93 SILENT-MOVE HOLE #1. A recurring client moved through TAP-TO-PLACE — which is
     // where a live drag lands the moment it crosses out of the source day's column, i.e.
@@ -6243,6 +6320,34 @@ export default function TheList() {
     return null;
   })();
   const alreadyBookedNextDate = bookedTimeOnNextDate!=null;
+  // v98 THE MODAL USED TO ONLY LOOK WHERE IT EXPECTED HIM TO BE. #11 above answers one
+  // question — "is he booked on his USUAL next date?" — and if the answer is no it declares
+  // that date open and offers to book it. But "no" has two very different meanings: he isn't
+  // booked at all (offer away), or you MOVED him and he is locked in somewhere else entirely.
+  // In the second case the modal was cheerfully hiding a real appointment and inviting a
+  // double-book. So we also look at the earliest future booking he actually has (computed at
+  // open time as alreadyBookedKey) and, when that sits on a date OTHER than the usual one,
+  // that is the truth and it is what gets shown. Read-only: this looks things up and renders
+  // a banner. It writes nothing, and it does not touch the recurring engine.
+  const adjustedNextKey = (function(){
+    if (!checkoffModal || checkoffModal.notRecurring) return null;
+    var ab = checkoffModal.alreadyBookedKey;
+    if (!ab) return null;
+    if (ab === effectiveNextDate) return null; // he's on his usual date; #11 already has this
+    // nudgedDate is SEEDED to the usual date on open, so its mere presence means nothing.
+    // But once it DIFFERS from nextDateKey, Granger is actively picking a date right now in
+    // this modal — stand down and let the existing open/taken cards speak about HIS choice,
+    // or he could never book the nudged date he just tapped.
+    if (nudgedDate && checkoffModal.nextDateKey && nudgedDate !== checkoffModal.nextDateKey) return null;
+    return ab;
+  })();
+  const adjustedNextTime = (function(){
+    if (!adjustedNextKey || !checkoffModal || !checkoffModal.slot || !checkoffModal.slot.name) return null;
+    var dsA = schedulesRef.current[adjustedNextKey]; if (!dsA) return null;
+    var lnA = checkoffModal.slot.name.toLowerCase(); var ai;
+    for (ai=0; ai<dsA.length; ai++) { if (dsA[ai].name && dsA[ai].name.toLowerCase()===lnA && !dsA[ai].blocked) return dsA[ai].time; }
+    return null;
+  })();
 
   const renderCheckoffCalendar = function() {
     if (!checkoffModal||!checkoffCalMonth) return null;
@@ -6394,7 +6499,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v97</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v98</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -6549,8 +6654,14 @@ export default function TheList() {
         </div>
       )}
 
+      {/* v98: 1100 -> 1300. The day-note popup sits at 1200, so the add-a-number prompt used
+          to open BEHIND it — invisible — the instant it was raised from anywhere inside that
+          popup (which the new standby message icon does). This is the same z-index fault that
+          made a tapped standby name appear to do nothing: clientProfile is 1100 too. phoneModal
+          is a prompt spawned BY other surfaces, so it belongs on top of all of them.
+          Revert lever: put zIndex back to 1100. */}
       {phoneModal && (
-        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px"}} onClick={function(){ setPhoneModal(null); }}>
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1300,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px"}} onClick={function(){ setPhoneModal(null); }}>
           <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"24px",width:"min(320px,92vw)"}} onClick={function(e){ e.stopPropagation(); }}>
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#aaa",marginBottom:"8px"}}>Message</div>
             <div style={{fontSize:"16px",color:"#1a1a1a",marginBottom:"4px"}}>{phoneModal.name}</div>
@@ -6864,6 +6975,19 @@ export default function TheList() {
               {(clientProfile.phone||"").replace(/[^0-9+]/g,"")?<button onClick={function(){ window.location.href="sms:"+(clientProfile.phone||"").replace(/[^0-9+]/g,""); }} style={{padding:"8px 12px",background:"#2a6a2a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",flexShrink:0}}>Message</button>:null}
               {(clientProfile.phone||"").replace(/[^0-9+]/g,"")?<button onClick={function(){ window.location.href="tel:"+(clientProfile.phone||"").replace(/[^0-9+]/g,""); }} style={{padding:"8px 12px",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"8px",color:"#555",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",flexShrink:0}}>Call</button>:null}
             </div>
+            {/* v98 THE CLIENT NOTE. One note per person, written and read here and nowhere
+                else, saved on the same client-memory card as the phone and price (so it
+                syncs with them for free — no new Firebase field, no new write path). Saves
+                on every keystroke, exactly like the phone field directly above it. Revert
+                lever: delete this block and the schedule-row pencil (also commented out,
+                see the row icons) and slot notes come straight back. */}
+            <div style={{marginBottom:"14px"}}>
+              <div style={{fontSize:"10px",letterSpacing:"0.12em",textTransform:"uppercase",color:"#a07830",marginBottom:"6px"}}>{"Note"}</div>
+              <textarea value={clientProfile.note||""} placeholder={"Anything worth remembering about "+clientProfile.name+"…"}
+                onChange={function(e){ var v=e.target.value; setClientProfile(function(p){ return p?{...p,note:v}:p; }); setClientNote(clientProfile.name, v); }}
+                rows={3}
+                style={{width:"100%",boxSizing:"border-box",padding:"9px 10px",border:"1px solid #d8d8d6",borderRadius:"8px",fontFamily:"Georgia,serif",fontSize:"13px",lineHeight:1.45,color:"#1a1a1a",background:"#fcfcfb",resize:"vertical",outline:"none",userSelect:"text",WebkitUserSelect:"text"}} />
+            </div>
             <div style={{overflowY:"auto",flex:1}}>
               {clientProfile.bookings.length===0&&<div style={{fontSize:"13px",color:"#aaa",fontStyle:"italic"}}>No bookings.</div>}
               {clientProfile.bookings.map(function(b,i){ return (
@@ -6988,9 +7112,14 @@ export default function TheList() {
             ) : (
               <div>
                 <div style={{fontSize:"12px",color:"#999",marginBottom:"16px"}}>Every {checkoffModal.slot.recurWeeks===1?"week":(checkoffModal.slot.recurWeeks+" weeks")} · {placementTime(checkoffModal.slot)} · {DAYS[dayOfWeek(checkoffModal.dateKey)]}s</div>
-                {effectiveNextDate&&!nudgeConflict&&alreadyBookedNextDate&&<div onClick={function(){ var k=effectiveNextDate; setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null);setCheckoffRecur(null);setRecurPickerOpen(false); jumpToDate(k); }} style={{background:"#eef3f9",border:"1px solid #b8cce0",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#34434c",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px"}}><span>{"✓"} Already booked — {friendlyDateTime(bookedTimeOnNextDate,effectiveNextDate)}</span><span style={{fontSize:"12px",color:"#5a7590",flexShrink:0}}>{"Tap to go ›"}</span></div>}
-                {effectiveNextDate&&!nudgeConflict&&!alreadyBookedNextDate&&<div onClick={function(){ confirmNextBooking(effectiveNextDate); }} style={{background:"#f0fff0",border:"1px solid #a0d0a0",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#2a7a2a",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px"}}><span>{friendlyDateTime(placementTime(checkoffModal.slot),effectiveNextDate)} is open</span><span style={{fontSize:"12px",color:"#2a7a2a",flexShrink:0}}>{"Tap to book ›"}</span></div>}
-                {effectiveNextDate&&nudgeConflict&&<div onClick={function(){ var k=effectiveNextDate; setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null);setCheckoffRecur(null);setRecurPickerOpen(false); jumpToDate(k); }} style={{background:"#fff0ee",border:"1px solid #e0b0a8",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#1a1a1a",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px"}}><span>{"⚠"} That slot is taken on {friendlyDateTime(placementTime(checkoffModal.slot),effectiveNextDate)}</span><span style={{fontSize:"12px",color:"#8a4a3a",flexShrink:0}}>{"Tap to view ›"}</span></div>}
+                {/* v98: HE IS NOT WHERE YOU LEFT HIM. His next visit was moved off the usual
+                    date, so the three cards below (which only ever look at the usual date) are
+                    suppressed entirely — per Granger, no offer to book the usual date, just the
+                    truth about where he is actually locked in. Tap to go there. */}
+                {adjustedNextKey&&<div onClick={function(){ var k=adjustedNextKey; setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null);setCheckoffRecur(null);setRecurPickerOpen(false); jumpToDate(k); }} style={{background:"#eef3f9",border:"1px solid #b8cce0",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#34434c",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px"}}><span>{"\u2713"} Locked in \u2014 {adjustedNextTime?friendlyDateTime(adjustedNextTime,adjustedNextKey):friendlyDateLong(adjustedNextKey)} <span style={{color:"#7a8fa4"}}>(not his usual)</span></span><span style={{fontSize:"12px",color:"#5a7590",flexShrink:0}}>{"Tap to go \u203a"}</span></div>}
+                {!adjustedNextKey&&effectiveNextDate&&!nudgeConflict&&alreadyBookedNextDate&&<div onClick={function(){ var k=effectiveNextDate; setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null);setCheckoffRecur(null);setRecurPickerOpen(false); jumpToDate(k); }} style={{background:"#eef3f9",border:"1px solid #b8cce0",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#34434c",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px"}}><span>{"✓"} Already booked — {friendlyDateTime(bookedTimeOnNextDate,effectiveNextDate)}</span><span style={{fontSize:"12px",color:"#5a7590",flexShrink:0}}>{"Tap to go ›"}</span></div>}
+                {!adjustedNextKey&&effectiveNextDate&&!nudgeConflict&&!alreadyBookedNextDate&&<div onClick={function(){ confirmNextBooking(effectiveNextDate); }} style={{background:"#f0fff0",border:"1px solid #a0d0a0",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#2a7a2a",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px"}}><span>{friendlyDateTime(placementTime(checkoffModal.slot),effectiveNextDate)} is open</span><span style={{fontSize:"12px",color:"#2a7a2a",flexShrink:0}}>{"Tap to book ›"}</span></div>}
+                {!adjustedNextKey&&effectiveNextDate&&nudgeConflict&&<div onClick={function(){ var k=effectiveNextDate; setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null);setCheckoffRecur(null);setRecurPickerOpen(false); jumpToDate(k); }} style={{background:"#fff0ee",border:"1px solid #e0b0a8",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#1a1a1a",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px"}}><span>{"⚠"} That slot is taken on {friendlyDateTime(placementTime(checkoffModal.slot),effectiveNextDate)}</span><span style={{fontSize:"12px",color:"#8a4a3a",flexShrink:0}}>{"Tap to view ›"}</span></div>}
                 {nudgedDate&&nudgedDate!==checkoffModal.nextDateKey&&<div style={{fontSize:"11px",color:"#a07830",marginBottom:"10px"}}>Nudged — resumes every {checkoffModal.slot.recurWeeks===1?"week":(checkoffModal.slot.recurWeeks+" weeks")} after this</div>}
                 <div style={{fontSize:"11px",letterSpacing:"0.1em",textTransform:"uppercase",color:"#aaa",marginBottom:"8px"}}>Recurs every — change</div>
                 <div style={{display:"flex",flexWrap:"wrap",gap:"6px",marginBottom:"20px"}}>
@@ -7268,7 +7397,20 @@ export default function TheList() {
                       {items.map(function(it){
                         return (
                           <div key={it.id} style={{display:"flex",alignItems:"center",gap:"8px",padding:"6px 8px",background:"#f6f4ef",border:"1px solid #ece7dc",borderRadius:"6px",marginBottom:"6px"}}>
-                            <button onClick={function(){ openClientProfile(it.name); }} title="Open client profile" style={{flex:1,minWidth:0,textAlign:"left",background:"none",border:"none",cursor:"pointer",fontSize:"14px",color:"#1a1a1a",fontFamily:"Georgia,serif",wordBreak:"break-word",padding:0}}>{it.name}</button>
+                            {/* v98: the name now ARMS TAP-TO-PLACE on this standby day (see
+                                wlStartPlacement). Revert lever — the v83 handler, which opened
+                                the profile underneath this very popup:
+                            <button onClick={function(){ openClientProfile(it.name); }} title="Open client profile" ...>{it.name}</button> */}
+                            <button onClick={function(){ wlStartPlacement(noteModal.dayKey, it); }} title={"Place "+it.name+" on this day"} style={{flex:1,minWidth:0,textAlign:"left",background:"none",border:"none",cursor:"pointer",fontSize:"14px",color:"#1a1a1a",fontFamily:"Georgia,serif",wordBreak:"break-word",padding:0}}>{it.name}</button>
+                            {/* v98: message straight from standby — the whole point of a standby list
+                                is that you're about to text one of them the second a hole opens. */}
+                            {(function(){
+                              var wd=wlPhone(it.name);
+                              if (wd) {
+                                return <button onClick={function(){ window.location.href="sms:"+wd; }} title={"Message "+it.name} style={{background:"none",border:"none",cursor:"pointer",padding:"0 2px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={18} color="#c9a96e"/></button>;
+                              }
+                              return <button onClick={function(){ setPhoneModal({name:it.name,phone:""}); }} title={"Add a number for "+it.name} style={{background:"none",border:"none",cursor:"pointer",padding:"0 2px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={18} color="#c6c6c6"/></button>;
+                            })()}
                             <button onClick={function(){ wlRemove(noteModal.dayKey, it.id); }} title="Remove from standby" style={{background:"none",border:"none",cursor:"pointer",color:"#c0392b",fontSize:"18px",lineHeight:1,padding:"0 4px",flexShrink:0}}>{"×"}</button>
                           </div>
                         );
@@ -8179,11 +8321,32 @@ export default function TheList() {
                                     }
                                     return <button onClick={function(e){ e.stopPropagation(); setPhoneModal({name:slot.name,phone:""}); }} title={"Add a number for "+slot.name} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 1px 2px 4px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={20} color="#c6c6c6"/></button>;
                                   })()}
-                                  {!compactIcons&&filled&&<button onClick={function(e){ e.stopPropagation(); setNoteDraft(slot.note||""); setNoteKind(slot.noteKind||null); setNoteRepeat(0); setNoteWasRepeat(false); setNoteScopeAsk(null); setNoteModal({dateKey,idx,name:slot.name}); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 5px",color:slot.note?"#c9a96e":"#bbb"/* v89 uniform gold. Revert lever: slot.note?(slot.noteKind==="personal"?TODAY_BLUE:"#c9a96e"):"#bbb" */,fontSize:"24px",fontWeight:"bold",lineHeight:1,WebkitTextStroke:"0.6px currentColor"}}>{"✎"}</button>}
+                                  {/* v98 THE ROW PENCIL IS GONE. It opened the per-appointment note
+                                      (slot.note), which is the model we retired — a note is now a
+                                      fact about the CLIENT and is written on his profile. The row
+                                      keeps no cue that a note exists, by request: the row stays
+                                      clean. The slot-note modal itself is untouched and still fully
+                                      wired (the DAY note shares it), and every existing slot.note is
+                                      still sitting in the data, unread and unharmed. Revert lever —
+                                      the v89 button, verbatim; paste it back and slot notes return
+                                      with all their old data intact:
+                                  {!compactIcons&&filled&&<button onClick={function(e){ e.stopPropagation(); setNoteDraft(slot.note||""); setNoteKind(slot.noteKind||null); setNoteRepeat(0); setNoteWasRepeat(false); setNoteScopeAsk(null); setNoteModal({dateKey,idx,name:slot.name}); }} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 5px",color:slot.note?"#c9a96e":"#bbb",fontSize:"24px",fontWeight:"bold",lineHeight:1,WebkitTextStroke:"0.6px currentColor"}}>{"\u270e"}</button>}
+                                  */}
                                 </div>
                               )}
                               {isEditing&&editChromeReady&&<input value={editValues.price} onChange={function(e){ setEditValues(function(v){ return {...v,price:e.target.value}; }); }} onKeyDown={function(e){ if(e.key==="Tab"&&!e.shiftKey){ var nmT=stripLeadingNumbers(((editValuesRef.current&&editValuesRef.current.name)||"").trim()); if(nmT){ e.preventDefault(); commitPenciled(dateKey,idx); return; } } handleKeyDown(e,dateKey,idx); }} onBlur={handleBlur} data-rowkey={rowKey} placeholder="$" style={{width:view==="Week"?"26px":"52px",fontSize:isPhone?"16px":"13px",color:"#1a1a1a",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"4px",outline:"none",padding:view==="Week"?"2px 3px":"2px 5px",fontFamily:"Georgia,serif",WebkitAppearance:"none",appearance:"none"}}/>}
-                              {isEditing&&editChromeReady&&<button data-rowkey={rowKey} onMouseDown={function(e){ e.preventDefault(); }} onClick={function(e){ e.preventDefault(); var nm=stripLeadingNumbers(((editValuesRef.current&&editValuesRef.current.name)||"").trim()); if(nm){ commitPenciled(dateKey,idx); } else { setPencilArmed(function(p){ return !p; }); } }} title={pencilArmed?"Pencil mode on — type a name, then Enter to pencil them in":"Penciled in — offered, waiting to hear back"} style={{flexShrink:0,marginLeft:view==="Week"?"2px":"4px",display:"flex",alignItems:"center",gap:"3px",background:pencilArmed?"#c9a96e":"#fff",border:pencilArmed?"1px solid #c9a96e":"1px solid #d8c08a",borderRadius:"6px",cursor:"pointer",padding:view==="Week"?"3px 4px":"3px 7px",fontFamily:"Georgia,serif",fontSize:"11px",color:pencilArmed?"#2a2009":"#9a7a30",lineHeight:1,whiteSpace:"nowrap"}}>{view==="Week"?"✎":"✎ Pencil"}</button>}
+                              {/* v98 THE PENCIL BUTTON IS GONE. TAB IS THE PENCIL NOW. The button did two
+                                  jobs: with a name typed it called commitPenciled — which is EXACTLY what
+                                  Tab-from-the-price-box already does, one line above, so that half was pure
+                                  duplication. With the name box empty it toggled pencilArmed ("pencil mode"),
+                                  and that was the only switch that turned pencilArmed on. With the button
+                                  gone, pencilArmed can no longer be raised, so the handful of branches that
+                                  read it (the Enter-pencils path, the blur/snap commit) simply never fire —
+                                  they are left in place, inert and harmless, rather than torn out, so this is
+                                  one paste away from being undone. One road to a pencil: Tab off the price.
+                                  Revert lever — the v82 button, verbatim:
+                              {isEditing&&editChromeReady&&<button data-rowkey={rowKey} onMouseDown={function(e){ e.preventDefault(); }} onClick={function(e){ e.preventDefault(); var nm=stripLeadingNumbers(((editValuesRef.current&&editValuesRef.current.name)||"").trim()); if(nm){ commitPenciled(dateKey,idx); } else { setPencilArmed(function(p){ return !p; }); } }} title={pencilArmed?"Pencil mode on":"Penciled in"} style={{flexShrink:0,marginLeft:view==="Week"?"2px":"4px",display:"flex",alignItems:"center",gap:"3px",background:pencilArmed?"#c9a96e":"#fff",border:pencilArmed?"1px solid #c9a96e":"1px solid #d8c08a",borderRadius:"6px",cursor:"pointer",padding:view==="Week"?"3px 4px":"3px 7px",fontFamily:"Georgia,serif",fontSize:"11px",color:pencilArmed?"#2a2009":"#9a7a30",lineHeight:1,whiteSpace:"nowrap"}}>{view==="Week"?"\u270e":"\u270e Pencil"}</button>}
+                              */}
                               {isEditing&&editChromeReady&&!suggestHide&&(function(){
                                 var sugs=computeSuggestions(editValues.name);
                                 if (sugs.length===0) return null;
