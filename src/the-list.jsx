@@ -4613,9 +4613,34 @@ export default function TheList() {
       var occ=p.slot;
       var tk=formatDateKey(addDays(parseDateKey(p.dk), dayDelta));
       var ds=newSch[tk]?[...newSch[tk]]:blank();
-      // Match by ANCHOR — this is the whole fix. Lands on the day's real 7:36 grid row
-      // and relabels it to 7:26, instead of spawning a second row next to it.
-      var ti=ds.findIndex(function(s){ return placementTime(s)===tAnchor; });
+      // v94 ANCHOR COLLISION (the Bobby bug). v93b matched by ANCHOR alone. That is right
+      // only while at most ONE row per day claims a given anchor — and that is not true of
+      // real data. A blanked row keeps the anchor it had while it was booked, so a day can
+      // easily carry BOTH a clean 7:13 grid row AND an emptied row that shows 7:26 but is
+      // still anchored 7:13. findIndex then returns whichever comes first — the 7:13 row —
+      // so the drop relabels THAT row to 7:26 and the row he actually dropped on is left
+      // sitting there empty beside it. Two 7:26s, and his 7:13 gone.
+      //
+      // The staged hunt below never trusts the anchor on its own. It asks, in order:
+      //   1) an empty row that BOTH shows the dropped time AND carries the dropped anchor
+      //      — the row under his finger, on the drop day, every time;
+      //   2) an empty row that simply SHOWS the dropped time — the same spot on a future
+      //      day that was already nudged there, whatever its stored anchor says;
+      //   3) somebody ELSE already shown at that time — a conflict, reported, never stacked
+      //      (v93b would have quietly relabeled the anchor row and created a second booking
+      //      at the same displayed time);
+      //   4) only then the old anchor match — which is what still relabels a future day's
+      //      clean 7:13 grid row into the 7:26 the series now sits at.
+      // Revert lever — the v93b single anchor hunt this replaces:
+      // var ti=ds.findIndex(function(s){ return placementTime(s)===tAnchor; });
+      var tiExact=ds.findIndex(function(s){ return !s.name && s.time===newTime && placementTime(s)===tAnchor; });
+      var tiShown=ds.findIndex(function(s){ return !s.name && s.time===newTime; });
+      var tiTaken=ds.findIndex(function(s){ return s.name && s.time===newTime && s.name.toLowerCase()!==lower; });
+      var ti;
+      if (tiExact>=0) ti=tiExact;
+      else if (tiShown>=0) ti=tiShown;
+      else if (tiTaken>=0) ti=tiTaken;
+      else ti=ds.findIndex(function(s){ return placementTime(s)===tAnchor; });
       if (ti>=0 && ds[ti].name) {
         // Somebody else owns that spot. Put this one back down where it came from and
         // say so afterwards — a silently vanished haircut is the one unacceptable outcome.
@@ -4633,7 +4658,21 @@ export default function TheList() {
       // buildRecurringSchedules writing sourceSlot's isCustom/customTime/defaultBaseTime.
       // groupId is dropped: he is leaving the day, so a link to people who stayed behind
       // would dangle. Same call applySeriesDrop("one") already makes on a cross-day drop.
-      var landed={...occ, time:newTime, isException:true, groupId:null, isCustom:tIsCust, customTime:tIsCust, defaultBaseTime:tBase};
+      // v94: when the occurrence lands ON an existing row, that row — not the drop-day row —
+      // is the truth about what it is underneath. retimeSlot is the same per-slot retime the
+      // time editor has always done: it keeps the landing row's own anchor and just relabels
+      // it. v93b instead stamped the DROP DAY's descriptors onto every future day, which is
+      // how a row ends up displaying 7:36 while secretly anchored 7:13 — a fresh landmine on
+      // each future day. The booking fields are overlaid from occ; blocked/availStatus are
+      // cleared explicitly so nothing leaks off the empty row being written into.
+      // Revert lever — the v93b write (both branches used this single object):
+      // var landed={...occ, time:newTime, isException:true, groupId:null, isCustom:tIsCust, customTime:tIsCust, defaultBaseTime:tBase};
+      var landed;
+      if (ti>=0) {
+        landed=retimeSlot(ds[ti], newTime, {name:occ.name, price:occ.price, recurWeeks:occ.recurWeeks, done:false, isException:true, groupId:null, pending:!!occ.pending, availStatus:null, blocked:false});
+      } else {
+        landed={...occ, time:newTime, isException:true, groupId:null, isCustom:tIsCust, customTime:tIsCust, defaultBaseTime:tBase};
+      }
       if (ti>=0) ds[ti]=landed; else ds.push(landed);
       ds.sort(function(a,b){ return timeToAbsMinutes(a.time)-timeToAbsMinutes(b.time); });
       newSch[tk]=ds;
@@ -6165,7 +6204,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v93</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v94</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
