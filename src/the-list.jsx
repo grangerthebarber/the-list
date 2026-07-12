@@ -3791,20 +3791,32 @@ export default function TheList() {
     return out.slice(0, 8);
   };
 
-  // Pick a name from search: jump to their next appointment and flash a green
-  // highlight for 8 seconds. If they have nothing coming up, open their profile
-  // (where you can edit the name or delete them) and say so.
+  // v99: PICK A NAME FROM SEARCH, GET THE PERSON — not a place on the calendar.
+  // Search used to fling the grid to their next appointment and flash it green.
+  // Now it opens their client profile, which is the one screen that holds every
+  // upcoming booking, the phone number, the recurring rule and the rename/delete
+  // controls — and every booking listed there is still tappable to jump. The green
+  // searchHit flash machinery is left fully intact (searchHit state, the 8-second
+  // timer, the cell tint) because the jump-and-flash is still used elsewhere; this
+  // just stops being the thing search does. Any stale highlight is cleared on open.
+  //
+  // Revert lever — the pre-v99 jump-to-next-appointment body, unchanged:
+  //   var dk = findNextBookingDate(name);
+  //   if (dk) {
+  //     jumpToDate(dk);
+  //     setSearchHit({name:(name||"").toLowerCase(), dateKey:dk});
+  //     searchHitTimer.current = setTimeout(function(){ setSearchHit(null); }, 8000);
+  //   } else {
+  //     setSearchHit(null);
+  //     openClientProfile(name);
+  //     showBanner({type:"info",msg:"No upcoming appointments for "+name,time:null,dateKey:null});
+  //   }
   const runClientSearch = function(name) {
     setSearchText(""); setSearchOpen(false); setSearchExpanded(false);
     if (searchHitTimer.current) { clearTimeout(searchHitTimer.current); searchHitTimer.current = null; }
-    var dk = findNextBookingDate(name);
-    if (dk) {
-      jumpToDate(dk);
-      setSearchHit({name:(name||"").toLowerCase(), dateKey:dk});
-      searchHitTimer.current = setTimeout(function(){ setSearchHit(null); }, 8000);
-    } else {
-      setSearchHit(null);
-      openClientProfile(name);
+    setSearchHit(null);
+    openClientProfile(name);
+    if (!findNextBookingDate(name)) {
       showBanner({type:"info",msg:"No upcoming appointments for "+name,time:null,dateKey:null});
     }
   };
@@ -6499,7 +6511,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v98</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v99</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -7116,7 +7128,7 @@ export default function TheList() {
                     date, so the three cards below (which only ever look at the usual date) are
                     suppressed entirely — per Granger, no offer to book the usual date, just the
                     truth about where he is actually locked in. Tap to go there. */}
-                {adjustedNextKey&&<div onClick={function(){ var k=adjustedNextKey; setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null);setCheckoffRecur(null);setRecurPickerOpen(false); jumpToDate(k); }} style={{background:"#eef3f9",border:"1px solid #b8cce0",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#34434c",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px"}}><span>{"\u2713"} Locked in \u2014 {adjustedNextTime?friendlyDateTime(adjustedNextTime,adjustedNextKey):friendlyDateLong(adjustedNextKey)} <span style={{color:"#7a8fa4"}}>(not his usual)</span></span><span style={{fontSize:"12px",color:"#5a7590",flexShrink:0}}>{"Tap to go \u203a"}</span></div>}
+                {adjustedNextKey&&<div onClick={function(){ var k=adjustedNextKey; setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null);setCheckoffRecur(null);setRecurPickerOpen(false); jumpToDate(k); }} style={{background:"#eef3f9",border:"1px solid #b8cce0",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#34434c",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px"}}><span>{"\u2713 Locked in \u2014 "}{adjustedNextTime?friendlyDateTime(adjustedNextTime,adjustedNextKey):friendlyDateLong(adjustedNextKey)} <span style={{color:"#7a8fa4"}}>(not his usual)</span></span><span style={{fontSize:"12px",color:"#5a7590",flexShrink:0}}>{"Tap to go \u203a"}</span></div>}
                 {!adjustedNextKey&&effectiveNextDate&&!nudgeConflict&&alreadyBookedNextDate&&<div onClick={function(){ var k=effectiveNextDate; setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null);setCheckoffRecur(null);setRecurPickerOpen(false); jumpToDate(k); }} style={{background:"#eef3f9",border:"1px solid #b8cce0",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#34434c",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px"}}><span>{"✓"} Already booked — {friendlyDateTime(bookedTimeOnNextDate,effectiveNextDate)}</span><span style={{fontSize:"12px",color:"#5a7590",flexShrink:0}}>{"Tap to go ›"}</span></div>}
                 {!adjustedNextKey&&effectiveNextDate&&!nudgeConflict&&!alreadyBookedNextDate&&<div onClick={function(){ confirmNextBooking(effectiveNextDate); }} style={{background:"#f0fff0",border:"1px solid #a0d0a0",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#2a7a2a",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px"}}><span>{friendlyDateTime(placementTime(checkoffModal.slot),effectiveNextDate)} is open</span><span style={{fontSize:"12px",color:"#2a7a2a",flexShrink:0}}>{"Tap to book ›"}</span></div>}
                 {!adjustedNextKey&&effectiveNextDate&&nudgeConflict&&<div onClick={function(){ var k=effectiveNextDate; setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null);setCheckoffRecur(null);setRecurPickerOpen(false); jumpToDate(k); }} style={{background:"#fff0ee",border:"1px solid #e0b0a8",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#1a1a1a",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px"}}><span>{"⚠"} That slot is taken on {friendlyDateTime(placementTime(checkoffModal.slot),effectiveNextDate)}</span><span style={{fontSize:"12px",color:"#8a4a3a",flexShrink:0}}>{"Tap to view ›"}</span></div>}
@@ -8296,8 +8308,13 @@ export default function TheList() {
                                   {!compactIcons&&filled&&slot.price&&<span style={{fontSize:"12px",color:slot.done?"#3a5a3a":"#a07830"}}>{slot.price}</span>}
                                   {!compactIcons&&filled&&(slot.recurWeeks?(
                                     <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:"2px",width:"50px",flexShrink:0}}>
-                                      <span onClick={function(e){ e.stopPropagation(); if(slot.done){ handleDoneRowTap(dateKey,idx); } else { openClientProfile(slot.name); } }} style={{fontSize:"12px",fontWeight:"500",color:"#4a8a9a",cursor:"pointer",lineHeight:1,letterSpacing:"0.01em"}}>{(slot.recurWeeks===1?"1w":(slot.recurWeeks+"w"))+(slot.isException?"*":"")}</span>
-                                      <button onClick={function(e){ e.stopPropagation(); if(slot.done){ handleDoneRowTap(dateKey,idx); return; } /* v79: recurring arrow now opens the CLIENT PROFILE. The single recurring editor AND the group recurring manager both stay reachable inside the profile via its "Edit or cancel recurring" button, so nothing is lost. Old direct-to-modal routing kept as a revert lever: if(slot.groupId){var aS=getSlots(dateKey);var gS=aS.map(function(s,i){ return {...s,i}; }).filter(function(s){ return s.groupId===slot.groupId&&s.name; });if(gS.length>1){setGroupRecurModal({dateKey,idx,slot,groupSlots:gS,weeks:null});return;}} setRecurringModal({dateKey,idx,slot}); */ openClientProfile(slot.name); }} title={slot.done?"Schedule next":"Recurring — tap for profile"} style={{background:"none",border:"none",cursor:"pointer",padding:"0 1px",color:"#4a8a9a",fontSize:"16px",fontWeight:"500",lineHeight:1}}>{"↺"}</button>
+                                      {/* v99: the ARROW COLUMN always opens the profile, done or not. The
+                                          done-row check that used to live here sent a checked-off recurring
+                                          client to the DONE/quick-book popup instead — the one place in the
+                                          whole column that did not behave like the others. Revert lever —
+                                          the pre-v99 line: onClick={function(e){ e.stopPropagation(); if(slot.done){ handleDoneRowTap(dateKey,idx); } else { openClientProfile(slot.name); } }} */}
+                                      <span onClick={function(e){ e.stopPropagation(); openClientProfile(slot.name); }} style={{fontSize:"12px",fontWeight:"500",color:"#4a8a9a",cursor:"pointer",lineHeight:1,letterSpacing:"0.01em"}}>{(slot.recurWeeks===1?"1w":(slot.recurWeeks+"w"))+(slot.isException?"*":"")}</span>
+                                      <button onClick={function(e){ e.stopPropagation(); /* v99: the done-row bail-out that used to sit right here is gone — it was the reason a checked-off recurring client's arrow opened the DONE popup instead of the profile. Revert lever — the pre-v99 first statement: if(slot.done){ handleDoneRowTap(dateKey,idx); return; } */ /* v79: recurring arrow now opens the CLIENT PROFILE. The single recurring editor AND the group recurring manager both stay reachable inside the profile via its "Edit or cancel recurring" button, so nothing is lost. Old direct-to-modal routing kept as a revert lever: if(slot.groupId){var aS=getSlots(dateKey);var gS=aS.map(function(s,i){ return {...s,i}; }).filter(function(s){ return s.groupId===slot.groupId&&s.name; });if(gS.length>1){setGroupRecurModal({dateKey,idx,slot,groupSlots:gS,weeks:null});return;}} setRecurringModal({dateKey,idx,slot}); */ openClientProfile(slot.name); }} title={"Recurring — tap for profile"} style={{background:"none",border:"none",cursor:"pointer",padding:"0 1px",color:"#4a8a9a",fontSize:"16px",fontWeight:"500",lineHeight:1}}>{"↺"}</button>
                                     </div>
                                   ):(hasLaterBooking(slot.name,dateKey)?(
                                     /* v77: NON-recurring person who already has their next
