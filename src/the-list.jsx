@@ -70,6 +70,29 @@ function vacateSlotCollapsing(arr, idx) {
   for (i = 0; i < arr.length; i++) { if (i !== idx && arr[i] && arr[i].time === t) { shares = true; break; } }
   if (shares) { return arr.slice(0, idx).concat(arr.slice(idx + 1)); }
   var out = arr.slice();
+  // v95 THE STALE-ANCHOR FACTORY, closed at its source. Blanking IN PLACE kept BOTH the
+  // nudged label and the hidden anchor, so an emptied 7:26 row went on displaying 7:26
+  // forever while secretly still being the day's 7:36 grid row. That is where every
+  // orphan "extra empty slot" in the book was born, and where the anchor collisions that
+  // wreck a series move come from. An empty row has no reason to wear a nudge: the nudge
+  // belonged to the PERSON, and the person is gone. So put the row back on the grid —
+  // restore its real time and strip the anchor — unless that grid slot is already taken,
+  // in which case this row is a duplicate and is spliced out instead.
+  var vBase = out[idx].defaultBaseTime;
+  if (vBase && vBase !== t && DEFAULT_TIMES.indexOf(vBase) >= 0) {
+    var vTaken = false; var k;
+    for (k = 0; k < out.length; k++) {
+      if (k !== idx && out[k] && ((out[k].defaultBaseTime || out[k].time) === vBase || out[k].time === vBase)) { vTaken = true; break; }
+    }
+    if (vTaken) { return arr.slice(0, idx).concat(arr.slice(idx + 1)); }
+    var vSnap = {...out[idx], time:vBase, name:"", price:"", done:false, recurWeeks:null, isException:false, groupId:null, pending:false, availStatus:null, isCustom:false, customTime:false};
+    delete vSnap.defaultBaseTime;
+    out[idx] = vSnap;
+    return out;
+  }
+  // Revert lever — the pre-v95 blank-in-place, which is still exactly what happens to a
+  // clean grid row or a genuine hand-made custom row (neither carries a stale anchor):
+  // out[idx] = {...out[idx], name:"", price:"", done:false, recurWeeks:null, isException:false, groupId:null, pending:false, availStatus:null};
   out[idx] = {...out[idx], name:"", price:"", done:false, recurWeeks:null, isException:false, groupId:null, pending:false, availStatus:null};
   return out;
 }
@@ -118,6 +141,29 @@ function parseTime(t) { return timeToAbsMinutes(t); }
 // stamped the first time a default slot's minutes are edited — see commitTimeEdit.)
 function placementTime(slot) { return (slot && slot.defaultBaseTime) ? slot.defaultBaseTime : (slot ? slot.time : ""); }
 
+// v95. AN ANCHOR MUST NEVER LIE. The anchor exists to say "underneath this nudged label
+// I am really the day's 7:36 row." It is meaningless — worse, actively dangerous — on a
+// row whose label IS a real grid time already: such a row simply IS that grid row, and a
+// leftover anchor pointing somewhere else makes it a second, invisible claimant on a slot
+// it does not own. That is what left Bobby's 7:36 painted as an edited time and what made
+// the series engine hunt down the wrong row. Strip the anchor when (a) it merely repeats
+// the row's own time, or (b) the row's time is a default grid time that no OTHER row on
+// the day already claims. Otherwise leave it completely alone — a genuine nudge (7:48
+// standing in for 7:58) keeps its anchor, as it must. Pure; never mutates the input.
+function unlieAnchor(slots, i) {
+  var s = slots && slots[i];
+  if (!s || !s.defaultBaseTime) return s;
+  var out;
+  if (s.defaultBaseTime === s.time) { out = {...s}; delete out.defaultBaseTime; out.customTime = false; return out; }
+  if (DEFAULT_TIMES.indexOf(s.time) < 0) return s;
+  var j;
+  for (j = 0; j < slots.length; j++) {
+    if (j !== i && slots[j] && (slots[j].defaultBaseTime || slots[j].time) === s.time) return s;
+  }
+  out = {...s}; delete out.defaultBaseTime; out.isCustom = false; out.customTime = false;
+  return out;
+}
+
 var _gid = 1;
 function newGroupId() { return "g"+(_gid++); }
 
@@ -152,6 +198,13 @@ function retimeSlot(s, newTime, extra) {
   var wasCustom = s.isCustom === true || (s.isCustom === undefined && DEFAULT_TIMES.indexOf(s.time) === -1);
   var baseTime = s.defaultBaseTime || (!wasCustom ? s.time : null);
   var out = {...s, time:newTime, isCustom:wasCustom, customTime:(wasCustom && !isStillDefault), defaultBaseTime:(!wasCustom ? baseTime : s.defaultBaseTime)};
+  // v95: nudge a 7:36 row to 7:26 and then edit it back to 7:36 and the anchor is now just
+  // noise — it says "really 7:36" about a row that literally says 7:36. Harmless to look at
+  // but it is one more row carrying an anchor it does not need, and every one of those is a
+  // future collision. Drop it, and the row is a plain clean grid row again.
+  // Revert lever — pre-v95 kept the redundant anchor forever:
+  // if (extra) { out = {...out, ...extra}; } return out;
+  if (out.defaultBaseTime && out.defaultBaseTime === newTime) { delete out.defaultBaseTime; out.customTime = false; }
   if (extra) { out = {...out, ...extra}; }
   return out;
 }
@@ -4556,7 +4609,7 @@ export default function TheList() {
     var dayDelta = dayShiftDelta(fromDateKey, toDateKey);
     if (dayDelta === 0) {
       var same = buildSeriesTimeShift(name, fromDateKey, newTime);
-      return {newSchedules:same.newSchedules, conflicts:same.conflicts, blocked:[], moved:0, dayDelta:0};
+      return {newSchedules:same.newSchedules, conflicts:same.conflicts, blocked:[], shared:[], moved:0, dayDelta:0};
     }
     if (!targetSlot) targetSlot = {time:newTime};
     var lower=(name||"").toLowerCase();
@@ -4570,7 +4623,7 @@ export default function TheList() {
       var oi=findOcc(ds); if (oi<0) return;
       picked.push({dk:dk, slot:{...ds[oi]}});
     });
-    if (picked.length===0) return {newSchedules:newSch, conflicts:[], blocked:[], moved:0, dayDelta:dayDelta};
+    if (picked.length===0) return {newSchedules:newSch, conflicts:[], blocked:[], shared:[], moved:0, dayDelta:dayDelta};
     // v93b (#13, the phantom-row bug). EVERYTHING here works off the ANCHOR, never the
     // displayed time. A slot the barber nudged off-grid — shown as 7:26 but really the
     // day's 7:36 default row wearing a different label — has defaultBaseTime "7:36".
@@ -4608,7 +4661,10 @@ export default function TheList() {
     // restored (blocked) occurrence always BEHIND the placement cursor, so a later
     // occurrence can never land on top of one that was just put back.
     picked.sort(function(a,b){ if (a.dk===b.dk) return 0; if (dayDelta>0) return a.dk<b.dk?-1:1; return a.dk<b.dk?1:-1; });
-    var blocked=[]; var moved=0;
+    // v95: "blocked" now means genuinely IMPOSSIBLE — the only thing that still qualifies
+    // is a lunch/blocked-out row, which is not a person and cannot be shared with. A row
+    // held by another CLIENT is no longer a wall; see the share branch below.
+    var blocked=[]; var shared=[]; var moved=0;
     picked.forEach(function(p){
       var occ=p.slot;
       var tk=formatDateKey(addDays(parseDateKey(p.dk), dayDelta));
@@ -4641,9 +4697,9 @@ export default function TheList() {
       else if (tiShown>=0) ti=tiShown;
       else if (tiTaken>=0) ti=tiTaken;
       else ti=ds.findIndex(function(s){ return placementTime(s)===tAnchor; });
-      if (ti>=0 && ds[ti].name) {
-        // Somebody else owns that spot. Put this one back down where it came from and
-        // say so afterwards — a silently vanished haircut is the one unacceptable outcome.
+      if (ti>=0 && ds[ti].name && ds[ti].blocked) {
+        // A lunch / blocked-out row is not a person. Nothing to share with, so this one is
+        // genuinely impossible: put it back down where it came from and say so afterwards.
         blocked.push({dateKey:tk, time:newTime, existingName:ds[ti].name, fromDateKey:p.dk});
         var bs=newSch[p.dk]?[...newSch[p.dk]]:blank();
         var bAnchor=placementTime(occ);
@@ -4651,6 +4707,32 @@ export default function TheList() {
         if (bi>=0) bs[bi]={...occ}; else bs.push({...occ});
         bs.sort(function(a,b){ return timeToAbsMinutes(a.time)-timeToAbsMinutes(b.time); });
         newSch[p.dk]=bs;
+        return;
+      }
+      if (ti>=0 && ds[ti].name) {
+        // v95 SHARE, DON'T SKIP. Another CLIENT is already at that time on the new date.
+        // v94 treated that as a wall and left the visit behind on its old day — which is
+        // exactly what made Bobby "disappear": he was not gone, he was still sitting on
+        // Sep 12 while Granger was staring at Sep 19. But this app has always allowed two
+        // people to share one slot, and sharing is precisely what a barber does by hand in
+        // this situation. So DOUBLE-BOOK it: a second entry at the same time, drawn as the
+        // paired row the app already renders everywhere else. Nobody is left behind, and
+        // the report afterwards names who he is sharing with so it can be sorted out.
+        //
+        // The share row takes the HOST row's identity descriptors (isCustom / customTime /
+        // defaultBaseTime), because the host is the truth about what that time IS on this
+        // day. Both entries then agree, which is what keeps them drawn as one paired row
+        // and keeps vacateSlotCollapsing able to collapse the pair cleanly on a cancel.
+        // Revert lever — the v94 wall (blocked-and-restore, for ANY occupant):
+        // blocked.push({dateKey:tk, time:newTime, existingName:ds[ti].name, fromDateKey:p.dk}); ...restore to p.dk...; return;
+        var host=ds[ti];
+        var shareRow={...occ, time:newTime, name:occ.name, price:occ.price, recurWeeks:occ.recurWeeks, done:false, isException:true, groupId:null, pending:!!occ.pending, availStatus:null, blocked:false, isCustom:host.isCustom===true, customTime:host.customTime===true};
+        if (host.defaultBaseTime) shareRow.defaultBaseTime=host.defaultBaseTime; else delete shareRow.defaultBaseTime;
+        ds.splice(ti+1,0,shareRow);
+        shared.push({dateKey:tk, time:newTime, existingName:host.name, fromDateKey:p.dk});
+        ds.sort(function(a,b){ return timeToAbsMinutes(a.time)-timeToAbsMinutes(b.time); });
+        newSch[tk]=ds;
+        moved++;
         return;
       }
       // The row descriptors come from the slot he was actually DROPPED ON — that slot is
@@ -4674,11 +4756,18 @@ export default function TheList() {
         landed={...occ, time:newTime, isException:true, groupId:null, isCustom:tIsCust, customTime:tIsCust, defaultBaseTime:tBase};
       }
       if (ti>=0) ds[ti]=landed; else ds.push(landed);
+      // v95: and never let the row that just landed carry a LYING anchor. If it now sits on
+      // a real grid time that nobody else on the day claims, it IS that grid row and any
+      // inherited anchor is a landmine for the next move. This is the single line that stops
+      // the corruption spreading day by day the way it did through Bobby's whole ladder.
+      // Revert lever — pre-v95 wrote landed straight in with whatever anchor it inherited:
+      // (nothing here)
+      if (ti>=0) ds[ti]=unlieAnchor(ds, ti);
       ds.sort(function(a,b){ return timeToAbsMinutes(a.time)-timeToAbsMinutes(b.time); });
       newSch[tk]=ds;
       moved++;
     });
-    return {newSchedules:newSch, conflicts:[], blocked:blocked, moved:moved, dayDelta:dayDelta};
+    return {newSchedules:newSch, conflicts:[], blocked:blocked, shared:shared, moved:moved, dayDelta:dayDelta};
   };
 
   const setRecurring = function(dateKey, idx, weeks) {
@@ -4881,7 +4970,12 @@ export default function TheList() {
         setSchedules(res.newSchedules);
         if (res.dayDelta!==0) {
           addHistoryEntry({type:"rescheduled",time:m.newTime,name:m.name,price:m.price,dateKey:m.targetDateKey});
-          if (res.blocked.length>0) setSeriesShiftReport({name:m.name, moved:res.moved, blocked:res.blocked, phrase:dayShiftPhrase(m.dateKey, m.targetDateKey)});
+          // v95: the report now covers BOTH outcomes — visits that had to share a slot with
+          // another client (the normal case now) and the rare visit that hit a lunch block
+          // and truly could not move. Revert lever — the v94 blocked-only trigger:
+          // if (res.blocked.length>0) setSeriesShiftReport({name:m.name, moved:res.moved, blocked:res.blocked, phrase:dayShiftPhrase(m.dateKey, m.targetDateKey)});
+          var resShared=res.shared||[];
+          if (res.blocked.length>0 || resShared.length>0) setSeriesShiftReport({name:m.name, moved:res.moved, blocked:res.blocked, shared:resShared, phrase:dayShiftPhrase(m.dateKey, m.targetDateKey)});
         }
       }
     }
@@ -6204,7 +6298,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v94</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v95</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -6457,14 +6551,30 @@ export default function TheList() {
       {seriesShiftReport && (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",zIndex:1160,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px",boxSizing:"border-box"}} onClick={function(){ setSeriesShiftReport(null); }}>
           <div style={{background:"#ffffff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"26px 26px 22px",width:"min(400px,92vw)",maxHeight:"80vh",overflowY:"auto"}} onClick={function(e){ e.stopPropagation(); }}>
-            <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#c0392b",marginBottom:"8px"}}>Series moved</div>
-            <div style={{fontSize:"15px",color:"#1a1a1a",marginBottom:"6px"}}>{seriesShiftReport.moved} visit{seriesShiftReport.moved===1?"":"s"} slid {seriesShiftReport.phrase}. {seriesShiftReport.blocked.length} could not.</div>
-            <div style={{fontSize:"12px",color:"#888",marginBottom:"16px"}}>Somebody else was already in that spot on the new date, so {(seriesShiftReport.name||"this client")} was left where he was on these dates. Move them by hand.</div>
+            {/* v95: the headline is no longer "N could not." Every visit moves now. The ones
+                that landed on an occupied time SHARE it — the paired row this app has always
+                drawn — and are listed in gold as an FYI, not a failure. The red list is only
+                for a visit that hit a LUNCH block, which is the one thing that cannot be
+                shared and so is the one thing still left behind.
+                Revert lever — the v94 blocked-only body:
+                <div ...color:"#c0392b"...>Series moved</div>
+                <div ...>{seriesShiftReport.moved} visit{...} slid {phrase}. {blocked.length} could not.</div>
+                <div ...>Somebody else was already in that spot on the new date, so {name} was left where he was on these dates. Move them by hand.</div>
+                {seriesShiftReport.blocked.map(...)} */}
+            <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:((seriesShiftReport.blocked||[]).length>0?"#c0392b":"#8a6d3b"),marginBottom:"8px"}}>Series moved</div>
+            <div style={{fontSize:"15px",color:"#1a1a1a",marginBottom:"6px"}}>{seriesShiftReport.moved} visit{seriesShiftReport.moved===1?"":"s"} slid {seriesShiftReport.phrase}.{(seriesShiftReport.shared||[]).length>0?(" "+(seriesShiftReport.shared||[]).length+" of them "+((seriesShiftReport.shared||[]).length===1?"is":"are")+" sharing a slot."):""}{(seriesShiftReport.blocked||[]).length>0?(" "+(seriesShiftReport.blocked||[]).length+" could not move."):""}</div>
+            <div style={{fontSize:"12px",color:"#888",marginBottom:"16px"}}>{(seriesShiftReport.shared||[]).length>0?("Somebody was already booked at that time on the new date, so "+(seriesShiftReport.name||"this client")+" is doubled up with them. Nobody was left behind — separate them by hand if you'd rather."):("A lunch block sits on that time on the new date, so "+(seriesShiftReport.name||"this client")+" was left where he was. Move them by hand.")}</div>
             <div style={{marginBottom:"16px"}}>
-              {seriesShiftReport.blocked.map(function(b,i){ return (
-                <div key={i} style={{padding:"9px 10px",marginBottom:"4px",background:"#fff5f4",border:"1px solid #f0d0cc",borderRadius:"6px"}}>
+              {(seriesShiftReport.shared||[]).map(function(b,i){ return (
+                <div key={"s"+i} style={{padding:"9px 10px",marginBottom:"4px",background:"#fdf8ec",border:"1px solid #e4d3ac",borderRadius:"6px"}}>
                   <div style={{fontSize:"12px",color:"#1a1a1a"}}>{friendlyDate(b.fromDateKey)} {"\u2192"} {friendlyDate(b.dateKey)} {"\u00b7"} {b.time}</div>
-                  <div style={{fontSize:"11px",color:"#c0392b",marginTop:"2px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{b.existingName} is already here</div>
+                  <div style={{fontSize:"11px",color:"#8a6d3b",marginTop:"2px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>Sharing the slot with {b.existingName}</div>
+                </div>
+              ); })}
+              {(seriesShiftReport.blocked||[]).map(function(b,i){ return (
+                <div key={"b"+i} style={{padding:"9px 10px",marginBottom:"4px",background:"#fff5f4",border:"1px solid #f0d0cc",borderRadius:"6px"}}>
+                  <div style={{fontSize:"12px",color:"#1a1a1a"}}>{friendlyDate(b.fromDateKey)} {"\u2192"} {friendlyDate(b.dateKey)} {"\u00b7"} {b.time}</div>
+                  <div style={{fontSize:"11px",color:"#c0392b",marginTop:"2px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{b.existingName} blocks this time</div>
                 </div>
               ); })}
             </div>
