@@ -87,6 +87,10 @@ function vacateSlotCollapsing(arr, idx) {
     if (vTaken) { return arr.slice(0, idx).concat(arr.slice(idx + 1)); }
     var vSnap = {...out[idx], time:vBase, name:"", price:"", done:false, recurWeeks:null, isException:false, groupId:null, pending:false, availStatus:null, isCustom:false, customTime:false};
     delete vSnap.defaultBaseTime;
+    // v97: the row is going back on the grid, so the "he meant this nudge" flag goes with
+    // it. Leaving it behind would permanently exempt an ordinary emptied row from the
+    // sweeper — a ghost with a hall pass. Revert lever — delete this one line.
+    delete vSnap.nudgeKept;
     out[idx] = vSnap;
     return out;
   }
@@ -188,6 +192,17 @@ function unlieAnchor(slots, i) {
 // A NAMED row, a lunch/blocked row, an Available/Overtime-marked row, and a genuine
 // hand-made custom row (no anchor at all) are all left exactly as they are. Pure — builds
 // a new array and never mutates the input.
+//
+// v97 THE SWEEPER CANNOT READ MINDS, SO WE TELL IT. The rule above — "empty row + anchor
+// means stale nudge" — was true of every row the OLD builds left behind, but it is NOT
+// true of a nudge Granger makes ON PURPOSE. Move an empty 10:58 opening to 10:48 and the
+// row is empty and carries an anchor, which is bit-for-bit what a ghost looks like. So the
+// sweeper snapped it straight back to 10:58 on the very next cloud snapshot: the edit
+// showed for a second and then undid itself, every single time. A deliberate retime now
+// stamps the row nudgeKept:true (see retimeSlot) and the sweeper skips any row wearing it.
+// Ghosts, written by builds that never knew about the flag, carry no flag and are still
+// swept exactly as before. Revert lever — drop "|| s.nudgeKept" from the guard below to go
+// back to sweeping every empty anchored row, deliberate or not.
 // Revert lever — un-comment to make this a no-op and ship the old behavior:
 // function deNudgeEmptyRows(arr) { return arr; }
 function deNudgeEmptyRows(arr) {
@@ -195,7 +210,9 @@ function deNudgeEmptyRows(arr) {
   var out = []; var changed = false; var i, j, s, anchor, taken;
   for (i = 0; i < arr.length; i++) {
     s = arr[i];
-    if (!s || !s.defaultBaseTime || (s.name && String(s.name).trim()) || s.blocked || s.availStatus) { out.push(s); continue; }
+    // v97 revert lever — the pre-v97 guard, with no respect for a deliberate nudge:
+    // if (!s || !s.defaultBaseTime || (s.name && String(s.name).trim()) || s.blocked || s.availStatus) { out.push(s); continue; }
+    if (!s || !s.defaultBaseTime || s.nudgeKept || (s.name && String(s.name).trim()) || s.blocked || s.availStatus) { out.push(s); continue; }
     anchor = s.defaultBaseTime;
     if (anchor === s.time) {
       var same = {...s}; delete same.defaultBaseTime; same.customTime = false;
@@ -257,6 +274,17 @@ function retimeSlot(s, newTime, extra) {
   // if (extra) { out = {...out, ...extra}; } return out;
   if (out.defaultBaseTime && out.defaultBaseTime === newTime) { delete out.defaultBaseTime; out.customTime = false; }
   if (extra) { out = {...out, ...extra}; }
+  // v97 A DELIBERATE NUDGE SIGNS ITS NAME. Judged on the FINAL row (after extra), because
+  // extra is how the series engine drops a PERSON onto a row in the same breath as retiming
+  // it. An empty row that still carries an anchor when the dust settles is an opening the
+  // barber moved on purpose (10:58 -> 10:48), so flag it and deNudgeEmptyRows will leave it
+  // alone. Anything else — a named row, or a row that landed back on a clean grid time and
+  // shed its anchor above — must NOT carry the flag, so it is stripped. Keeping this in one
+  // place means the flag is correct for the single edit, for every member of a group
+  // cascade, and for every series retime, since all three go through retimeSlot.
+  // Revert lever — delete this block and empty-row nudges go back to being swept away.
+  if (out.defaultBaseTime && !(out.name && String(out.name).trim()) && !out.blocked) { out.nudgeKept = true; }
+  else if (out.nudgeKept) { delete out.nudgeKept; }
   return out;
 }
 const SHORT_MONTHS = [3,4,5,6];
@@ -6366,7 +6394,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v96</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v97</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
