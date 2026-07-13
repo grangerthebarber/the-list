@@ -562,6 +562,17 @@ function logEntryWords(entry) {
   // can't tell a typo-fix from a genuine swap, so every real slot name-edit says "replaced."
   var isSlotSwap = (t === "edited") && !!(entry && entry.dateKey) && !!prev && prev !== nm;
   var chip, action;
+  // v103: the six actions v102 made undoable but never wrote down. Each is checked BEFORE
+  // the old chain so none of them can fall through into the "edited"/rename branches below
+  // (a phone_set has no dateKey and no time, which is exactly the shape isProfileRename
+  // tests for — without these branches every phone edit would read as a rename).
+  if (t === "phone_set") { chip = "phone"; action = (entry && entry.after) ? "number saved" : "number cleared"; return {chip:chip, action:action, isProfileRename:false}; }
+  if (t === "client_note") { chip = "note"; action = (entry && entry.after) ? "note saved" : "note cleared"; return {chip:chip, action:action, isProfileRename:false}; }
+  if (t === "client_deleted") { chip = "client removed"; action = "removed from your client list"; return {chip:chip, action:action, isProfileRename:false}; }
+  if (t === "day_notes") { chip = "notes"; action = "notes saved"; return {chip:chip, action:action, isProfileRename:false}; }
+  if (t === "standby_add") { chip = "standby"; action = "added to standby"; return {chip:chip, action:action, isProfileRename:false}; }
+  if (t === "standby_removed") { chip = "standby"; action = "removed from standby"; return {chip:chip, action:action, isProfileRename:false}; }
+  if (t === "money") { chip = "books"; action = "money saved"; return {chip:chip, action:action, isProfileRename:false}; }
   if (t === "added") { chip = isPencil ? "penciled in" : "locked in"; action = chip; }
   else if (t === "removed") { chip = "canceled"; action = chip; }
   else if (t === "rescheduled") { chip = "rescheduled"; action = chip; }
@@ -577,6 +588,33 @@ function logEntryWords(entry) {
   else if (t === "backup") { chip = "backup"; action = "backup"; }
   else { chip = "changed"; action = "changed"; }
   return {chip: chip, action: action, isProfileRename: isProfileRename};
+}
+
+// v103 CHANGE-LOG CATEGORIES (display-only — reads the stored type, writes nothing).
+// Four buckets, named the way Granger names them:
+//   list     — The List. Anything that moved a body in or out of a chair.
+//   profiles — a client's card: their number, their note, their name, their removal.
+//   notes    — a day's notes AND that day's standby list (which lives inside dayNotes).
+//   books    — the money.
+// Anything unrecognised (old entries, future types) falls to "list" rather than
+// disappearing: a row that belongs to no chip would be invisible under every filter but
+// All, and a change log that hides changes is worse than one that files them imperfectly.
+var LOG_CATS = [
+  {id:"all", label:"All"},
+  {id:"list", label:"The List"},
+  {id:"profiles", label:"Profiles"},
+  {id:"notes", label:"Notes"},
+  {id:"books", label:"Books"}
+];
+function logEntryCategory(entry) {
+  var t = entry ? entry.type : "";
+  if (t === "money") return "books";
+  if (t === "day_notes" || t === "standby_add" || t === "standby_removed") return "notes";
+  if (t === "phone_set" || t === "client_note" || t === "client_deleted") return "profiles";
+  // A profile-level rename: type "edited" carrying no slot at all. Same test logEntryWords
+  // uses for its "renamed" chip, so the chip and the bucket can never disagree.
+  if (t === "edited" && !(entry && entry.dateKey) && !(entry && entry.time)) return "profiles";
+  return "list";
 }
 
 const VIEWS = ["Day","3-Day","Wknd","Week","Month"];
@@ -871,6 +909,14 @@ export default function TheList() {
   const [acctAdd, setAcctAdd] = useState({});
   const [groupScheduleModal, setGroupScheduleModal] = useState(null);
   const [entryUndoConflict, setEntryUndoConflict] = useState(null);
+  // v103: the slot conflict prompt above is slot-shaped — it talks about times and about who
+  // is sitting in a chair. The new entry types (a phone number, a day's notes, the books) have
+  // neither. Rather than bend that prompt into something that has to hedge every sentence, the
+  // new types get their own, which is handed a plain sentence to say. Additive: the old prompt
+  // and the old path are untouched and still handle every slot entry exactly as in v102.
+  const [sideUndoConflict, setSideUndoConflict] = useState(null);
+  // v103: which chip the change log is filtered to ("all" | "list" | "profiles" | "notes" | "books").
+  const [logFilter, setLogFilter] = useState("all");
   const [selectMode, setSelectMode] = useState(false);
   const [selectedSlots, setSelectedSlots] = useState({});
   const [dragState, setDragState] = useState(null);
@@ -1482,8 +1528,15 @@ export default function TheList() {
       // matching the existing arrow-key guard a few lines down.
       var aeUR = (typeof document!=="undefined") ? document.activeElement : null;
       var inLiveField = !!(aeUR && (aeUR.tagName==="INPUT" || aeUR.tagName==="TEXTAREA") && !aeUR.readOnly && !aeUR.disabled);
-      if ((e.ctrlKey||e.metaKey) && e.key==="z" && !e.shiftKey) { if(inLiveField) return; e.preventDefault(); handleUndo(); }
-      if ((e.ctrlKey||e.metaKey) && (e.key==="y" || (e.key==="z" && e.shiftKey))) { if(inLiveField) return; e.preventDefault(); handleRedo(); }
+      // v102: the KEYBOARD takes one field at a time; the on-screen Undo/Redo buttons take a
+      // whole visit (see undoSteps). Same stack, two bite sizes. The inLiveField guard above is
+      // untouched — with the caret inside a text box, Cmd+Z still belongs to iPadOS, which is
+      // exactly right: mid-typing it walks back your characters, not your app history.
+      // Revert levers — the v101 lines, where the keyboard and the buttons did the same thing:
+      // if ((e.ctrlKey||e.metaKey) && e.key==="z" && !e.shiftKey) { if(inLiveField) return; e.preventDefault(); handleUndo(); }
+      // if ((e.ctrlKey||e.metaKey) && (e.key==="y" || (e.key==="z" && e.shiftKey))) { if(inLiveField) return; e.preventDefault(); handleRedo(); }
+      if ((e.ctrlKey||e.metaKey) && e.key==="z" && !e.shiftKey) { if(inLiveField) return; e.preventDefault(); handleUndoKey(); }
+      if ((e.ctrlKey||e.metaKey) && (e.key==="y" || (e.key==="z" && e.shiftKey))) { if(inLiveField) return; e.preventDefault(); handleRedoKey(); }
       // While ANY popup is open the arrows belong to the popup, not the schedule behind
       // it — so they never page the day or jump the background to today. (Undo/redo above
       // still work.) Each modal's own handlers take over the arrows from here.
@@ -1781,6 +1834,34 @@ export default function TheList() {
     else playSound("tap");
   };
 
+  // ===========================================================================
+  // v103 THE CHANGE LOG LEARNS THE OTHER SIX ACTIONS.
+  //
+  // v102 made the phone, the client note, a client's removal, the day notes, the standby
+  // list and the money all UNDOABLE and all BANNERED — but every one of them called
+  // showBanner directly, and showBanner does not write to the log. addHistoryEntry is the
+  // only door into history. So the change log has been telling a half-truth: it lists every
+  // booking and no phone number.
+  //
+  // addSideEntry is addHistoryEntry with one thing taken out: the sound. That is deliberate.
+  // Routing these through addHistoryEntry would have been fewer lines, but it would also have
+  // started playing a lock/delete/tap on every money save and every note glance — a change
+  // nobody asked for, arriving free-of-charge inside a change-log session. The banner is
+  // byte-for-byte the one v102 showed: describeBanner returns entry.msg before it looks at
+  // anything else, and each caller still hands over the same msg string it always did.
+  //
+  // entry.bannerType carries the LOOK (added / edited / removed — the colors the banner
+  // already knows) while entry.type carries the RECORD (phone_set, money, ...). showBanner's
+  // second argument overrides the displayed type, so a "money" entry files itself as money and
+  // still shows up in Granger's usual gold "edited" banner. The log reads .type; the banner
+  // reads .bannerType. Neither has to compromise.
+  // ===========================================================================
+  const addSideEntry = function(entry) {
+    var full = {...entry, timestamp:new Date().toLocaleTimeString(), id:Date.now()+Math.random()};
+    setHistory(function(prev){ return [full,...prev].slice(0,200); });
+    showBanner(full, entry.bannerType);
+  };
+
   // #11: flash a just-emptied slot red for 8 seconds so a cancel is visible no matter
   // how it happened (swipe-delete, name cleared by editing, or undone).
   var flashRemoved = function(dateKey, idx, name) {
@@ -1820,6 +1901,92 @@ export default function TheList() {
   const pushUndo = function(snapshot) {
     setUndoStack(function(prev){ return [...prev, snapshot].slice(-50); });
     setRedoStack([]);
+  };
+
+  // ===========================================================================
+  // v102 THE UNDO STACK LEARNS THE OTHER THREE TREES.
+  //
+  // Until now a snapshot was {schedules} and a restore was setSchedules(). That is
+  // why typing a phone number could not be undone: client cards live on clientMemory,
+  // day notes and the standby list live on dayNotes, and the money lives on accounting
+  // — three state trees the engine had never heard of. Nothing was "forgetting to
+  // register"; there was no slot to register into.
+  //
+  // A snapshot may now ALSO carry any of clientMemory / dayNotes / accounting. It
+  // carries a tree ONLY if the change that pushed it touched that tree, and a restore
+  // puts back ONLY the trees the snapshot actually brought. So every one of the ~50
+  // pre-existing schedules-only snapshots behaves EXACTLY as it did in v101 — they
+  // have no other keys, so nothing else is written. That is the whole safety of this.
+  //
+  // schedules is ALWAYS captured, even by a pure phone edit. That is deliberate. It
+  // keeps interleaved changes sound: undo a booking, then undo a phone edit, in any
+  // order, and each snapshot restores a complete, self-consistent world rather than a
+  // half of one.
+  //
+  // ---- VISITS: why the button and Cmd+Z take different-sized bites --------------
+  // The phone and note fields save on EVERY KEYSTROKE. Snapshot each keystroke and a
+  // ten-digit number becomes ten undo taps — and since the stack is capped at 50,
+  // typing two numbers would shove Granger's real schedule undos off the end of it.
+  // So a snapshot is taken ONCE PER FIELD, on the first change to that field, and
+  // every field snapshot taken while one card (or one day's sheet) is open is stamped
+  // with the same visitId.
+  //   Cmd+Z pops ONE snapshot        -> one field.
+  //   The Undo button pops snapshots until the visitId changes -> the whole visit.
+  // One stack, two bite sizes. They cannot drift apart, because there is only one
+  // stack to drift. Half-unwind a card with Cmd+Z, then hit the button, and it
+  // finishes off the rest of that visit and stops.
+  //   Legacy schedule snapshots carry NO visitId, so the button pops exactly one of
+  // them, exactly as before.
+  //   Note: while the caret is actually INSIDE a text box, the keydown handler hands
+  // Cmd+Z to iPadOS (inLiveField guard, untouched) — so mid-typing it is still the
+  // keyboard's own character-group undo. The app's per-field Cmd+Z only takes over
+  // once the field is left. That is the right split and it was already there.
+  //
+  // beginUndoVisit is called where a card/sheet OPENS. There is deliberately no close
+  // hook: snapTrees auto-opens a fresh visit whenever the visit key changes, so a
+  // missed close can never silently glue two cards into one undo step.
+  // ===========================================================================
+  const undoVisitRef = useRef(null);
+  const undoVisitSeqRef = useRef(0);
+
+  var beginUndoVisit = function(visitKey) {
+    undoVisitSeqRef.current = undoVisitSeqRef.current + 1;
+    undoVisitRef.current = {id:"v" + undoVisitSeqRef.current, key:visitKey, taken:{}};
+  };
+
+  // Deep-copy the named trees out of the live refs. schedules always rides along.
+  var captureTrees = function(trees) {
+    var snap = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
+    if (!trees) return snap;
+    if (trees.indexOf("clientMemory") >= 0) snap.clientMemory = JSON.parse(JSON.stringify(clientMemoryRef.current || []));
+    if (trees.indexOf("dayNotes") >= 0) snap.dayNotes = JSON.parse(JSON.stringify(dayNotesRef.current || {}));
+    if (trees.indexOf("accounting") >= 0) snap.accounting = JSON.parse(JSON.stringify(accountingRef.current || {}));
+    return snap;
+  };
+
+  // Which optional trees is a snapshot actually carrying? (Legacy ones carry none.)
+  var snapTreeKeys = function(s) {
+    var out = [];
+    if (!s) return out;
+    if (s.clientMemory) out.push("clientMemory");
+    if (s.dayNotes) out.push("dayNotes");
+    if (s.accounting) out.push("accounting");
+    return out;
+  };
+
+  // The one call every non-schedule change goes through. Returns true if it actually
+  // pushed. fieldKey is what makes a ten-keystroke phone number a single undo step:
+  // the first keystroke takes the photograph, the other nine find it already taken.
+  var snapTrees = function(visitKey, fieldKey, trees, label) {
+    var v = undoVisitRef.current;
+    if (!v || v.key !== visitKey) { beginUndoVisit(visitKey); v = undoVisitRef.current; }
+    if (v.taken[fieldKey]) return false;
+    v.taken[fieldKey] = true;
+    var snap = captureTrees(trees);
+    snap.visitId = v.id;
+    snap.label = label || "";
+    pushUndo(snap);
+    return true;
   };
 
   var findSlotIdxByTime = function(slots, time) {
@@ -1885,6 +2052,197 @@ export default function TheList() {
   };
 
   var handleEntryUndo = function(entry) { performEntryUndo(entry, false); };
+
+  // ===========================================================================
+  // v103 PER-ROW UNDO FOR THE NEW ENTRY TYPES.
+  //
+  // This is NOT the Undo button and it is not a second copy of it. The Undo button walks
+  // backwards off the top of a stack, so the world it restores is always the world one step
+  // ago. A change-log row reaches into ONE specific thing, OUT OF ORDER, possibly ten changes
+  // later — so it cannot restore a world, only a value. Which means every entry has to carry
+  // that value with it (entry.before), and has to carry what it LEFT behind (entry.after) so
+  // it can tell whether anyone has touched the thing since.
+  //
+  // The rule, everywhere below: if what's there now does not equal entry.after, someone has
+  // been here since, and we stop and ask rather than quietly overwrite them. That is the whole
+  // safety property. performEntryUndo has always done this for slots by comparing names; these
+  // types have no names, so they compare values.
+  //
+  // The two standby cases need no prompt: their check has only one honest answer either way
+  // ("that name is already gone" / "already back"), so they say it and stop.
+  //
+  // Every path here pushes its OWN undo snapshot before it writes, so an undo from the log is
+  // itself undoable by the Undo button — same as the slot path has always been.
+  // ===========================================================================
+  var acctSameRec = function(a, b) {
+    var fs = ["cash","venmo","applepay","square","services","hours"];
+    for (var z=0; z<fs.length; z++) {
+      var va = a ? parseFloat(a[fs[z]]) : 0; if (isNaN(va)) va = 0;
+      var vb = b ? parseFloat(b[fs[z]]) : 0; if (isNaN(vb)) vb = 0;
+      if (va !== vb) return false;
+    }
+    return true;
+  };
+
+  var performSideUndo = function(entry, override) {
+    if (!entry) return;
+    var t = entry.type;
+
+    if (t === "phone_set" || t === "client_note") {
+      var nmC = entry.name || "";
+      var fieldC = (t === "phone_set") ? "phone" : "note";
+      var wordC = (t === "phone_set") ? "number" : "note";
+      var memC = clientMemoryRef.current || [];
+      var iC = -1;
+      for (var c1=0; c1<memC.length; c1++) { var recC = memC[c1]; if (recC && recC.name && nmC && recC.name.toLowerCase()===nmC.toLowerCase()) { iC = c1; break; } }
+      if (iC < 0) { showBanner({type:"info", msg:nmC + " is no longer on your client list", time:null, dateKey:null}); return; }
+      var curC = memC[iC][fieldC] || "";
+      var afterC = entry.after || "";
+      var beforeC = entry.before || "";
+      if (!override && curC !== afterC) {
+        setSideUndoConflict({entry:entry, msg:nmC + "'s " + wordC + " has changed since this. Undoing will overwrite what's there now."});
+        return;
+      }
+      pushUndo(captureTrees(["clientMemory"]));
+      setClientMemory(function(mem){
+        var j = mem.findIndex(function(c){ return c.name && nmC && c.name.toLowerCase()===nmC.toLowerCase(); });
+        if (j < 0) return mem;
+        var u = [...mem]; var r = {...u[j]}; r[fieldC] = beforeC; u[j] = r; return u;
+      });
+      // Keep an OPEN card honest. If the profile or the Message popup is on screen showing the
+      // value we just walked back, it would otherwise keep displaying the old one until closed —
+      // and worse, its origPhone/origNote (the "what it was when this opened" mark, which decides
+      // whether the next blur banners) would now be a lie. Both are re-marked to the restored value.
+      setClientProfile(function(p){
+        if (!p || !p.name || !nmC || p.name.toLowerCase()!==nmC.toLowerCase()) return p;
+        var q = {...p}; q[fieldC] = beforeC;
+        if (fieldC === "phone") { q.origPhone = beforeC; } else { q.origNote = beforeC; }
+        return q;
+      });
+      if (fieldC === "phone") {
+        setPhoneModal(function(p){
+          if (!p || !p.name || !nmC || p.name.toLowerCase()!==nmC.toLowerCase()) return p;
+          return {...p, phone:beforeC, origPhone:beforeC};
+        });
+      }
+      showBanner({type:"undo", msg:"Undone — " + nmC + "'s " + wordC, time:null, dateKey:null});
+      return;
+    }
+
+    if (t === "client_deleted") {
+      var nmD = entry.name || "";
+      var memD = clientMemoryRef.current || [];
+      var backD = false;
+      for (var d1=0; d1<memD.length; d1++) { var recD = memD[d1]; if (recD && recD.name && nmD && recD.name.toLowerCase()===nmD.toLowerCase()) { backD = true; break; } }
+      if (!override && backD) {
+        setSideUndoConflict({entry:entry, msg:nmD + " is already back on your client list. Undoing will replace that card with the one that was deleted."});
+        return;
+      }
+      pushUndo(captureTrees(["clientMemory"]));
+      var cardD = entry.card ? {...entry.card} : {name:nmD, price:"", phone:""};
+      setClientMemory(function(mem){
+        var k = mem.findIndex(function(c){ return c.name && nmD && c.name.toLowerCase()===nmD.toLowerCase(); });
+        if (k >= 0) { var u2 = [...mem]; u2[k] = cardD; return u2; }
+        return [...mem, cardD];
+      });
+      showBanner({type:"undo", msg:"Undone — " + nmD + " is back on your client list", time:null, dateKey:null});
+      return;
+    }
+
+    if (t === "money") {
+      var dkM = entry.dateKey;
+      if (!dkM) { showBanner({type:"undo", name:"that change", dateKey:null, time:null}); return; }
+      var curM = (accountingRef.current || {})[dkM] || null;
+      if (!override && !acctSameRec(curM, entry.after || null)) {
+        setSideUndoConflict({entry:entry, msg:"The books for " + friendlyDate(dkM) + " have changed since this. Undoing will overwrite the numbers that are there now."});
+        return;
+      }
+      pushUndo(captureTrees(["accounting"]));
+      var backM = entry.before ? {...entry.before} : null;
+      setAccounting(function(prev){
+        var out = {...prev};
+        if (backM) { out[dkM] = backM; } else { delete out[dkM]; }
+        return out;
+      });
+      showBanner({type:"undo", msg:"Undone — the money on " + friendlyDate(dkM), time:null, dateKey:dkM});
+      return;
+    }
+
+    if (t === "day_notes") {
+      var keysN = entry.keys || [];
+      var mapN = dayNotesRef.current || {};
+      var afterN = entry.after || {};
+      var beforeN = entry.before || {};
+      var mismatchN = false;
+      for (var n1=0; n1<keysN.length; n1++) {
+        var kN = keysN[n1];
+        var curN = (mapN[kN] === undefined) ? null : mapN[kN];
+        var aftN = (afterN[kN] === undefined) ? null : afterN[kN];
+        if (JSON.stringify(curN) !== JSON.stringify(aftN)) { mismatchN = true; break; }
+      }
+      if (!override && mismatchN) {
+        setSideUndoConflict({entry:entry, msg:"The notes on " + friendlyDate(entry.dateKey) + " have changed since this. Undoing will overwrite what's there now."});
+        return;
+      }
+      pushUndo(captureTrees(["dayNotes"]));
+      setDayNotes(function(prev){
+        var n = {...prev};
+        for (var q=0; q<keysN.length; q++) {
+          var kq = keysN[q];
+          var vq = (beforeN[kq] === undefined) ? null : beforeN[kq];
+          if (vq === null) { delete n[kq]; } else { n[kq] = vq; }
+        }
+        return n;
+      });
+      showBanner({type:"undo", msg:"Undone — the notes on " + friendlyDate(entry.dateKey), time:null, dateKey:entry.dateKey});
+      return;
+    }
+
+    if (t === "standby_add") {
+      var dkS = entry.dateKey; var keyS = "@wl:" + dkS;
+      var listS = (dayNotesRef.current || {})[keyS];
+      var thereS = false;
+      if (listS && listS.length) { for (var s1=0; s1<listS.length; s1++) { if (listS[s1] && listS[s1].id === entry.entryId) { thereS = true; break; } } }
+      if (!thereS) { showBanner({type:"info", msg:(entry.name || "That name") + " is already off the standby list", time:null, dateKey:dkS}); return; }
+      pushUndo(captureTrees(["dayNotes"]));
+      setDayNotes(function(prev){
+        var n = {...prev};
+        var cur = (n[keyS] && n[keyS].length) ? n[keyS] : [];
+        var next = cur.filter(function(it){ return it.id !== entry.entryId; });
+        if (next.length) { n[keyS] = next; } else { delete n[keyS]; }
+        return n;
+      });
+      showBanner({type:"undo", msg:"Undone — " + (entry.name || "") + " off standby", time:null, dateKey:dkS});
+      return;
+    }
+
+    if (t === "standby_removed") {
+      var dkR = entry.dateKey; var keyR = "@wl:" + dkR;
+      var itemR = entry.item ? {...entry.item} : null;
+      if (!itemR) { showBanner({type:"info", msg:"Nothing to put back", time:null, dateKey:dkR}); return; }
+      var listR = (dayNotesRef.current || {})[keyR];
+      if (listR && listR.length) {
+        for (var r1=0; r1<listR.length; r1++) {
+          if (listR[r1] && listR[r1].id === itemR.id) { showBanner({type:"info", msg:(entry.name || "That name") + " is already back on standby", time:null, dateKey:dkR}); return; }
+        }
+      }
+      pushUndo(captureTrees(["dayNotes"]));
+      setDayNotes(function(prev){
+        var n = {...prev};
+        var cur = (n[keyR] && n[keyR].length) ? n[keyR].slice() : [];
+        cur.push(itemR);
+        n[keyR] = cur;
+        return n;
+      });
+      showBanner({type:"undo", msg:"Undone — " + (entry.name || "") + " back on standby", time:null, dateKey:dkR});
+      return;
+    }
+
+    showBanner({type:"undo", name:"that change", dateKey:null, time:null});
+  };
+  var handleSideUndo = function(entry) { performSideUndo(entry, false); };
+  var SIDE_UNDO_TYPES = ["phone_set","client_note","client_deleted","day_notes","standby_add","standby_removed","money"];
+  var isSideEntry = function(entry){ return !!entry && SIDE_UNDO_TYPES.indexOf(entry.type) >= 0; };
   // v82: tapping a change-log ROW jumps the schedule to that change (the log used to be
   // undo-only). Closes the panel, moves to the entry's day (leaving Month/Wknd for a
   // day view so the row is reachable), and gives the spot a neutral flash. The row's
@@ -1909,29 +2267,124 @@ export default function TheList() {
     return sorted[0].time + "–" + sorted[sorted.length-1].time;
   };
 
-  const handleUndo = function() {
-    if (undoStack.length === 0) return;
-    var snapshot = undoStack[undoStack.length-1];
-    var diff = describeScheduleDiff(schedulesRef.current, snapshot.schedules);
-    setRedoStack(function(prev){ return [...prev, {schedules: JSON.parse(JSON.stringify(schedulesRef.current))}]; });
-    setUndoStack(function(prev){ return prev.slice(0,-1); });
-    setSchedules(snapshot.schedules);
-    if (diff && diff.dateKey) goToDateKeyIfHidden(diff.dateKey);
-    showBanner({type:"undo", name:(diff&&diff.name)?diff.name:"last change", time:(diff&&diff.hasName)?diff.time:null, dateKey:(diff&&diff.dateKey)?diff.dateKey:null});
-    if (diff && diff.dateKey && diff.time) flashSpots("undo", [{dateKey:diff.dateKey, time:diff.time}]);
+  // v102 revert levers — the v101 bodies, schedules-only, ungrouped:
+  // const handleUndo = function() {
+  //   if (undoStack.length === 0) return;
+  //   var snapshot = undoStack[undoStack.length-1];
+  //   var diff = describeScheduleDiff(schedulesRef.current, snapshot.schedules);
+  //   setRedoStack(function(prev){ return [...prev, {schedules: JSON.parse(JSON.stringify(schedulesRef.current))}]; });
+  //   setUndoStack(function(prev){ return prev.slice(0,-1); });
+  //   setSchedules(snapshot.schedules);
+  //   if (diff && diff.dateKey) goToDateKeyIfHidden(diff.dateKey);
+  //   showBanner({type:"undo", name:(diff&&diff.name)?diff.name:"last change", time:(diff&&diff.hasName)?diff.time:null, dateKey:(diff&&diff.dateKey)?diff.dateKey:null});
+  //   if (diff && diff.dateKey && diff.time) flashSpots("undo", [{dateKey:diff.dateKey, time:diff.time}]);
+  // };
+  // const handleRedo = function() { ...the mirror image of the above... };
+
+  // How many snapshots to take off the top. Grouped (the Undo BUTTON) walks down while
+  // the visitId stays the same; ungrouped (Cmd+Z) always takes exactly one. A legacy
+  // schedules-only snapshot has no visitId, so grouped takes one of those too.
+  var stepsToTake = function(stack, grouped) {
+    if (!stack.length) return 0;
+    var top = stack[stack.length-1];
+    if (!grouped || !top.visitId) return 1;
+    var n = 0;
+    for (var i = stack.length-1; i >= 0; i--) {
+      if (stack[i].visitId === top.visitId) n++;
+      else break;
+    }
+    return n;
   };
 
-  const handleRedo = function() {
-    if (redoStack.length === 0) return;
-    var snapshot = redoStack[redoStack.length-1];
-    var diff = describeScheduleDiff(schedulesRef.current, snapshot.schedules);
-    setUndoStack(function(prev){ return [...prev, {schedules: JSON.parse(JSON.stringify(schedulesRef.current))}]; });
-    setRedoStack(function(prev){ return prev.slice(0,-1); });
-    setSchedules(snapshot.schedules);
-    if (diff && diff.dateKey) goToDateKeyIfHidden(diff.dateKey);
-    showBanner({type:"redo", name:(diff&&diff.name)?diff.name:"last change", time:(diff&&diff.hasName)?diff.time:null, dateKey:(diff&&diff.dateKey)?diff.dateKey:null});
-    if (diff && diff.dateKey && diff.time) flashSpots("redo", [{dateKey:diff.dateKey, time:diff.time}]);
+  // Walk n snapshots off the "from" stack, pushing the mirror-image states onto "to", and return
+  // the world we land in. This is written as a LOOP over whole worlds rather than n
+  // separate state updates because React would hand us a stale "current" on every pass
+  // after the first. The intermediate worlds are reconstructed here, in order, from the
+  // snapshots themselves — a snapshot is the world BEFORE its change, so the world AFTER
+  // change k is simply snapshot k+1 (and after the last one, the world we're standing in).
+  var walkStack = function(from, to, n) {
+    var stack = from.slice();
+    var mirror = to.slice();
+    var cur = {
+      schedules: JSON.parse(JSON.stringify(schedulesRef.current)),
+      clientMemory: JSON.parse(JSON.stringify(clientMemoryRef.current || [])),
+      dayNotes: JSON.parse(JSON.stringify(dayNotesRef.current || {})),
+      accounting: JSON.parse(JSON.stringify(accountingRef.current || {}))
+    };
+    var touched = {};
+    var last = null;
+    for (var s = 0; s < n; s++) {
+      var snap = stack[stack.length-1];
+      stack = stack.slice(0, -1);
+      var keys = snapTreeKeys(snap);
+      // The mirror entry carries the SAME trees this snapshot carries, taken from the
+      // world we are about to leave — so redo puts back exactly what undo took away.
+      var mEntry = {schedules: cur.schedules, visitId: snap.visitId, label: snap.label};
+      for (var ki = 0; ki < keys.length; ki++) { mEntry[keys[ki]] = cur[keys[ki]]; touched[keys[ki]] = true; }
+      mirror = mirror.concat([mEntry]);
+      // Step into the snapshot's world. Trees it doesn't carry are left exactly as they are.
+      var next = {schedules: snap.schedules, clientMemory: cur.clientMemory, dayNotes: cur.dayNotes, accounting: cur.accounting};
+      if (snap.clientMemory) next.clientMemory = snap.clientMemory;
+      if (snap.dayNotes) next.dayNotes = snap.dayNotes;
+      if (snap.accounting) next.accounting = snap.accounting;
+      cur = next;
+      last = snap;
+    }
+    return {stack:stack, mirror:mirror.slice(-50), world:cur, touched:touched, last:last};
   };
+
+  // Write the landed-in world back. A tree that no popped snapshot carried is NOT written
+  // at all — not even with an identical copy — so an ordinary schedule undo cannot kick
+  // off a pointless clientMemory/dayNotes/accounting write to Firebase.
+  var landWorld = function(r) {
+    setSchedules(r.world.schedules);
+    if (r.touched.clientMemory) setClientMemory(r.world.clientMemory);
+    if (r.touched.dayNotes) setDayNotes(r.world.dayNotes);
+    if (r.touched.accounting) setAccounting(r.world.accounting);
+  };
+
+  // The banner. If the schedule actually moved, the old wording still wins — it names
+  // the man and the time, and it is what Granger reads. If nothing on the schedule moved
+  // (a phone number, a note, a day's money), there is nothing for describeScheduleDiff to
+  // find, so we fall back to the label the change carried with it.
+  var undoBanner = function(kind, r) {
+    var diff = describeScheduleDiff(schedulesRef.current, r.world.schedules);
+    if (diff && diff.name) {
+      if (diff.dateKey) goToDateKeyIfHidden(diff.dateKey);
+      showBanner({type:kind, name:diff.name, time:diff.hasName?diff.time:null, dateKey:diff.dateKey||null});
+      if (diff.dateKey && diff.time) flashSpots(kind, [{dateKey:diff.dateKey, time:diff.time}]);
+      return;
+    }
+    var word = (kind === "redo") ? "Redone" : "Undone";
+    var lbl = (r.last && r.last.label) ? r.last.label : "last change";
+    showBanner({type:kind, msg:word + " — " + lbl, time:null, dateKey:null});
+  };
+
+  var undoSteps = function(grouped) {
+    var n = stepsToTake(undoStack, grouped);
+    if (n === 0) return;
+    var r = walkStack(undoStack, redoStack, n);
+    setUndoStack(r.stack);
+    setRedoStack(r.mirror);
+    landWorld(r);
+    undoBanner("undo", r);
+  };
+
+  var redoSteps = function(grouped) {
+    var n = stepsToTake(redoStack, grouped);
+    if (n === 0) return;
+    var r = walkStack(redoStack, undoStack, n);
+    setRedoStack(r.stack);
+    setUndoStack(r.mirror);
+    landWorld(r);
+    undoBanner("redo", r);
+  };
+
+  // The BUTTONS take a whole visit. Cmd+Z takes one field (see the keydown handler).
+  const handleUndo = function() { undoSteps(true); };
+  const handleRedo = function() { redoSteps(true); };
+  const handleUndoKey = function() { undoSteps(false); };
+  const handleRedoKey = function() { redoSteps(false); };
 
   const snapshotAndChange = function(changeFn, historyEntry) {
     var snapshot = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
@@ -2097,7 +2550,12 @@ export default function TheList() {
         if (cPP && cPP.name && cPP.name.toLowerCase()===newName.toLowerCase() && cPP.phone && String(cPP.phone).trim()) { hasProfilePP = true; break; }
       }
       if (hasProfilePP) {
-        var snapPP = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
+        // v102 HALF-RESTORE FIXED. This branch repriced the schedule AND wrote the new price
+        // onto the client's card, but photographed only the schedule — so undo put the slot
+        // prices back and left the card sitting on the new price. Arguably worse than no undo,
+        // because it looked like it had worked. The card now rides in the snapshot.
+        // Revert lever: var snapPP = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
+        var snapPP = captureTrees(["clientMemory"]);
         pushUndo(snapPP);
         var todayKeyPP = toDateKey(new Date());
         var lowerPP = newName.toLowerCase();
@@ -2130,7 +2588,10 @@ export default function TheList() {
       }
     }
     if (newName!==prev.name || newPrice!==prev.price || prev.availStatus) {
-      var snapshot = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
+      // v102: this branch can also update an existing client's saved price (see the
+      // setClientMemory below), so the card rides along or undo half-restores.
+      // Revert lever: var snapshot = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
+      var snapshot = captureTrees(["clientMemory"]);
       pushUndo(snapshot);
       // #7 (v51): a name TRANSITION (typing a fresh name into a spot, or clearing a name
       // out) must never carry over the previous occupant's "repeating"/exception flags.
@@ -2172,7 +2633,10 @@ export default function TheList() {
     var baseSlots = getSlots(m.dateKey);
     var prev = baseSlots[m.idx];
     if (!prev) { setProfilePriceModal(null); return; }
-    var snapshot = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
+    // v102: dormant fallback (nothing opens profilePriceModal today), but it had the same
+    // half-restore as the live path above, so it gets the same fix rather than being left
+    // as a booby-trapped revert lever.
+    var snapshot = captureTrees(scope==="always" ? ["clientMemory"] : null);
     pushUndo(snapshot);
     if (scope==="always") {
       var todayKeyPP = toDateKey(new Date());
@@ -2224,7 +2688,10 @@ export default function TheList() {
     if (isLunchName(rawName) || isBlockName(rawName) || isAvailName(rawName) || isOvertimeName(rawName) || !rawName) { doCommit(dateKey, idx, cv, keepActive); return; }
     var newName = capitalizeFirst(rawName);
     var newPrice = (cv.price||"").trim() || prev.price || "";
-    var snapshot = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
+    // v102: penciling can write a saved price onto the card (below, and via syncProfilePrice,
+    // which by its own contract never snapshots and leaves that to its caller — this caller).
+    // Revert lever: var snapshot = {schedules: JSON.parse(JSON.stringify(schedulesRef.current))};
+    var snapshot = captureTrees(["clientMemory"]);
     pushUndo(snapshot);
     // v55: a pencil-in must never inherit the previous occupant's recurring/exception
     // flags. When a DIFFERENT name is penciled onto a row (e.g. a new client dropped
@@ -2501,7 +2968,10 @@ export default function TheList() {
       var hasNext = nextIdx<slots.length && !slots[nextIdx].blocked;
       var nextEmpty = hasNext && !slots[nextIdx].name;
       var nextFilled = hasNext && !!slots[nextIdx].name;
-      var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
+      // v102: all three branches below call syncProfilePrice, which writes the saved price onto
+      // the client's card and by contract snapshots nothing itself. Its caller has to, and this
+      // is the caller. Revert lever: var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
+      var snapshot = captureTrees(["clientMemory"]);
       pushUndo(snapshot);
       if (nextEmpty) {
         // Empty slot below: carry this name down and link the two into a group.
@@ -3853,7 +4323,16 @@ export default function TheList() {
     setClientDeleteMsg(""); setClientDeleteConfirm(false);
     // v98: the client-level note rides along with the phone. Revert lever — the pre-v98
     // seed, with no note field: setClientProfile({name,recurWeeks,usualTime,bookings,phone:getClientPhone(name)});
-    setClientProfile({name,recurWeeks,usualTime,bookings,phone:getClientPhone(name),note:getClientNote(name)});
+    // v101 (#4): origPhone — the number as it stands the moment this card opens, frozen.
+    // The twins popup needs it to offer "put it back", and it cannot be looked up later
+    // (see revertPhoneTwin). Nothing reads it but that popup. Revert lever — the v98 seed:
+    // setClientProfile({name,recurWeeks,usualTime,bookings,phone:getClientPhone(name),note:getClientNote(name)});
+    // v102: a fresh undo visit per OPENING of the card. Without this, closing Kyle's card and
+    // reopening it would land back in the visit we already took a phone photograph for, and the
+    // second edit would quietly go uncaptured. There is no matching close hook and there does
+    // not need to be — snapTrees rotates the visit whenever the key changes.
+    beginUndoVisit("client:" + String(name || "").toLowerCase());
+    setClientProfile({name,recurWeeks,usualTime,bookings,phone:getClientPhone(name),origPhone:getClientPhone(name),note:getClientNote(name),origNote:getClientNote(name)});
   };
 
   // #9: optional phone number kept on the client-memory entry so the profile can offer
@@ -3890,8 +4369,18 @@ export default function TheList() {
     }
     return future || past || "";
   };
+  // v102: THE ANSWER TO "WHY CAN'T I UNDO A PHONE NUMBER".
+  // The photograph is taken HERE, on the first keystroke of this field during this visit,
+  // and NOT on the nine after it (snapTrees' fieldKey does that). The number itself is
+  // still written on every keystroke, exactly as before — nothing about the save changed.
+  // The no-op guard below means re-saving the identical number (which revertPhoneTwin can
+  // do) never costs an undo step.
+  // Revert lever — the v101 body, which pushed nothing:
+  // const setClientPhone = function(name, phone) { if(!name) return; setClientMemory(function(mem){ ... }); };
   const setClientPhone = function(name, phone) {
     if (!name) return;
+    if (getClientPhone(name) === phone) return;
+    snapTrees("client:" + String(name).toLowerCase(), "phone", ["clientMemory"], name + "'s phone number");
     setClientMemory(function(mem) {
       var i=mem.findIndex(function(c){ return c.name && c.name.toLowerCase()===name.toLowerCase(); });
       if (i>=0) { var u=[...mem]; u[i]={...u[i],phone:phone}; return u; }
@@ -3932,7 +4421,38 @@ export default function TheList() {
     }
     return out;
   };
-  const checkPhoneTwins = function(name, raw) {
+  // v101 (#4) THE NOTICE BECOMES A QUESTION. v100 saved the number and then TOLD him about
+  // the collision ("saved anyway — nothing was blocked"). Granger wants to be ASKED, and to
+  // be able to back out — while keeping the other cards in front of him and tappable, which
+  // was the good half of v100 and is untouched below.
+  //   Nothing about WHEN this fires changes, and nothing about the save changes: the number
+  // is still written on every keystroke by setClientPhone, unconditionally, before this ever
+  // runs. Backing out is therefore not a "don't save" — it is a targeted PUT-IT-BACK, which
+  // is why prev has to travel with the popup.
+  //   prev is the number that was on the card BEFORE this editing session began — captured
+  // once when the field was opened (phoneModal.origPhone / clientProfile.origPhone), NOT
+  // read live. It cannot be read live: getClientPhone reads clientMemoryRef, which by the
+  // time a keystroke lands already holds the half-typed number, so "the old value" would
+  // come back as the previous KEYSTROKE. Captured-at-open is the only honest answer, and it
+  // is also the one Granger means.
+  //   This does NOT go through the undo engine. That engine only knows about schedules (see
+  // pushUndo/handleUndo — every snapshot is {schedules}, every restore is setSchedules), so
+  // client cards are invisible to it. Making phone edits genuinely undoable is its own job.
+  // Here we simply restore one field to one captured value.
+  const revertPhoneTwin = function() {
+    if (!phoneTwins) return;
+    var nm = phoneTwins.editing;
+    var pv = phoneTwins.prev || "";
+    var d = String(phoneTwins.phone || "").replace(/[^0-9]/g, "");
+    setClientPhone(nm, pv);
+    // Put the visible field back too — both doors, whichever one he came in through.
+    setPhoneModal(function(p){ return (p && p.name === nm) ? {...p, phone:pv} : p; });
+    setClientProfile(function(p){ return (p && p.name === nm) ? {...p, phone:pv} : p; });
+    // Un-remember this name+number so that if he types it again, he gets asked again.
+    if (nm) { phoneTwinSeenRef.current[String(nm).toLowerCase() + "|" + d] = false; }
+    setPhoneTwins(null);
+  };
+  const checkPhoneTwins = function(name, raw, prev) {
     if (!name) return;
     var d = String(raw || "").replace(/[^0-9]/g, "");
     var key = String(name).toLowerCase() + "|" + d;
@@ -3940,7 +4460,9 @@ export default function TheList() {
     var others = findPhoneTwins(name, raw);
     if (!others.length) return;
     phoneTwinSeenRef.current[key] = true;
-    setPhoneTwins({editing:name, phone:raw, others:others});
+    // Revert lever — the pre-v101 payload, with no way back:
+    // setPhoneTwins({editing:name, phone:raw, others:others});
+    setPhoneTwins({editing:name, phone:raw, others:others, prev:(prev||"")});
   };
 
   // v98 THE NOTE NOW BELONGS TO THE PERSON, NOT THE APPOINTMENT. Until now the only
@@ -3960,8 +4482,12 @@ export default function TheList() {
     var e=clientMemoryRef.current.find(function(c){ return c.name && c.name.toLowerCase()===lower; });
     return (e && e.note) ? e.note : "";
   };
+  // v102: same treatment as the phone field above — the note also saves on every keystroke,
+  // so the photograph is taken once, on the first character typed into it during this visit.
   const setClientNote = function(name, note) {
     if (!name) return;
+    if (getClientNote(name) === note) return;
+    snapTrees("client:" + String(name).toLowerCase(), "note", ["clientMemory"], name + "'s note");
     setClientMemory(function(mem) {
       var i=mem.findIndex(function(c){ return c.name && c.name.toLowerCase()===name.toLowerCase(); });
       if (i>=0) { var u=[...mem]; u[i]={...u[i],note:note}; return u; }
@@ -3974,15 +4500,22 @@ export default function TheList() {
   // the recurring engine, so every recurring date, phone number, and price stays put.
   // Identity here is the (lower-cased) name, so we match case-insensitively. If the
   // new name already belongs to another saved client, we fold the two together rather
-  // than leave a duplicate. Not added to the undo stack on purpose: undo only restores
-  // schedules, and a half-restore (slots reverted but the saved-client list not) would
-  // be worse than no undo. A rename is a deliberate, explicit action.
+  // than leave a duplicate.
+  //
+  // v102: THIS IS NOW UNDOABLE. It wasn't before, and the reason it wasn't is worth keeping
+  // on the record, because it was a good reason that has simply stopped being true. The old
+  // comment read: "Not added to the undo stack on purpose: undo only restores schedules, and
+  // a half-restore (slots reverted but the saved-client list not) would be worse than no undo."
+  // Exactly so. But the snapshot now carries the saved-client list, so the half-restore that
+  // made undo unsafe here is no longer the only thing on offer. A rename is still a deliberate,
+  // explicit act — it just isn't an irreversible one any more.
   const renameClient = function(oldName, newName) {
     var nn = (newName||"").trim();
     if (!nn || !oldName) return;
     if (nn === oldName) return;
     var oldLower = oldName.toLowerCase();
     var newLower = nn.toLowerCase();
+    pushUndo(captureTrees(["clientMemory"]));
     setSchedules(function(prev){
       var next = {};
       Object.keys(prev).forEach(function(dk){
@@ -4034,7 +4567,41 @@ export default function TheList() {
   var acctFor = function(dateKey){ var r=accounting[dateKey]; return r?r:{cash:0,venmo:0,applepay:0,square:0,services:0,hours:0}; };
   var acctTakehome = function(r){ return acctNum(r.cash)+acctNum(r.venmo)+acctNum(r.applepay)+acctNum(r.square); };
   var acctHasData = function(dateKey){ var r=accounting[dateKey]; if(!r) return false; return acctTakehome(r)>0||acctNum(r.services)>0||acctNum(r.hours)>0; };
+  // v102: THE MONEY IS UNDOABLE. One piece of luck made this easy: typing in the accounting
+  // sheet does NOT save on every keystroke (unlike the phone field). onFieldChange only fills a
+  // local draft, acctAdd; the real write lands on BLUR and on close. So the money was already
+  // atomic per field and needed no special coalescing — one blur, one undo step.
+  //   Every accounting write in the app funnels through here (acctSetField on blur, commitAll on
+  // close, acctCommitDraft on arrow-key paging), so this one guard covers all three doors.
+  //   The no-op guard matters: blur fires whether or not you changed anything, and tabbing across
+  // six untouched money boxes must not cost six undo steps or throw six banners. The write itself
+  // stays inside its functional updater, untouched.
   var acctCommit = function(dateKey, rec){
+    var prevAcctMap = accountingRef.current || {};
+    var prevRecAC = prevAcctMap[dateKey] ? prevAcctMap[dateKey] : null;
+    var emptyAC = !acctNum(rec.cash)&&!acctNum(rec.venmo)&&!acctNum(rec.applepay)&&!acctNum(rec.square)&&!acctNum(rec.services)&&!acctNum(rec.hours);
+    var nextRecAC = emptyAC ? null : {cash:acctNum(rec.cash),venmo:acctNum(rec.venmo),applepay:acctNum(rec.applepay),square:acctNum(rec.square),services:acctNum(rec.services),hours:acctNum(rec.hours)};
+    var movedAC = [];
+    var fieldsAC = ["cash","venmo","applepay","square","services","hours"];
+    for (var fi=0; fi<fieldsAC.length; fi++) {
+      var fk = fieldsAC[fi];
+      var beforeAC = prevRecAC ? acctNum(prevRecAC[fk]) : 0;
+      var afterAC = nextRecAC ? acctNum(nextRecAC[fk]) : 0;
+      if (beforeAC !== afterAC) movedAC.push(fk);
+    }
+    if (movedAC.length) {
+      snapTrees("acct:"+dateKey, "money:"+movedAC.join(","), ["accounting"], "the money on "+friendlyDate(dateKey));
+      // v103: the same banner as v102, now written down as it goes. prevRecAC and nextRecAC were
+      // already computed a few lines up (the no-op guard needed them), so the log entry costs
+      // nothing to fill: it carries the day's whole record before and after — six numbers each —
+      // which is what per-row undo needs to put the day back, and what its conflict check compares
+      // against to find out whether the books have moved since.
+      addSideEntry({type:"money", bannerType:"edited", name:null, time:null, dateKey:dateKey,
+        msg:"Money saved — "+friendlyDate(dateKey),
+        fields:movedAC.slice(),
+        before:prevRecAC?{...prevRecAC}:null,
+        after:nextRecAC?{...nextRecAC}:null});
+    }
     setAccounting(function(prev){
       var empty = !acctNum(rec.cash)&&!acctNum(rec.venmo)&&!acctNum(rec.applepay)&&!acctNum(rec.square)&&!acctNum(rec.services)&&!acctNum(rec.hours);
       var out = {...prev};
@@ -4269,7 +4836,19 @@ export default function TheList() {
   var dayNoteRepeating = function(dk){ return resolveDayNote(dk).repeating; };
   var dayNoteRepeatN = function(dk){ return resolveDayNote(dk).rpt; };
   // Writers.
+  // v102: every one of these now photographs dayNotes before it writes. The write itself is
+  // UNTOUCHED — each still goes through its original functional setDayNotes updater, so two
+  // writers firing in the same tick still compose exactly as they did. The snapshot is taken
+  // OUTSIDE the updater, off dayNotesRef, because doing work inside a state updater is how you
+  // get it run twice.
+  //   They all share one visit key — the day being edited — so a Save that trips two of these
+  // is still ONE tap of the Undo button. dnDeleteRule is handed only a ruleKey, so it borrows
+  // the open modal's day.
+  //   The standby list lives inside dayNotes too ("@wl:" keys), so it rides along for free.
+  var dnVisitKey = function(dk){ return "daynote:" + (dk || (noteModal && noteModal.dayKey) || ""); };
+  var dnLabel = function(dk){ var d = dk || (noteModal && noteModal.dayKey) || ""; return d ? ("the notes on " + friendlyDate(d)) : "that note"; };
   var dnSetRepeat = function(dk, text, kind, nWk){
+    if ((text||"").trim()) snapTrees(dnVisitKey(dk), "rule:"+dk, ["dayNotes"], dnLabel(dk));
     setDayNotes(function(prev){
       var n={...prev}; var t=(text||"").trim();
       if(!t){ return n; }
@@ -4279,6 +4858,7 @@ export default function TheList() {
     });
   };
   var dnEditRule = function(ruleKey, text, kind, nWk){
+    if ((dayNotesRef.current||{})[ruleKey]) snapTrees(dnVisitKey(null), "editrule:"+ruleKey, ["dayNotes"], dnLabel(null));
     setDayNotes(function(prev){
       var n={...prev}; var t=(text||"").trim(); var old=prev[ruleKey];
       if(!old){ return n; }
@@ -4289,9 +4869,11 @@ export default function TheList() {
     });
   };
   var dnDeleteRule = function(ruleKey){
+    if ((dayNotesRef.current||{})[ruleKey]) snapTrees(dnVisitKey(null), "delrule:"+ruleKey, ["dayNotes"], dnLabel(null));
     setDayNotes(function(prev){ var n={...prev}; delete n[ruleKey]; return n; });
   };
   var dnWriteToday = function(dk, text, kind, hasGovRepeat){
+    snapTrees(dnVisitKey(dk), "today:"+dk, ["dayNotes"], dnLabel(dk));
     setDayNotes(function(prev){
       var n={...prev}; var t=(text||"").trim();
       if(t){ n[dk] = kind ? {text:t,kind:kind} : {text:t}; }
@@ -4345,6 +4927,7 @@ export default function TheList() {
   // Suppress a single recurring occurrence on this date only (bucket rules only). Writes
   // the id into "@dnskip:"+dk and drops the row from the open modal immediately.
   var dnSkipOccurrence = function(dk, ruleId){
+    snapTrees(dnVisitKey(dk), "skip:"+dk+":"+ruleId, ["dayNotes"], dnLabel(dk));
     setDayNotes(function(prev){
       var n={...prev}; var key=DNSKIP_PREFIX+dk;
       var cur=(n[key] && n[key].length)? n[key].slice() : [];
@@ -4498,12 +5081,59 @@ export default function TheList() {
   // var dnCommitLines = function(){ var nm=noteModal; if(!nm||!nm.isDay) return;
   //   var dk=nm.dayKey; var lns=noteLines; var orig=noteOrigLines;
   //   setDayNotes(function(prev){ return dnBuildLinesMap(prev, dk, lns, orig); }); dnCloseNoteModal(); };
+  // v103: which keys differ between two dayNotes maps. Pure, read-only, used only to fill a log
+  // entry's before/after — nothing about the write path consults it.
+  var dnChangedKeys = function(a, b) {
+    var seenK = {}; var outK = [];
+    var allK = Object.keys(a || {}).concat(Object.keys(b || {}));
+    for (var iK=0; iK<allK.length; iK++) {
+      var kK = allK[iK];
+      if (seenK[kK]) continue;
+      seenK[kK] = true;
+      var vaK = (a && a[kK] !== undefined) ? a[kK] : null;
+      var vbK = (b && b[kK] !== undefined) ? b[kK] : null;
+      if (JSON.stringify(vaK) !== JSON.stringify(vbK)) outK.push(kK);
+    }
+    return outK;
+  };
   var dnCommitLines = function(scopeArg){
     var nm=noteModal; if(!nm||!nm.isDay) return;
     var ws=(scopeArg==="all"||scopeArg==="today")?scopeArg:null;
     var dk=nm.dayKey; var lns=noteLines; var orig=noteOrigLines;
     if(!ws && dnWordChanges(lns,orig).length>0){ setNoteScopeAsk("lines"); return; }
+    // v102: Save is undoable, and it banners — but ONLY if it changed something. Since v91 a
+    // backdrop tap IS a save, so merely opening a day's notes to LOOK at them runs through here.
+    // Without this guard, glancing at a note would cost an undo step and flash a banner claiming
+    // you'd saved something. So we build the map dnBuildLinesMap WOULD produce, off the live ref,
+    // purely to ask "did anything move?" — and only then take the photograph.
+    //   dnBuildLinesMap is pure, so building it twice is free of consequence. The real write below
+    // is byte-for-byte the v101 write, still inside its functional updater. Nothing about how the
+    // map is stored changed.
+    var prevMapDN = dayNotesRef.current || {};
+    var probeDN = dnBuildLinesMap(prevMapDN, dk, lns, orig, ws);
+    var changedDN = JSON.stringify(prevMapDN) !== JSON.stringify(probeDN);
+    if (changedDN) snapTrees(dnVisitKey(dk), "lines:"+dk, ["dayNotes"], dnLabel(dk));
     setDayNotes(function(prev){ return dnBuildLinesMap(prev, dk, lns, orig, ws); });
+    // v103: log it. NOT the whole dayNotes tree — only the keys that actually moved, before and
+    // after. Two reasons. It has to be small: history holds 200 entries and rides to Firebase in
+    // every write, so a full tree per note-save would bloat the document for nothing. And it has
+    // to be exact: editing a REPEATING line rewrites that line's rule, whose key is the day the
+    // repeat STARTED on — not the day being edited. A per-day guess would have missed it. The diff
+    // finds it, whatever day it lives under. probeDN is the map the write above is about to
+    // produce (dnBuildLinesMap is pure — it was already built once for the no-op guard), so the
+    // "after" recorded here is exactly the "after" that lands.
+    if (changedDN) {
+      var kchgDN = dnChangedKeys(prevMapDN, probeDN);
+      var befDN = {}; var aftDN = {};
+      for (var zDN=0; zDN<kchgDN.length; zDN++) {
+        var kzDN = kchgDN[zDN];
+        befDN[kzDN] = (prevMapDN[kzDN]===undefined) ? null : JSON.parse(JSON.stringify(prevMapDN[kzDN]));
+        aftDN[kzDN] = (probeDN[kzDN]===undefined) ? null : JSON.parse(JSON.stringify(probeDN[kzDN]));
+      }
+      addSideEntry({type:"day_notes", bannerType:"edited", name:null, time:null, dateKey:dk,
+        msg:"Notes saved — "+friendlyDate(dk),
+        keys:kchgDN, before:befDN, after:aftDN});
+    }
     dnCloseNoteModal();
   };
   // --- v83 per-day STANDBY / cancellation waitlist -----------------------------
@@ -4520,16 +5150,37 @@ export default function TheList() {
     var rec = dayNotes[WL_PREFIX+dk];
     return (rec && rec.length) ? rec : [];
   };
+  // v102: the standby list is stored inside dayNotes ("@wl:" keys), so making it undoable is
+  // the same photograph the notes take. Each add/remove is its own field within the day's visit:
+  // Cmd+Z takes back one name, the Undo button takes back everything you did to that day's list.
   var wlAdd = function(dk, name){
     var t = (name||"").trim(); if(!t) return;
+    snapTrees(dnVisitKey(dk), "wladd:"+dk+":"+t.toLowerCase(), ["dayNotes"], "the standby list for "+friendlyDate(dk));
+    // v103: the id is now minted OUT HERE instead of inside the updater. It has to be: the log
+    // entry needs to name the exact row it added, so that undoing that row ten changes later takes
+    // out THAT name and not another one of the same name added since. The updater below is
+    // otherwise the v102 updater, still functional, still composing the same way — the only change
+    // is that the id it stamps was decided one line earlier.
+    var newIdWL = Date.now()+Math.random();
+    addSideEntry({type:"standby_add", bannerType:"added", name:t, time:null, dateKey:dk,
+      msg:"Added "+t+" to standby — "+friendlyDate(dk), entryId:newIdWL});
     setDayNotes(function(prev){
       var n={...prev}; var key=WL_PREFIX+dk;
       var cur = (n[key] && n[key].length) ? n[key].slice() : [];
-      cur.push({id:Date.now()+Math.random(), name:t});
+      cur.push({id:newIdWL, name:t});
       n[key]=cur; return n;
     });
   };
   var wlRemove = function(dk, id){
+    var goneWL = "";
+    var itemWL = null; // v103: the whole row, not just the name — undo has to put back the id too.
+    var curWL = (dayNotesRef.current || {})[WL_PREFIX+dk];
+    if (curWL && curWL.length) {
+      for (var wi=0; wi<curWL.length; wi++) { if (curWL[wi] && curWL[wi].id===id) { goneWL = curWL[wi].name || ""; itemWL = {...curWL[wi]}; break; } }
+    }
+    snapTrees(dnVisitKey(dk), "wldel:"+dk+":"+id, ["dayNotes"], "the standby list for "+friendlyDate(dk));
+    if (goneWL) addSideEntry({type:"standby_removed", bannerType:"removed", name:goneWL, time:null, dateKey:dk,
+      msg:"Removed "+goneWL+" from standby — "+friendlyDate(dk), item:itemWL});
     setDayNotes(function(prev){
       var n={...prev}; var key=WL_PREFIX+dk;
       var cur = (n[key] && n[key].length) ? n[key] : [];
@@ -6411,6 +7062,26 @@ export default function TheList() {
     for (ai=0; ai<dsA.length; ai++) { if (dsA[ai].name && dsA[ai].name.toLowerCase()===lnA && !dsA[ai].blocked) return dsA[ai].time; }
     return null;
   })();
+  // v101 (#1) ONE FACT, ONE WORDING. Three banners in this modal all report the same
+  // thing — his next one is already on the books — and all three said it differently:
+  // "Already booked for {date}" (non-recurring, with a Go there BUTTON and no time at
+  // all), "Locked in — {time}, {date} (not his usual)" (recurring, moved), and
+  // "Already booked — {time}, {date}" (recurring, on his usual date). Granger picked the
+  // third. All three now read "Already booked —" and all three are tap-to-go.
+  // DISPLAY ONLY. Not one of the three conditions that decides WHICH banner shows is
+  // touched, nor where any of them jumps to. The only new lookup is the one below: the
+  // non-recurring banner never had a time to print, so it now finds one the same way
+  // adjustedNextTime does — earliest non-blocked row bearing that name on that date —
+  // and falls back to the old date-only wording if the row can't be found.
+  const nonRecurBookedTime = (function(){
+    if (!checkoffModal || !checkoffModal.notRecurring) return null;
+    if (!checkoffModal.slot || !checkoffModal.slot.name) return null;
+    var abk = checkoffModal.alreadyBookedKey; if (!abk) return null;
+    var dsB = schedulesRef.current[abk]; if (!dsB) return null;
+    var lnB = checkoffModal.slot.name.toLowerCase(); var bj;
+    for (bj=0; bj<dsB.length; bj++) { if (dsB[bj].name && dsB[bj].name.toLowerCase()===lnB && !dsB[bj].blocked) return dsB[bj].time; }
+    return null;
+  })();
 
   const renderCheckoffCalendar = function() {
     if (!checkoffModal||!checkoffCalMonth) return null;
@@ -6562,7 +7233,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v100</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v103</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -6730,8 +7401,18 @@ export default function TheList() {
             <div style={{fontSize:"16px",color:"#1a1a1a",marginBottom:"4px"}}>{phoneModal.name}</div>
             <div style={{fontSize:"12px",color:"#999",marginBottom:"14px"}}>Add a mobile number to text them. It's saved to their profile.</div>
             <input autoFocus type="tel" inputMode="tel" autoComplete="off" value={phoneModal.phone||""} placeholder="Phone number"
-              onChange={function(e){ var v=e.target.value; setPhoneModal(function(p){ return p?{...p,phone:v}:p; }); setClientPhone(phoneModal.name, v); /* v100 (#1): the save above is unchanged and unconditional — this only LOOKS. */ checkPhoneTwins(phoneModal.name, v); }}
+              onChange={function(e){ var v=e.target.value; setPhoneModal(function(p){ return p?{...p,phone:v}:p; }); setClientPhone(phoneModal.name, v); /* v100 (#1): the save above is unchanged and unconditional — this only LOOKS. */ checkPhoneTwins(phoneModal.name, v, phoneModal.origPhone||""); /* v101 (#4): the number as it was when this prompt opened, so the popup can offer to put it back. */ }}
               onKeyDown={function(e){ if(e.key==="Escape") setPhoneModal(null); }}
+              /* v102: the banner waits for BLUR. The snapshot is taken on the first keystroke (see
+                 setClientPhone), but announcing "saved" while he is still mid-number would be a lie
+                 told nine times. Blur is the moment he is done. Compared against origPhone — the
+                 number as it stood when this prompt opened — so typing a number and typing it back
+                 out again says nothing. */
+              /* v103: and it is written down. before/after are the number as it stood when this
+                 prompt OPENED and the number he left in it — the same two values v102 already
+                 compared to decide whether to banner at all, so nothing new is being measured
+                 here, it is only being kept. */
+              onBlur={function(){ var pm=phoneModal; if(!pm) return; var nowP=pm.phone||""; var wasP=pm.origPhone||""; if(nowP===wasP) return; addSideEntry({type:"phone_set", bannerType:(nowP?"edited":"removed"), name:pm.name, time:null, dateKey:null, msg:(nowP?("Number saved for "+pm.name):("Number cleared for "+pm.name)), before:wasP, after:nowP}); }}
               style={{...inputStyle,width:"100%",boxSizing:"border-box",marginBottom:"14px",fontSize:"15px"}} />
             <div style={{display:"flex",gap:"8px"}}>
               {(phoneModal.phone||"").replace(/[^0-9+]/g,"")
@@ -6757,8 +7438,13 @@ export default function TheList() {
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1400,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px"}} onClick={function(){ setPhoneTwins(null); }}>
           <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"24px",width:"min(340px,92vw)",maxHeight:"72vh",overflowY:"auto",boxSizing:"border-box"}} onClick={function(e){ e.stopPropagation(); }}>
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#aaa",marginBottom:"8px"}}>Same number</div>
-            <div style={{fontSize:"15px",color:"#1a1a1a",marginBottom:"4px",lineHeight:1.4}}>{"That number is already on "+(phoneTwins.others.length===1?"another card":(phoneTwins.others.length+" other cards"))+"."}</div>
-            <div style={{fontSize:"12px",color:"#999",marginBottom:"16px",lineHeight:1.4}}>{"Saved to "+phoneTwins.editing+" anyway — nothing was blocked. Open a card below if you want to sort it out."}</div>
+            {/* v101 (#4): was a NOTICE ("Saved anyway — nothing was blocked"). Now it asks.
+                The cards below are unchanged — still listed, still tappable straight into the
+                other man's profile, which is the half Granger liked. Revert lever — the v100 copy:
+                <div style={...}>{"That number is already on "+(...)+"."}</div>
+                <div style={...}>{"Saved to "+phoneTwins.editing+" anyway — nothing was blocked. Open a card below if you want to sort it out."}</div> */}
+            <div style={{fontSize:"15px",color:"#1a1a1a",marginBottom:"4px",lineHeight:1.4}}>{"That number is already on "+(phoneTwins.others.length===1?"another card":(phoneTwins.others.length+" other cards"))+". Keep it on "+phoneTwins.editing+" too?"}</div>
+            <div style={{fontSize:"12px",color:"#999",marginBottom:"16px",lineHeight:1.4}}>{phoneTwins.prev?("Say no and "+phoneTwins.editing+" goes back to "+phoneTwins.prev+". Or open a card below to sort it out."):("Say no and "+phoneTwins.editing+"'s number goes back to blank. Or open a card below to sort it out.")}</div>
             {phoneTwins.others.map(function(nm){
               return (
                 <button key={nm} onClick={function(){ setPhoneTwins(null); setPhoneModal(null); openClientProfile(nm); }} style={{display:"block",width:"100%",boxSizing:"border-box",textAlign:"left",padding:"11px 12px",marginBottom:"8px",background:"#fcfcfb",border:"1px solid #d8d8d6",borderRadius:"8px",color:"#1a1a1a",cursor:"pointer",fontFamily:"inherit",fontSize:"14px"}}>
@@ -6767,7 +7453,13 @@ export default function TheList() {
                 </button>
               );
             })}
-            <button onClick={function(){ setPhoneTwins(null); }} style={{width:"100%",boxSizing:"border-box",padding:"10px",marginTop:"6px",background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Leave them both</button>
+            {/* v101 (#4): Revert lever — the v100 single dismiss, which was the only way out
+                because there was nothing to decide:
+                <button onClick={function(){ setPhoneTwins(null); }} style={...}>Leave them both</button> */}
+            <div style={{display:"flex",gap:"8px",marginTop:"6px"}}>
+              <button onClick={function(){ revertPhoneTwin(); }} style={{flex:"0 0 auto",boxSizing:"border-box",padding:"10px 14px",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>{phoneTwins.prev?"No — put it back":"No — clear it"}</button>
+              <button onClick={function(){ setPhoneTwins(null); }} style={{flex:1,boxSizing:"border-box",padding:"10px",background:"#34434c",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Keep it on both</button>
+            </div>
           </div>
         </div>
       )}
@@ -7062,7 +7754,8 @@ export default function TheList() {
             <button onClick={function(){ jumpToDateForBooking(toDateKey(addWeeks(new Date(),2)), clientProfile); setClientProfile(null); }} style={{padding:"10px",background:"#c9a96e",border:"none",borderRadius:"8px",color:"#0f0f0f",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",marginBottom:"14px"}}>Book next appointment</button>
             <div style={{display:"flex",gap:"6px",alignItems:"center",marginBottom:"14px"}}>
               <input type="tel" inputMode="tel" autoComplete="off" value={clientProfile.phone||""} placeholder="Phone number"
-                onChange={function(e){ var v=e.target.value; setClientProfile(function(p){ return p?{...p,phone:v}:p; }); setClientPhone(clientProfile.name, v); /* v100 (#1): the save above is unchanged and unconditional — this only LOOKS. */ checkPhoneTwins(clientProfile.name, v); }}
+                onBlur={function(){ var cp=clientProfile; if(!cp) return; var nowP=cp.phone||""; var wasP=cp.origPhone||""; if(nowP===wasP) return; addSideEntry({type:"phone_set", bannerType:(nowP?"edited":"removed"), name:cp.name, time:null, dateKey:null, msg:(nowP?("Number saved for "+cp.name):("Number cleared for "+cp.name)), before:wasP, after:nowP}); }} /* v102: banner on blur, not per keystroke. v103: and logged, with the open-time number as its before. */
+                onChange={function(e){ var v=e.target.value; setClientProfile(function(p){ return p?{...p,phone:v}:p; }); setClientPhone(clientProfile.name, v); /* v100 (#1): the save above is unchanged and unconditional — this only LOOKS. */ checkPhoneTwins(clientProfile.name, v, clientProfile.origPhone||""); /* v101 (#4): the number as it was when this card opened, so the popup can offer to put it back. */ }}
                 style={{flex:1,padding:"8px 10px",border:"1px solid #d8d8d6",borderRadius:"8px",fontFamily:"inherit",fontSize:"13px",color:"#1a1a1a",background:"#fcfcfb",minWidth:0,userSelect:"text",WebkitUserSelect:"text"}} />
               {(clientProfile.phone||"").replace(/[^0-9+]/g,"")?<button onClick={function(){ window.location.href="sms:"+(clientProfile.phone||"").replace(/[^0-9+]/g,""); }} style={{padding:"8px 12px",background:"#2a6a2a",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",flexShrink:0}}>Message</button>:null}
               {(clientProfile.phone||"").replace(/[^0-9+]/g,"")?<button onClick={function(){ window.location.href="tel:"+(clientProfile.phone||"").replace(/[^0-9+]/g,""); }} style={{padding:"8px 12px",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"8px",color:"#555",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",flexShrink:0}}>Call</button>:null}
@@ -7077,6 +7770,7 @@ export default function TheList() {
               <div style={{fontSize:"10px",letterSpacing:"0.12em",textTransform:"uppercase",color:"#a07830",marginBottom:"6px"}}>{"Note"}</div>
               <textarea value={clientProfile.note||""} placeholder={"Anything worth remembering about "+clientProfile.name+"…"}
                 onChange={function(e){ var v=e.target.value; setClientProfile(function(p){ return p?{...p,note:v}:p; }); setClientNote(clientProfile.name, v); }}
+                onBlur={function(){ var cp=clientProfile; if(!cp) return; var nowN=cp.note||""; var wasN=cp.origNote||""; if(nowN===wasN) return; addSideEntry({type:"client_note", bannerType:(nowN?"edited":"removed"), name:cp.name, time:null, dateKey:null, msg:(nowN?("Note saved for "+cp.name):("Note cleared for "+cp.name)), before:wasN, after:nowN}); }} /* v102: banner on blur, not per keystroke. v103: and logged, with the open-time note as its before. */
                 rows={3}
                 style={{width:"100%",boxSizing:"border-box",padding:"9px 10px",border:"1px solid #d8d8d6",borderRadius:"8px",fontFamily:"Georgia,serif",fontSize:"13px",lineHeight:1.45,color:"#1a1a1a",background:"#fcfcfb",resize:"vertical",outline:"none",userSelect:"text",WebkitUserSelect:"text"}} />
             </div>
@@ -7116,15 +7810,42 @@ export default function TheList() {
                   <div style={{flex:1,fontSize:"12px",color:"#666"}}>Remove {clientProfile.name} from your client list?</div>
                   <button onClick={function(){
                     var nm=clientProfile.name;
+                    // v102: undoable. This snapshot is deliberately NOT part of the card's visit —
+                    // pushUndo direct, no visitId — so it is always its own single undo step and can
+                    // never get swallowed into an earlier phone edit on the same card.
+                    // v103: the log entry carries the CARD, not just the name — the number, the
+                    // price, the note, all of it. Undoing from the log ten changes later has no
+                    // stack to fall back on, so if the card isn't in the entry it isn't anywhere.
+                    var cardCD = null; var memCD = clientMemoryRef.current || [];
+                    for (var q1=0; q1<memCD.length; q1++) { var rcCD = memCD[q1]; if (rcCD && rcCD.name && rcCD.name.toLowerCase()===nm.toLowerCase()) { cardCD = {...rcCD}; break; } }
+                    pushUndo(captureTrees(["clientMemory"]));
                     setClientMemory(function(mem){ return mem.filter(function(c){ return !(c.name && c.name.toLowerCase()===nm.toLowerCase()); }); });
                     setClientDeleteConfirm(false); setClientProfile(null);
-                    showBanner({type:"removed",msg:"Removed "+nm+" from your client list",time:null,dateKey:null});
+                    addSideEntry({type:"client_deleted", bannerType:"removed", name:nm, time:null, dateKey:null, msg:"Removed "+nm+" from your client list", card:cardCD});
                   }} style={{padding:"7px 12px",background:"#c0392b",border:"none",borderRadius:"8px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",flexShrink:0}}>Remove</button>
                   <button onClick={function(){ setClientDeleteConfirm(false); }} style={{padding:"7px 12px",background:"#f0f0ee",border:"1px solid #d8d8d6",borderRadius:"8px",color:"#777",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",flexShrink:0}}>Keep</button>
                 </div>
               ) : (
                 <button onClick={function(){
-                  if (clientProfile.bookings && clientProfile.bookings.length>0) {
+                  // v101 (#3) A CHECKED-OFF APPOINTMENT IS NOT AN UPCOMING ONE. openClientProfile
+                  // builds .bookings as "every row bearing this name dated TODAY OR LATER" — it
+                  // records slot.done on each one but never filtered on it, and this guard only
+                  // ever asked "are there any bookings at all?". So a man you cut at 12:33 this
+                  // afternoon and ticked off was still, at 4pm, an "upcoming appointment" that
+                  // refused to let his card be deleted, with nothing left to cancel to clear it.
+                  // A booking blocks deletion if it is STILL PENDING (not done) or if it sits on
+                  // a FUTURE date — the only thing forgiven is a row on today's date that is
+                  // already ticked off. A future row somehow marked done still blocks: it is on
+                  // the books, and this is a guard, so it errs toward keeping the card.
+                  // Read-only — .bookings itself is untouched, so the profile's booking list,
+                  // usualTime and recurWeeks all render exactly as before. Only the guard reads
+                  // the list differently.
+                  var tdk = toDateKey(new Date());
+                  var blockers = (clientProfile.bookings||[]).filter(function(b){ return (!b.done) || (b.dateKey > tdk); });
+                  // Revert lever — the pre-v101 guard, which counted every booking dated today
+                  // or later, done or not:
+                  // var blockers = (clientProfile.bookings||[]);
+                  if (blockers.length>0) {
                     setClientDeleteMsg("Can't delete "+clientProfile.name+" yet — they still have upcoming appointments. Cancel those first, then delete.");
                     setClientDeleteConfirm(false);
                   } else {
@@ -7163,10 +7884,19 @@ export default function TheList() {
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#4a8a5a",marginBottom:"4px"}}>Done</div>
             <div onClick={function(){ var nm=checkoffModal.slot.name; setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null);setCheckoffRecur(null);setRecurPickerOpen(false); openClientProfile(nm); }} title="View profile" style={{fontSize:"22px",marginBottom:"2px",paddingRight:"32px",cursor:"pointer",textDecoration:"underline",textDecorationColor:"#dcd2bd",textUnderlineOffset:"3px"}}>{checkoffModal.slot.name}</div>
             <div style={{fontSize:"12px",color:"#999",marginBottom:"18px"}}>{checkoffModal.slot.time} · {friendlyDate(checkoffModal.dateKey)}</div>
+            {/* v101 (#1): same banner, same trigger, same destination — now worded and shaped
+                like the other two (tap the whole card, no separate button) and carrying the
+                time. Revert lever — the pre-v101 "Already booked for {date}" + Go there button:
+                {checkoffModal.alreadyBookedKey&&checkoffModal.notRecurring&&(
+                  <div style={{background:"#eef3f9",border:"1px solid #b8cce0",borderRadius:"8px",padding:"10px 14px",marginBottom:"16px",fontSize:"13px",color:"#34434c",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px"}}>
+                    <span>Already booked for {friendlyDateLong(checkoffModal.alreadyBookedKey)}</span>
+                    <button onClick={...jumpToDate(k)...}>Go there</button>
+                  </div>
+                )} */}
             {checkoffModal.alreadyBookedKey&&checkoffModal.notRecurring&&(
-              <div style={{background:"#eef3f9",border:"1px solid #b8cce0",borderRadius:"8px",padding:"10px 14px",marginBottom:"16px",fontSize:"13px",color:"#34434c",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px"}}>
-                <span>Already booked for {friendlyDateLong(checkoffModal.alreadyBookedKey)}</span>
-                <button onClick={function(){ var k=checkoffModal.alreadyBookedKey; setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null); jumpToDate(k); }} style={{flexShrink:0,background:"#34434c",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",padding:"5px 11px",fontFamily:"inherit",fontSize:"12px"}}>Go there</button>
+              <div onClick={function(){ var k=checkoffModal.alreadyBookedKey; setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null);setCheckoffRecur(null);setRecurPickerOpen(false); jumpToDate(k); }} style={{background:"#eef3f9",border:"1px solid #b8cce0",borderRadius:"8px",padding:"12px 16px",marginBottom:"16px",fontSize:"13px",color:"#34434c",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px"}}>
+                <span>{"\u2713 Already booked \u2014 "}{nonRecurBookedTime?friendlyDateTime(nonRecurBookedTime,checkoffModal.alreadyBookedKey):friendlyDateLong(checkoffModal.alreadyBookedKey)}</span>
+                <span style={{fontSize:"12px",color:"#5a7590",flexShrink:0}}>{"Tap to go \u203a"}</span>
               </div>
             )}
             {checkoffModal.notRecurring ? (
@@ -7208,7 +7938,7 @@ export default function TheList() {
                     date, so the three cards below (which only ever look at the usual date) are
                     suppressed entirely — per Granger, no offer to book the usual date, just the
                     truth about where he is actually locked in. Tap to go there. */}
-                {adjustedNextKey&&<div onClick={function(){ var k=adjustedNextKey; setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null);setCheckoffRecur(null);setRecurPickerOpen(false); jumpToDate(k); }} style={{background:"#eef3f9",border:"1px solid #b8cce0",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#34434c",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px"}}><span>{"\u2713 Locked in \u2014 "}{adjustedNextTime?friendlyDateTime(adjustedNextTime,adjustedNextKey):friendlyDateLong(adjustedNextKey)} <span style={{color:"#7a8fa4"}}>(not his usual)</span></span><span style={{fontSize:"12px",color:"#5a7590",flexShrink:0}}>{"Tap to go \u203a"}</span></div>}
+                {adjustedNextKey&&<div onClick={function(){ var k=adjustedNextKey; setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null);setCheckoffRecur(null);setRecurPickerOpen(false); jumpToDate(k); }} style={{background:"#eef3f9",border:"1px solid #b8cce0",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#34434c",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px"}}><span>{/* v101 (#1): was "\u2713 Locked in \u2014 ". Wording only — the "(not his usual)" tag stays, it is the whole point of this banner. */}{"\u2713 Already booked \u2014 "}{adjustedNextTime?friendlyDateTime(adjustedNextTime,adjustedNextKey):friendlyDateLong(adjustedNextKey)} <span style={{color:"#7a8fa4"}}>(not his usual)</span></span><span style={{fontSize:"12px",color:"#5a7590",flexShrink:0}}>{"Tap to go \u203a"}</span></div>}
                 {!adjustedNextKey&&effectiveNextDate&&!nudgeConflict&&alreadyBookedNextDate&&<div onClick={function(){ var k=effectiveNextDate; setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null);setCheckoffRecur(null);setRecurPickerOpen(false); jumpToDate(k); }} style={{background:"#eef3f9",border:"1px solid #b8cce0",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#34434c",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px"}}><span>{"✓"} Already booked — {friendlyDateTime(bookedTimeOnNextDate,effectiveNextDate)}</span><span style={{fontSize:"12px",color:"#5a7590",flexShrink:0}}>{"Tap to go ›"}</span></div>}
                 {!adjustedNextKey&&effectiveNextDate&&!nudgeConflict&&!alreadyBookedNextDate&&<div onClick={function(){ confirmNextBooking(effectiveNextDate); }} style={{background:"#f0fff0",border:"1px solid #a0d0a0",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#2a7a2a",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px"}}><span>{friendlyDateTime(placementTime(checkoffModal.slot),effectiveNextDate)} is open</span><span style={{fontSize:"12px",color:"#2a7a2a",flexShrink:0}}>{"Tap to book ›"}</span></div>}
                 {!adjustedNextKey&&effectiveNextDate&&nudgeConflict&&<div onClick={function(){ var k=effectiveNextDate; setCheckoffModal(null);setNudgedDate(null);setCheckoffCalMonth(null);setCheckoffRecur(null);setRecurPickerOpen(false); jumpToDate(k); }} style={{background:"#fff0ee",border:"1px solid #e0b0a8",borderRadius:"8px",padding:"12px 16px",marginBottom:"14px",fontSize:"13px",color:"#1a1a1a",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px"}}><span>{"⚠"} That slot is taken on {friendlyDateTime(placementTime(checkoffModal.slot),effectiveNextDate)}</span><span style={{fontSize:"12px",color:"#8a4a3a",flexShrink:0}}>{"Tap to view ›"}</span></div>}
@@ -7501,7 +8231,7 @@ export default function TheList() {
                               if (wd) {
                                 return <button onClick={function(){ window.location.href="sms:"+wd; }} title={"Message "+it.name} style={{background:"none",border:"none",cursor:"pointer",padding:"0 2px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={18} color="#c9a96e"/></button>;
                               }
-                              return <button onClick={function(){ setPhoneModal({name:it.name,phone:""}); }} title={"Add a number for "+it.name} style={{background:"none",border:"none",cursor:"pointer",padding:"0 2px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={18} color="#c6c6c6"/></button>;
+                              return <button onClick={function(){ beginUndoVisit("client:"+String(it.name||"").toLowerCase()); setPhoneModal({name:it.name,phone:"",origPhone:getClientPhone(it.name)}); /* v101 (#4): origPhone frozen at open — see revertPhoneTwin. v102: fresh undo visit per opening. */ }} title={"Add a number for "+it.name} style={{background:"none",border:"none",cursor:"pointer",padding:"0 2px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={18} color="#c6c6c6"/></button>;
                             })()}
                             <button onClick={function(){ wlRemove(noteModal.dayKey, it.id); }} title="Remove from standby" style={{background:"none",border:"none",cursor:"pointer",color:"#c0392b",fontSize:"18px",lineHeight:1,padding:"0 4px",flexShrink:0}}>{"×"}</button>
                           </div>
@@ -7750,6 +8480,23 @@ export default function TheList() {
         </div>
       )}
 
+      {/* v103: the same prompt, for the things that aren't slots. It says one sentence, handed to
+          it by performSideUndo, because a phone number, a day's notes and the books have nothing in
+          common to phrase generically — and a prompt that has to hedge is a prompt nobody reads. */}
+      {sideUndoConflict && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",zIndex:1300,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px"}} onClick={function(){ setSideUndoConflict(null); }}>
+          <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"28px 28px 24px",width:"min(380px,92vw)"}} onClick={function(e){ e.stopPropagation(); }}>
+            <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:"#c0392b",marginBottom:"8px"}}>Conflict</div>
+            <div style={{fontSize:"15px",color:"#1a1a1a",marginBottom:"8px"}}>This has changed since</div>
+            <div style={{fontSize:"12px",color:"#888",marginBottom:"16px"}}>{sideUndoConflict.msg}</div>
+            <div style={{display:"flex",gap:"8px"}}>
+              <button onClick={function(){ var sc=sideUndoConflict; setSideUndoConflict(null); performSideUndo(sc.entry, true); }} style={{flex:1,padding:"10px",background:"#c0392b",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Undo anyway</button>
+              <button onClick={function(){ setSideUndoConflict(null); }} style={{padding:"10px 16px",background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Keep</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {shareModal && (
         <div onClick={function(e){ e.stopPropagation(); }} style={{position:"fixed",top:isPhone?0:(gridTopY>0?gridTopY:(listTopY>0?listTopY:"calc(env(safe-area-inset-top,0px) + 56px)")),left:isPhone?0:"auto",right:0,bottom:0,width:isPhone?"100%":"clamp(300px,34vw,460px)",background:"#fafaf8",borderLeft:isPhone?"none":"1px solid #ececea",boxShadow:"-6px 0 24px rgba(0,0,0,0.12)",zIndex:110,display:"flex",flexDirection:"column",overflow:"hidden"}}>
           <div style={{padding:isPhone?"calc(env(safe-area-inset-top, 0px) + 14px) 16px 10px":"14px 16px 10px",borderBottom:"1px solid #ececea",display:"flex",justifyContent:"space-between",alignItems:"center",flexShrink:0}}>
@@ -7937,31 +8684,69 @@ export default function TheList() {
                       {c.price&&<span style={{fontSize:"11px",color:"#a07830",marginLeft:"8px"}}>{c.price}</span>}
                       {c.phone&&<div style={{fontSize:"11px",color:"#8a9aa8",marginTop:"2px"}}>{c.phone}</div>}
                     </div>
-                    <button onClick={function(){ setClientMemory(function(mem){ return mem.filter(function(m){ return m.name!==c.name; }); }); }} style={{background:"none",border:"none",color:"#ccc",cursor:"pointer",fontSize:"14px",padding:"2px 6px",fontFamily:"inherit"}} onMouseEnter={function(e){ e.currentTarget.style.color="#c0392b"; }} onMouseLeave={function(e){ e.currentTarget.style.color="#ccc"; }}>×</button>
+                    {/* v102: this × removed a client instantly — no confirm, no banner, no undo, and
+                        it sits inches from the row you tap to OPEN the card. It is now undoable and it
+                        says so. Left as one tap on purpose: a confirm on every row would be a tax on
+                        the common case, and undo is the better answer to a slip than a second tap.
+                        Revert lever — the v101 handler, silent and irreversible:
+                        onClick={function(){ setClientMemory(function(mem){ return mem.filter(function(m){ return m.name!==c.name; }); }); }} */}
+                    <button onClick={function(){
+                      var rn=c.name;
+                      var cardRN = {...c}; // v103: the whole card, so the log can put it back.
+                      pushUndo(captureTrees(["clientMemory"]));
+                      setClientMemory(function(mem){ return mem.filter(function(m){ return m.name!==rn; }); });
+                      addSideEntry({type:"client_deleted", bannerType:"removed", name:rn, time:null, dateKey:null, msg:"Removed "+rn+" from your client list", card:cardRN});
+                    }} style={{background:"none",border:"none",color:"#ccc",cursor:"pointer",fontSize:"14px",padding:"2px 6px",fontFamily:"inherit"}} onMouseEnter={function(e){ e.currentTarget.style.color="#c0392b"; }} onMouseLeave={function(e){ e.currentTarget.style.color="#ccc"; }}>×</button>
                   </div>
                 ); })}
               </div>
             )}
             <div style={{fontSize:"10px",letterSpacing:"0.15em",textTransform:"uppercase",color:"#aaa",marginBottom:"10px"}}>Change Log</div>
+            {/* v103: the chips. Filter is display-only — it narrows what is DRAWN and touches
+                nothing that is stored. It sits above the search box and stacks with it (chip AND
+                search), so "everything about money, with 'tip' in it" is one filter and one word. */}
+            <div style={{display:"flex",flexWrap:"wrap",gap:"4px",marginBottom:"8px"}}>
+              {LOG_CATS.map(function(catL){
+                var onL = logFilter===catL.id;
+                return (
+                  <button key={catL.id} onClick={function(){ setLogFilter(catL.id); }} style={{padding:"5px 9px",background:onL?"#1a1a1a":"#f4f4f2",border:"1px solid "+(onL?"#1a1a1a":"#d8d8d6"),borderRadius:"12px",color:onL?"#fff":"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"10px",letterSpacing:"0.06em"}}>{catL.label}</button>
+                );
+              })}
+            </div>
             <input value={historySearch} onChange={function(e){ setHistorySearch(e.target.value); }} placeholder="Search change log..." style={{...inputStyle,width:"100%",boxSizing:"border-box",marginBottom:"10px",fontSize:"12px"}}/>
             {history.length===0&&<div style={{color:"#bbb",fontSize:"13px",fontStyle:"italic"}}>No changes yet.</div>}
-            {history.filter(function(entry){
-              if (!historySearch) return true;
-              var q=historySearch.toLowerCase();
-              var hay=((entry.name||"")+" "+(entry.prevName||"")+" "+(entry.time||"")+" "+(entry.dateKey?friendlyDate(entry.dateKey):"")+" "+(entry.type||"")).toLowerCase();
-              return hay.indexOf(q)>=0;
-            }).map(function(entry,i){
-              var canEntryUndo=(entry.dateKey&&entry.time&&(entry.type==="added"||entry.type==="removed"||entry.type==="edited"||entry.type==="blocked"||entry.type==="unblocked"||entry.type==="recurring_set"||entry.type==="checkoff"||entry.type==="slot_removed"));
+            {(function(){
+              var shownH = history.filter(function(entry){
+                if (logFilter!=="all" && logEntryCategory(entry)!==logFilter) return false;
+                if (!historySearch) return true;
+                var q=historySearch.toLowerCase();
+                // v103: the action words join the haystack, so "standby" or "phone" finds the row
+                // even though neither word is stored anywhere on it.
+                var lwH=logEntryWords(entry);
+                var hay=((entry.name||"")+" "+(entry.prevName||"")+" "+(entry.time||"")+" "+(entry.dateKey?friendlyDate(entry.dateKey):"")+" "+(entry.type||"")+" "+(lwH.chip||"")+" "+(lwH.action||"")).toLowerCase();
+                return hay.indexOf(q)>=0;
+              });
+              if (history.length>0 && shownH.length===0) return (<div style={{color:"#bbb",fontSize:"13px",fontStyle:"italic"}}>Nothing here.</div>);
+              return shownH.map(function(entry,i){
+              var isSideH=isSideEntry(entry);
+              var canEntryUndo=isSideH||(entry.dateKey&&entry.time&&(entry.type==="added"||entry.type==="removed"||entry.type==="edited"||entry.type==="blocked"||entry.type==="unblocked"||entry.type==="recurring_set"||entry.type==="checkoff"||entry.type==="slot_removed"));
               // v82: corrected chip/action words + reordered main line ("Name — action — time · day").
               var lw=logEntryWords(entry);
               var logTail="";
               if (lw.isProfileRename) { logTail = entry.prevName?("(was "+entry.prevName+")"):""; }
               else { var _tp=[]; if(entry.time)_tp.push(entry.time); if(entry.dateKey)_tp.push(friendlyDate(entry.dateKey)); logTail=_tp.join(" · "); }
               var canJump=!!entry.dateKey;
+              // v103: a removal reads red whatever tree it happened in — a deleted client and a
+              // name struck off standby are as much a removal as a cancelled appointment.
+              var redRowH=(entry.type==="removed"||entry.type==="slot_removed"||entry.type==="client_deleted"||entry.type==="standby_removed");
+              // And the chip takes the color of its bucket: profiles teal, notes gold, books green.
+              var catH=logEntryCategory(entry);
+              var chipColH=isSideH?(catH==="books"?"#2e7d46":catH==="notes"?"#a07830":"#4a8a9a"):(entry.type==="added"?"#4a8a5a":(entry.type==="removed"||entry.type==="slot_removed")?"#8a3a2a":entry.type==="recurring_set"?"#c9a96e":entry.type==="slot_added"?"#6a8aaa":entry.type==="checkoff"?"#4a8a5a":entry.type==="backup"?"#999":"#666");
+              if (redRowH && isSideH) chipColH="#8a3a2a";
               return (
-              <div key={entry.id||i} onClick={canJump?function(){ jumpToLogEntry(entry); }:undefined} style={{padding:"10px 12px",marginBottom:"6px",borderRadius:"6px",cursor:canJump?"pointer":"default",background:(entry.type==="removed"||entry.type==="slot_removed")?"#fff0ee":"#fafaf8",border:(entry.type==="removed"||entry.type==="slot_removed")?"1px solid #e0b0a8":"1px solid #e4e4e2"}}>
+              <div key={entry.id||i} onClick={canJump?function(){ jumpToLogEntry(entry); }:undefined} style={{padding:"10px 12px",marginBottom:"6px",borderRadius:"6px",cursor:canJump?"pointer":"default",background:redRowH?"#fff0ee":"#fafaf8",border:redRowH?"1px solid #e0b0a8":"1px solid #e4e4e2"}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"3px"}}>
-                  <span style={{fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",color:entry.type==="added"?"#4a8a5a":(entry.type==="removed"||entry.type==="slot_removed")?"#8a3a2a":entry.type==="recurring_set"?"#c9a96e":entry.type==="slot_added"?"#6a8aaa":entry.type==="checkoff"?"#4a8a5a":entry.type==="backup"?"#999":"#666"}}>
+                  <span style={{fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",color:chipColH}}>
                     {/* v82 lever — old chip labels: entry.type==="added"?"Added":entry.type==="removed"?"Removed":entry.type==="slot_removed"?"Slot Removed":entry.type==="slot_added"?"Slot Added":entry.type==="recurring_set"?("Recurring ("+entry.weeks+"w)"):entry.type==="blocked"?"Blocked":entry.type==="unblocked"?"Unblocked":entry.type==="checkoff"?"Checked Off":entry.type==="backup"?"Backup":"Edited" */}
                     {lw.chip}
                   </span>
@@ -7981,10 +8766,14 @@ export default function TheList() {
                     <span style={{color:"#555"}}>{lw.action}</span>
                     {logTail&&<span style={{color:"#ccc",fontSize:"11px"}}>{" — "+logTail}</span>}
                   </div>
-                  {canEntryUndo&&<button onClick={function(e){ e.stopPropagation(); handleEntryUndo(entry); }} title="Undo" style={{background:"none",border:"1px solid #d8d8d6",borderRadius:"5px",color:"#888",cursor:"pointer",padding:"4px 8px",fontFamily:"inherit",flexShrink:0,display:"flex",alignItems:"center"}} onMouseEnter={function(e){ e.currentTarget.style.borderColor="#1a1a1a"; }} onMouseLeave={function(e){ e.currentTarget.style.borderColor="#d8d8d6"; }}><UndoIcon size={13} color="#888"/></button>}
+                  {/* v103: two machines behind one button. A slot row still goes to handleEntryUndo,
+                      exactly as it always has. The six new types go to handleSideUndo, which puts
+                      back a VALUE rather than a world. Neither knows about the other. */}
+                  {canEntryUndo&&<button onClick={function(e){ e.stopPropagation(); if(isSideH){ handleSideUndo(entry); } else { handleEntryUndo(entry); } }} title="Undo" style={{background:"none",border:"1px solid #d8d8d6",borderRadius:"5px",color:"#888",cursor:"pointer",padding:"4px 8px",fontFamily:"inherit",flexShrink:0,display:"flex",alignItems:"center"}} onMouseEnter={function(e){ e.currentTarget.style.borderColor="#1a1a1a"; }} onMouseLeave={function(e){ e.currentTarget.style.borderColor="#d8d8d6"; }}><UndoIcon size={13} color="#888"/></button>}
                 </div>
               </div>
-            ); })}
+            ); });
+            })()}
           </div>
         </div>
       )}
@@ -8167,7 +8956,7 @@ export default function TheList() {
                       </div>
                     ); })()}
                     {(function(){ var rN=resolveDayNote(dk); var hasN=!!rN.text; var k=rN.text?rN.kind:null; var rep=rN.repeating; var col=!hasN?"#cfcccc":(k==="personal"?TODAY_BLUE:"#c9a96e"); return (
-                      <button onClick={function(e){ e.stopPropagation(); var rws=dnPrefillRows(dk); setNoteLines(rws); setNoteOrigLines(rws.slice()); setNoteRepeatPopup(null); setNoteScopeAsk(null); setNoteModal({dayKey:dk,isDay:true,name:friendlyDateLong(dk)}); }} onMouseDown={function(e){ e.stopPropagation(); }} onTouchStart={function(e){ e.stopPropagation(); }} title={hasN?"Day note":"Add a day note"} style={{position:"absolute",bottom:"2px",right:"3px",background:"none",border:"none",cursor:"pointer",padding:"2px 3px",color:col,fontSize:isPhone?"13px":"15px",lineHeight:1,opacity:outside?0.6:1,WebkitTextStroke:"0.4px currentColor"}}>{"✎"}{rep?<sup style={{fontSize:"7px",marginLeft:"1px",opacity:0.85,WebkitTextStroke:"0px"}}>{"↺"}</sup>:null}</button>
+                      <button onClick={function(e){ e.stopPropagation(); beginUndoVisit("daynote:"+dk); /* v102: fresh undo visit per opening of this day's notes. */ var rws=dnPrefillRows(dk); setNoteLines(rws); setNoteOrigLines(rws.slice()); setNoteRepeatPopup(null); setNoteScopeAsk(null); setNoteModal({dayKey:dk,isDay:true,name:friendlyDateLong(dk)}); }} onMouseDown={function(e){ e.stopPropagation(); }} onTouchStart={function(e){ e.stopPropagation(); }} title={hasN?"Day note":"Add a day note"} style={{position:"absolute",bottom:"2px",right:"3px",background:"none",border:"none",cursor:"pointer",padding:"2px 3px",color:col,fontSize:isPhone?"13px":"15px",lineHeight:1,opacity:outside?0.6:1,WebkitTextStroke:"0.4px currentColor"}}>{"✎"}{rep?<sup style={{fontSize:"7px",marginLeft:"1px",opacity:0.85,WebkitTextStroke:"0px"}}>{"↺"}</sup>:null}</button>
                     ); })()}
                   </div>
                 );
@@ -8212,8 +9001,8 @@ export default function TheList() {
                       </div>
                     );
                   })()}
-                  <button onClick={function(e){ e.stopPropagation(); setAcctAdd({}); setAcctModal({dateKey:dateKey}); }} title="Accounting for the day" style={{background:"none",border:"none",cursor:"pointer",padding:(getDayCount()>3?"0 2px":"0 4px 0 2px"),color:acctHasData(dateKey)?"#c9a96e":"#bbb",fontSize:"19px",fontWeight:"bold",lineHeight:1,flexShrink:0,fontFamily:"Georgia,serif"}}>{"$"}</button>
-                  <button onClick={function(e){ e.stopPropagation(); var rws=dnPrefillRows(dateKey); setNoteLines(rws); setNoteOrigLines(rws.slice()); setNoteRepeatPopup(null); setNoteScopeAsk(null); setNoteModal({dayKey:dateKey,isDay:true,name:friendlyDateLong(dateKey)}); }} title="Note for the day" style={{background:"none",border:"none",cursor:"pointer",padding:(getDayCount()>3?"0 2px":"0 9px 0 2px"),color:dayNoteText(dateKey)?"#c9a96e":"#bbb"/* v89 uniform gold. Revert lever: dayNoteText(dateKey)?(dayNoteKind(dateKey)==="personal"?TODAY_BLUE:"#c9a96e"):"#bbb" */,fontSize:"22px",lineHeight:1,flexShrink:0,WebkitTextStroke:"0.5px currentColor"}}>{"✎"}{dayNoteRepeating(dateKey)?<sup style={{fontSize:"9px",marginLeft:"1px",opacity:0.85,WebkitTextStroke:"0px"}}>{"↺"}</sup>:null}</button>
+                  <button onClick={function(e){ e.stopPropagation(); beginUndoVisit("acct:"+dateKey); /* v102: fresh undo visit per opening of this day's money sheet. */ setAcctAdd({}); setAcctModal({dateKey:dateKey}); }} title="Accounting for the day" style={{background:"none",border:"none",cursor:"pointer",padding:(getDayCount()>3?"0 2px":"0 4px 0 2px"),color:acctHasData(dateKey)?"#c9a96e":"#bbb",fontSize:"19px",fontWeight:"bold",lineHeight:1,flexShrink:0,fontFamily:"Georgia,serif"}}>{"$"}</button>
+                  <button onClick={function(e){ e.stopPropagation(); beginUndoVisit("daynote:"+dateKey); /* v102: fresh undo visit per opening of this day's notes. */ var rws=dnPrefillRows(dateKey); setNoteLines(rws); setNoteOrigLines(rws.slice()); setNoteRepeatPopup(null); setNoteScopeAsk(null); setNoteModal({dayKey:dateKey,isDay:true,name:friendlyDateLong(dateKey)}); }} title="Note for the day" style={{background:"none",border:"none",cursor:"pointer",padding:(getDayCount()>3?"0 2px":"0 9px 0 2px"),color:dayNoteText(dateKey)?"#c9a96e":"#bbb"/* v89 uniform gold. Revert lever: dayNoteText(dateKey)?(dayNoteKind(dateKey)==="personal"?TODAY_BLUE:"#c9a96e"):"#bbb" */,fontSize:"22px",lineHeight:1,flexShrink:0,WebkitTextStroke:"0.5px currentColor"}}>{"✎"}{dayNoteRepeating(dateKey)?<sup style={{fontSize:"9px",marginLeft:"1px",opacity:0.85,WebkitTextStroke:"0px"}}>{"↺"}</sup>:null}</button>
                 </div>
                 <div data-slotscroll="1" style={{flex:(slots.length+" 1 0px"),minHeight:0,paddingBottom:"0px",overflowX:"hidden",overscrollBehavior:"contain",display:"flex",flexDirection:"column"}}
                   onTouchMove={function(e){
@@ -8416,7 +9205,7 @@ export default function TheList() {
                                     if (digits) {
                                       return <button onClick={function(e){ e.stopPropagation(); window.location.href="sms:"+digits; }} title={"Message "+slot.name} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 1px 2px 4px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={20} color="#c9a96e"/></button>;
                                     }
-                                    return <button onClick={function(e){ e.stopPropagation(); setPhoneModal({name:slot.name,phone:""}); }} title={"Add a number for "+slot.name} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 1px 2px 4px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={20} color="#c6c6c6"/></button>;
+                                    return <button onClick={function(e){ e.stopPropagation(); beginUndoVisit("client:"+String(slot.name||"").toLowerCase()); setPhoneModal({name:slot.name,phone:"",origPhone:getClientPhone(slot.name)}); /* v101 (#4): origPhone frozen at open — see revertPhoneTwin. v102: fresh undo visit per opening. */ }} title={"Add a number for "+slot.name} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 1px 2px 4px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={20} color="#c6c6c6"/></button>;
                                   })()}
                                   {/* v98 THE ROW PENCIL IS GONE. It opened the per-appointment note
                                       (slot.note), which is the model we retired — a note is now a
