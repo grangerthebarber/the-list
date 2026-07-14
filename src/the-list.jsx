@@ -957,6 +957,8 @@ export default function TheList() {
   // dragLifted flips true on first real movement (or immediately for multi/group).
   const [dragLifted, setDragLifted] = useState(false);
   const [dragOverKey, setDragOverKey] = useState(null);
+  // v107 (#1): which view tab the live drag is hovering (glows it as a hand-off target).
+  const [dragTabHover, setDragTabHover] = useState(null);
   const [timeEditModal, setTimeEditModal] = useState(null);
   const [timeEditMinutes, setTimeEditMinutes] = useState(0);
   const [dailyExportPrompt, setDailyExportPrompt] = useState(false);
@@ -1103,6 +1105,7 @@ export default function TheList() {
   const dragChipRef = useRef(null);
   const dragPosRef = useRef({x:0,y:0});
   const dragOverRef = useRef(null);
+  const dragTabHoverRef = useRef(null); // v107 (#1): mirror of dragTabHover for the pointer handlers
   const dragStateRef = useRef(null);
   // v58: tracks whether a live drag actually MOVED. A hold that's released
   // without moving is a "peek the profile" gesture, not a reschedule.
@@ -1162,6 +1165,19 @@ export default function TheList() {
   const commitLongPress = useRef(null);
   const commitTouchStart = useRef(null);
   const commitSwallowTap = useRef(false);
+  // v106: THE COMMITMENT IS NOW EDITED IN THE ROW, NOT IN A POPUP. editingCommitRef marks the
+  // live edit as a commitment edit rather than a booking edit — it is what turns the magic
+  // letters and the client suggestions OFF while a commitment's label is being typed. It also
+  // carries isNew + preSnap for a commitment that was just born under the finger: preSnap is
+  // the schedules tree from BEFORE the blue row was written, so one Cmd-Z takes the row all
+  // the way back to open rather than back to a blank blue row. Cleared by startEdit on every
+  // non-commitment row, so it can never leak into a booking.
+  const editingCommitRef = useRef(null);
+  const [editingCommit, setEditingCommit] = useState(false);
+  // The commitment writer, held in a ref so doCommit (a useCallback with a stable dep list, and
+  // therefore a closure from the FIRST render) always reaches the CURRENT one. Assigned further
+  // down, the moment commitCommitmentEdit is defined.
+  const commitCommitmentEditRef = useRef(null);
   // Pencil "arm" mode: clicking the pencil with an empty field arms it so the
   // next Enter pencils the person in; clicking it again disarms.
   const [pencilArmed, setPencilArmed] = useState(false);
@@ -1596,6 +1612,21 @@ export default function TheList() {
         // body on its way out. With a clear screen, 0ms is the pattern the search BUTTON has
         // always used, so it stays 0 there.
         setTimeout(function(){ if(searchInputRef.current) searchInputRef.current.focus(); }, popSt==="closed" ? 60 : 0);
+        return;
+      }
+      // v106: THE ADJUST TIME POPUP TAKES THE UP/DOWN ARROWS. Up is one minute EARLIER, Down is
+      // one minute LATER — the same direction Shift+Arrow moves a slot's time while you're
+      // typing in it, so the hand only ever learns one rule. No Shift needed here, and the step
+      // is ONE minute, not five; hold Shift and it's five, matching the nudge. Nothing is
+      // written until Confirm — this only moves the working time on the face of the popup.
+      // (The popup's BUTTONS are a separate, older story: they are inverted on purpose, so the
+      // one marked "+5 min" subtracts five. The arrows follow the NUDGE convention, not the
+      // button labels.) Revert lever — delete this block and the arrows go inert again.
+      if (timeEditModal && (e.key==="ArrowUp"||e.key==="ArrowDown") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        var stepTE = e.shiftKey ? 5 : 1;
+        var deltaTE = (e.key==="ArrowUp") ? -stepTE : stepTE;
+        setTimeEditMinutes(function(m){ return m + deltaTE; });
         return;
       }
       // While ANY popup is open the arrows belong to the popup, not the schedule behind
@@ -2489,6 +2520,19 @@ export default function TheList() {
   const startEdit = function(dateKey, idx, defer) {
     var slot = getSlots(dateKey)[idx];
     var occupied = !!slot.name;
+    // v106: a commitment row edits IN PLACE, like every other row. The two boxes are the same
+    // two boxes — the name box carries the LABEL, the price box carries the PHONE — so the
+    // whole proven edit chrome (focus, blur-saves, arrow row-hop, Shift+Arrow time nudge) is
+    // reused with no new machinery. editingCommitRef is set here and cleared here: any row
+    // that is not a commitment nulls it, so a booking edit can never be mistaken for one.
+    // NOTE for the brand-new commitment born under a long press: schedulesRef has not caught
+    // up with the blue row yet when beginNewCommitment calls this, so isCommitRow reads false
+    // and the boxes seed BLANK — which is exactly right for a new one. beginNewCommitment sets
+    // the ref itself immediately afterwards. Revert lever — the v105 line, no commitment branch:
+    // setEditValues({name:slot.name||"",price:slot.price||""});
+    var isCommitRow = !!(slot.blocked && slot.personal===true);
+    editingCommitRef.current = isCommitRow ? {dateKey:dateKey, idx:idx, isNew:false, preSnap:null} : null;
+    setEditingCommit(isCommitRow);
     // If this slot was just emptied, drop its "recently removed" pink the instant
     // an edit starts. Otherwise the pink wins the background and the user gets no
     // visual confirmation the field is live, so they keep tapping the already-
@@ -2498,7 +2542,7 @@ export default function TheList() {
     setRecentlyPlaced(function(r){ if(!r[rmKey]) return r; var n={...r}; delete n[rmKey]; return n; }); // B1: green clears on edit too
     editingRef.current = {dateKey,idx};
     setEditingCell({dateKey,idx});
-    setEditValues({name:slot.name||"",price:slot.price||""});
+    setEditValues(isCommitRow ? {name:slot.blockLabel||"",price:slot.blockPhone||""} : {name:slot.name||"",price:slot.price||""});
     setSuggestIdx(-1); setSuggestHide(false);
     setEditingOccupied(occupied);
     setSwipedSlot(null);
@@ -2576,6 +2620,22 @@ export default function TheList() {
       editingRef.current = null; setEditingCell(null); setEditingOccupied(false);
       setPencilArmed(false); setEditChromeReady(true);
     };
+    // v106: A COMMITMENT ROW IS ROUTED OUT OF THE BOOKING PATH ENTIRELY, right here, before a
+    // single line below can run. The test is the SLOT, not the live edit ref: handleBlur fires
+    // this a beat after the edit may already have moved on to another cell, and by then the ref
+    // points elsewhere — the row itself is the only thing that still knows what it is. Nothing
+    // below this line can therefore write a client name, a price, a Lunch, a Block or an
+    // Available mark onto a commitment. THIS is what "the magic letters go dead" is made of.
+    // It returns nothing, so the arrow-key row-hop that called it still hops (a truthy return
+    // means "handled, stay put" — reserved for the series modal).
+    // Called through a ref, not directly: doCommit is a useCallback with a stable dep list, so
+    // a direct call would hold the FIRST render's closure forever.
+    // Revert lever — delete this block and the commitment falls back into the booking path.
+    var prevRowDC = getSlots(dateKey)[idx];
+    if (prevRowDC && prevRowDC.blocked && prevRowDC.personal===true && commitCommitmentEditRef.current) {
+      commitCommitmentEditRef.current(dateKey, idx, values, keepActive);
+      return;
+    }
     var slots = [...getSlots(dateKey)];
     var prev = slots[idx];
     var rawName = stripLeadingNumbers((values.name||"").trim());
@@ -2911,7 +2971,11 @@ export default function TheList() {
   const nudgeEditingSlotTime = function(dateKey, idx, delta, doSnapshot) {
     var slots = [...getSlots(dateKey)];
     var prev = slots[idx];
-    if (!prev || prev.blocked) return;
+    // v106: a COMMITMENT may be nudged from inside its edit, exactly like a client row — that
+    // is the whole point of editing it in the row instead of a popup. A Lunch or a Block still
+    // cannot be: they have no edit to nudge from, and this guard is what keeps it that way.
+    // Revert lever — the v105 line, which barred every blocked row:  if (!prev || prev.blocked) return;
+    if (!prev || (prev.blocked && prev.personal!==true)) return;
     var newTime = absMinutesToTime(timeToAbsMinutes(prev.time) + delta);
     if (newTime === prev.time) return;
     // Don't let a nudge land exactly on another slot's time (fails silently, no popup).
@@ -2938,6 +3002,10 @@ export default function TheList() {
     // so normally the index is unchanged and nothing remounts.
     if (newIdx>=0 && newIdx!==idx) {
       editingRef.current = {dateKey:dateKey, idx:newIdx};
+      // v106: if this was a commitment edit, its ref has to follow the row to its new index too
+      // — otherwise the guards that read it (the dead magic letters, the dead type-ahead) would
+      // quietly stop matching the cell being typed in. Revert lever — drop this line.
+      if (editingCommitRef.current && editingCommitRef.current.dateKey===dateKey && editingCommitRef.current.idx===idx) { editingCommitRef.current = {...editingCommitRef.current, idx:newIdx}; }
       setEditingCell({dateKey:dateKey, idx:newIdx});
       setTimeout(function(){
         var el = document.querySelectorAll("[data-rowkey='" + dateKey + "-" + newIdx + "']");
@@ -2973,10 +3041,18 @@ export default function TheList() {
 
   const handleKeyDown = function(e, dateKey, idx) {
     if (e.key==="Tab") return;
+    // v106: while a COMMITMENT's label is being typed, two keys are taken away and nothing else
+    // is. The client type-ahead is dead — typing "Da" must never offer to book Dave — and
+    // Shift+Enter is dead: it links rows into a group and turns "lunch" into a Lunch row, and a
+    // commitment named Lunch is a lunch DATE. Both fall through to a plain commit. Everything
+    // else in this handler is shared with every other row, untouched: plain Up/Down still hop
+    // rows, Shift+Arrow still nudges the time, Escape still backs out.
+    var isCommitEditKD = !!(editingCommitRef.current && editingCommitRef.current.dateKey===dateKey && editingCommitRef.current.idx===idx);
+    if (isCommitEditKD && e.key==="Enter") { e.preventDefault(); doCommit(dateKey,idx,editValuesRef.current); return; }
     // #4 type-ahead: while client suggestions are showing, plain Down/Up move the
     // highlight and Enter picks the highlighted client (name + their saved price),
     // instead of hopping rows or committing the typed text. Shift combos pass through.
-    if (!e.shiftKey && (e.key==="ArrowDown"||e.key==="ArrowUp"||e.key==="Enter")) {
+    if (!isCommitEditKD && !e.shiftKey && (e.key==="ArrowDown"||e.key==="ArrowUp"||e.key==="Enter")) {
       var sugs = suggestHideRef.current ? [] : computeSuggestions(editValuesRef.current.name);
       if (sugs.length>0) {
         if (e.key==="ArrowDown") { e.preventDefault(); setSuggestIdx(function(p){ return Math.min(p+1, sugs.length-1); }); return; }
@@ -3127,6 +3203,11 @@ export default function TheList() {
         setTimeout(function(){ startEdit(curDateKey2, curIdx2-1); }, 80);
       }
     } else if (e.key==="Escape") {
+      // v106: Escape on a commitment abandons the edit. If that commitment was born under the
+      // long press moments ago and still has no label, the blue row goes back to being an open
+      // slot — otherwise Escape would leave a nameless blue row sitting on the day forever.
+      // An EXISTING commitment simply keeps what it already had. Revert lever — drop this line.
+      if (isCommitEditKD) cancelCommitmentEdit(dateKey, idx);
       editingRef.current=null; setEditingCell(null); setEditingOccupied(false);
       setPencilArmed(false); setEditChromeReady(true);
     }
@@ -6296,7 +6377,11 @@ export default function TheList() {
       // a sync to have landed someone on this row, and a commitment must never overwrite them.
       if (!slot || slot.name || slot.blocked) return;
       commitSwallowTap.current = true;   // eat the finger coming back up
-      openCommitEditor(dateKey, idx);
+      // v106: the popup is gone. The long press now DOES what it used to only promise: the row
+      // turns blue on the spot and goes straight into typing mode, the same typing mode every
+      // other row uses. Revert lever — the v105 door, the popup editor:
+      // openCommitEditor(dateKey, idx);
+      beginNewCommitment(dateKey, idx);
     }, 500);
   };
   const cancelCommitLongPress = function() {
@@ -6378,6 +6463,135 @@ export default function TheList() {
     setSlots(dateKey, slots);
     addHistoryEntry({type:"unblocked", time:prev.time, name:(prev.blockLabel||"Commitment"), dateKey:dateKey, personal:true, phone:(prev.blockPhone||""), note:(prev.note||"")});
     setCommitModal(null);
+  };
+
+  // ── v106 THE COMMITMENT EDITS IN THE ROW ─────────────────────────────────────
+  // saveCommitment, removeCommitment and openCommitEditor above are now DORMANT — nothing
+  // opens commitModal any more. They are left standing, whole, as the revert lever: put
+  // openCommitEditor back on the two doors (the long-press fire and the label tap) and the
+  // popup returns exactly as it shipped in v105.
+  //
+  // BIRTH. The long press writes the blue row immediately and drops into the ordinary edit —
+  // no popup, no draft state, no Save button. The row is real from the first instant, which is
+  // what makes every other piece of this work: the SLOT is now the thing that knows it is a
+  // commitment, so doCommit, handleBlur and the arrow keys can all read it off the row itself
+  // instead of tracking an editing session.
+  //
+  // preSnap is taken BEFORE the blue row is written and rides on editingCommitRef. When the
+  // label is finally committed, THAT is the snapshot pushed onto undo — so one Cmd-Z takes the
+  // row all the way back to an open slot, not back to a half-born blank blue row.
+  //
+  // No undo step and no log entry are written here at birth. A commitment with no label has not
+  // happened yet: back out of it (Escape, or tap away without typing) and it never existed.
+  const beginNewCommitment = function(dateKey, idx) {
+    var slots = [...getSlots(dateKey)];
+    var prev = slots[idx];
+    if (!prev || prev.name || prev.blocked) return;
+    var preSnap = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
+    slots[idx] = {...prev, blocked:true, personal:true, blockLabel:"", blockPhone:"", note:"", name:"", price:"", done:false, recurWeeks:null, isException:false, availStatus:null};
+    setSlots(dateKey, slots);
+    // startEdit still reads the OLD (open) row here — schedulesRef has not caught up with the
+    // write above — so it seeds both boxes blank, which is exactly what a new commitment wants.
+    // It also nulls editingCommitRef on the way through, for the same reason. We set the ref
+    // ourselves immediately after, and that is the one that survives.
+    startEdit(dateKey, idx, false);
+    editingCommitRef.current = {dateKey:dateKey, idx:idx, isNew:true, preSnap:preSnap};
+    setEditingCommit(true);
+  };
+
+  // THE WRITE. Reached only from doCommit's commitment branch, which fires on every road out of
+  // an edit: Enter, tapping away, the arrow row-hop, a blur. values.name is the LABEL and
+  // values.price is the PHONE — the same two boxes, carrying different cargo.
+  //
+  // A BLANK LABEL GIVES THE SLOT BACK. That is the regular-slot rule (clearing a name clears
+  // the row) and it is now the only way to remove a commitment, in place of the old Remove
+  // button. A commitment that never had a label just vanishes, silently. One that DID is a real
+  // removal: it takes an undo step and it logs "unblocked", carrying its phone and note so the
+  // per-row undo can put it back whole — byte for byte the entry removeCommitment used to write.
+  //
+  // The change log records a commitment being MADE and being REMOVED. It does not record a
+  // rename or a phone edit, deliberately: a "blocked" entry means "this slot was taken away,"
+  // and its per-row undo hands the slot back — which would DELETE a commitment you had only
+  // meant to rename. Cmd-Z still walks a rename back; the log just doesn't claim more than it
+  // can safely undo.
+  const commitCommitmentEdit = function(dateKey, idx, values, keepActive) {
+    var finishEdit = function(){
+      editingCommitRef.current = null;
+      setEditingCommit(false);
+      if (keepActive) return;
+      editingRef.current = null; setEditingCell(null); setEditingOccupied(false);
+      setPencilArmed(false); setEditChromeReady(true);
+    };
+    var ec = editingCommitRef.current;
+    var isNew = !!(ec && ec.dateKey===dateKey && ec.idx===idx && ec.isNew);
+    var preSnap = (ec && ec.preSnap) ? ec.preSnap : null;
+    var slots = [...getSlots(dateKey)];
+    var prev = slots[idx];
+    if (!prev || !prev.blocked || prev.personal!==true) { finishEdit(); return; }
+    var label = capitalizeFirst((values.name||"").trim());
+    var phone = (values.price||"").trim();
+    if (!label) {
+      if (!isNew) {
+        pushUndo({schedules:JSON.parse(JSON.stringify(schedulesRef.current))});
+        addHistoryEntry({type:"unblocked", time:prev.time, name:(prev.blockLabel||"Commitment"), dateKey:dateKey, personal:true, phone:(prev.blockPhone||""), note:(prev.note||"")});
+      }
+      slots[idx] = {...prev, blocked:false, personal:false, blockLabel:"", blockPhone:"", note:"", done:false};
+      setSlots(dateKey, slots);
+      finishEdit();
+      return;
+    }
+    var changed = (label!==(prev.blockLabel||"")) || (phone!==(prev.blockPhone||""));
+    if (changed) {
+      pushUndo((isNew && preSnap) ? preSnap : {schedules:JSON.parse(JSON.stringify(schedulesRef.current))});
+      slots[idx] = {...prev, blocked:true, personal:true, blockLabel:label, blockPhone:phone, name:"", price:"", done:false, recurWeeks:null, isException:false, availStatus:null};
+      setSlots(dateKey, slots);
+      if (isNew) addHistoryEntry({type:"blocked", time:prev.time, name:label, dateKey:dateKey, personal:true, phone:phone, note:(prev.note||"")});
+    }
+    finishEdit();
+  };
+  // doCommit is a useCallback and holds the first render's closure; this is how it reaches the
+  // current commitCommitmentEdit instead of a stale one.
+  commitCommitmentEditRef.current = commitCommitmentEdit;
+
+  // ESCAPE. Abandons the edit without writing. A brand-new, still-nameless commitment is taken
+  // back out of existence — otherwise Escape would strand a blank blue row on the day. An
+  // existing commitment keeps everything it already had.
+  const cancelCommitmentEdit = function(dateKey, idx) {
+    var ec = editingCommitRef.current;
+    var isNew = !!(ec && ec.dateKey===dateKey && ec.idx===idx && ec.isNew);
+    editingCommitRef.current = null;
+    setEditingCommit(false);
+    if (!isNew) return;
+    var slots = [...getSlots(dateKey)];
+    var prev = slots[idx];
+    if (!prev || !prev.blocked || prev.personal!==true) return;
+    if ((prev.blockLabel||"").trim()) return;   // it got a name somewhere along the way — keep it
+    slots[idx] = {...prev, blocked:false, personal:false, blockLabel:"", blockPhone:"", note:"", done:false};
+    setSlots(dateKey, slots);
+  };
+
+  // The note pencil's door. The per-slot note modal is still fully wired (the DAY note shares
+  // it, and dnSaveAndClose writes slot.note straight back) — v98 only took away the CLIENT
+  // row's pencil, and left the room itself standing. A commitment has no profile to keep a note
+  // on, so its note stays on the slot, and this is the one door to it.
+  const openCommitNote = function(dateKey, idx) {
+    var slot = getSlots(dateKey)[idx];
+    if (!slot) return;
+    setNoteDraft(slot.note||"");
+    setNoteKind(null); setNoteRepeat(0); setNoteWasRepeat(false); setNoteScopeAsk(null);
+    setNoteModal({dateKey:dateKey, idx:idx, name:(slot.blockLabel||"Commitment")});
+  };
+
+  // The grey message icon's door. A commitment's number is typed in the row, in the same box a
+  // client's price lives in — so the grey icon just opens the edit and puts the caret straight
+  // in that box. (A client's grey icon opens phoneModal, because a client's number belongs to
+  // his profile, not to a row. A commitment has neither.)
+  const startCommitPhoneEdit = function(dateKey, idx) {
+    startEdit(dateKey, idx, false);
+    setTimeout(function(){
+      var boxes = document.querySelectorAll("[data-rowkey='" + dateKey + "-" + idx + "']");
+      if (boxes && boxes[1]) boxes[1].focus();
+    }, 120);
   };
 
   // The human-readable export — fired by its own "Download schedule" button. The JSON
@@ -7098,13 +7312,20 @@ export default function TheList() {
         }
       }
       if (dragChipRef.current) dragChipRef.current.style.transform = dragChipTransform(px, py);
-      // Hovering a view tab while dragging jumps into that view so off-screen days
-      // become reachable. Pointer capture keeps the gesture alive across the switch.
-      var vt = findViewTab(px, py);
-      if (vt && vt !== viewRef.current) {
-        if (vt === "Wknd") setBaseDate(getUpcomingWeekend());
-        setView(vt);
-      }
+      // v107 (#1): A DRAG STAYS IN ITS VIEW. It no longer switches the instant it grazes
+      // a tab — inside a view, a drag is just a drag. Hovering a tab now only LIGHTS IT
+      // UP as a hand-off target; the release (onEnd) is the only thing that acts. Drop on
+      // another view's tab to land in tap-to-place there; drop on your own view's tab to
+      // arm tap-to-place without moving. This is how off-screen days are reached now.
+      // Revert lever (old live hover-switch — restore these five lines and delete the two
+      // highlight lines below to bring back mid-drag view jumping):
+      //   var vt = findViewTab(px, py);
+      //   if (vt && vt !== viewRef.current) {
+      //     if (vt === "Wknd") setBaseDate(getUpcomingWeekend());
+      //     setView(vt);
+      //   }
+      var vtHover = findViewTab(px, py);
+      if (vtHover !== dragTabHoverRef.current) { dragTabHoverRef.current = vtHover; setDragTabHover(vtHover); }
       var ds = dragStateRef.current;
       var key = (ds && ds.multi) ? findAnyRowKey(px, py) : findDropKeyNear(px, py);
       // v78: Month-view glide. No slot row under the finger but a month day cell is —
@@ -7160,13 +7381,30 @@ export default function TheList() {
           keepDragForCal = true; landed = true;
         }
       } else {
+        // v107 (#1): RELEASED ON A VIEW TAB = hand off to tap-to-place. Letting go on
+        // your OWN view's tab arms placing without moving; on ANOTHER view's tab it
+        // switches there first (Wknd needs its base date), then arms placing — you arrow
+        // to the week or month you want and tap the open slot. Single-person only: a
+        // group has no in-hand mode, so a group released on a tab falls through to its
+        // day picker below (the dead-space fallback), exactly like a group dropped off-grid.
+        var vtDrop = (px!=null) ? findViewTab(px, py) : null;
+        if (vtDrop && ds && ds.clients && ds.clients[0]) {
+          if (vtDrop !== viewRef.current) {
+            if (vtDrop === "Wknd") setBaseDate(getUpcomingWeekend());
+            setView(vtDrop);
+          }
+          setPlacingClient(ds.clients[0]);
+          landed = true;
+        }
         var key = dragOverRef.current;
         // v78: "M:" keys are Month-view day cells (glide highlight) — not slot rows.
         // Peel the day off so the month branch below handles it; never row-parse it.
         var monthOverS = (key && key.indexOf("M:")===0) ? key.slice(2) : null;
         if (monthOverS) key = null;
         if (!key && px!=null) key = findDropKeyNear(px, py);
-        if (key) {
+        // v107 (#1): guarded with !landed so a tab hand-off above is never overwritten by
+        // a slot drop here. To revert this guard, drop the "!landed &&" from the test below.
+        if (!landed && key) {
           var parts = key.split("-"); var di = parseInt(parts[parts.length-1]); var dk2 = parts.slice(0,parts.length-1).join("-");
           landed = dropPickedUpOnSlot(dk2, di);
         }
@@ -7191,6 +7429,7 @@ export default function TheList() {
       swipeNavStart.current = null; // v90 (#8): second belt on the day-jump — pointerup lands before touchend
       setIsLiveDragging(false); dragLiftedRef.current = false; setDragLifted(false);
       dragOverRef.current = null; setDragOverKey(null);
+      dragTabHoverRef.current = null; setDragTabHover(null); // v107 (#1): drop the tab hand-off glow
       if (!keepDragForCal) setDragState(null); // v82 (#4): keep the group alive for the day picker
     };
     var onCancel = function(e) {
@@ -7204,6 +7443,7 @@ export default function TheList() {
       setIsLiveDragging(false); dragLiftedRef.current = false; setDragLifted(false);
       var overKey = dragOverRef.current;
       dragOverRef.current = null; setDragOverKey(null);
+      dragTabHoverRef.current = null; setDragTabHover(null); // v107 (#1): drop the tab hand-off glow
       var ds = dragStateRef.current;
       if (!ds) return;
       // A hold that never moved, then got cancelled by the OS: just drop the
@@ -7557,7 +7797,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v105</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v107</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -9198,14 +9438,14 @@ export default function TheList() {
               <button onClick={function(){ if(navCanFwd) goFwd(); }} title="Forward" style={{...navBtnSm,fontSize:"13px",width:"26px",padding:"0",opacity:navCanFwd?1:0.35,cursor:navCanFwd?"pointer":"default"}}>{"→"}</button>
             </div>
             <div style={{display:"flex",gap:"2px",background:"#e8e8e6",padding:"2px",borderRadius:"5px"}}>
-              {["Day","Wknd","Month"].map(function(v){ return (
+              {["Day","Wknd","Month"].map(function(v){ var tabHot = isLiveDragging && dragTabHover===v; return (
                 <button key={v} data-viewtab={v} onClick={function(){
                   if (v==="Wknd") { setBaseDate(view==="Wknd" ? getAnchorStart() : getUpcomingWeekend()); setView(v); return; }
                   if (view==="Wknd") { setBaseDate(v==="Month" ? new Date() : getAnchorStart()); }
                   else if (v===view && (v==="Day"||v==="3-Day"||v==="Week")) { setBaseDate(getAnchorStart()); }
                   else if (v===view && v==="Month") { setBaseDate(new Date()); }
                   setView(v);
-                }} style={{padding:"5px 7px",fontSize:"9px",letterSpacing:"0.04em",textTransform:"uppercase",border:"none",borderRadius:"4px",cursor:"pointer",background:view===v?"#1a1a1a":"transparent",color:view===v?"#ffffff":"#999",fontFamily:"inherit",transition:"all 0.15s"}}>{v}</button>
+                }} style={{padding:"5px 7px",fontSize:"9px",letterSpacing:"0.04em",textTransform:"uppercase",border:"none",borderRadius:"4px",cursor:"pointer",background:tabHot?"#2f9e6f":(view===v?"#1a1a1a":"transparent"),color:(tabHot||view===v)?"#ffffff":"#999",boxShadow:tabHot?"0 0 0 2px #2f9e6f":"none",fontFamily:"inherit",transition:"all 0.15s"}}>{v}</button>
               ); })}
             </div>
             <div style={{display:"flex",gap:"2px",alignItems:"center"}}>
@@ -9224,7 +9464,7 @@ export default function TheList() {
       ) : (
         <div data-apphdr="1" style={{borderBottom:"1px solid #e8e8e6",padding:"2px 20px",paddingTop:"env(safe-area-inset-top,0px)",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,background:"#ffffff",zIndex:100,flexShrink:0}}>
           <div style={{display:"flex",gap:"2px",background:"#e8e8e6",padding:"3px",borderRadius:"6px",marginLeft:isSplitView?"48px":"0"}}>
-            {VIEWS.map(function(v){ return (
+            {VIEWS.map(function(v){ var tabHot = isLiveDragging && dragTabHover===v; return (
               <button key={v} data-viewtab={v} onClick={function(){
                 if (v==="Wknd") { setBaseDate(view==="Wknd" ? getAnchorStart() : getUpcomingWeekend()); setView(v); return; }
                 if (view==="Wknd") {
@@ -9235,7 +9475,7 @@ export default function TheList() {
                   setBaseDate(new Date());
                 }
                 setView(v);
-              }} style={{padding:"5px 12px",fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",border:"none",borderRadius:"4px",cursor:"pointer",background:view===v?"#1a1a1a":"transparent",color:view===v?"#ffffff":"#999",fontFamily:"inherit",transition:"all 0.15s"}}>{v}</button>
+              }} style={{padding:"5px 12px",fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",border:"none",borderRadius:"4px",cursor:"pointer",background:tabHot?"#2f9e6f":(view===v?"#1a1a1a":"transparent"),color:(tabHot||view===v)?"#ffffff":"#999",boxShadow:tabHot?"0 0 0 2px #2f9e6f":"none",fontFamily:"inherit",transition:"all 0.15s"}}>{v}</button>
             ); })}
           </div>
           <div style={{position:"relative",flex:"1 1 auto",display:"flex",justifyContent:"flex-end",padding:"0 6px",minWidth:0}}>
@@ -9636,19 +9876,65 @@ export default function TheList() {
                               Remove button. Lettering is plain black, upright: this is a real thing
                               you have to be at, not a greyed-out hole in the day. */}
                           {isCommit?(
-                            <div onClick={function(e){ e.stopPropagation(); openCommitEditor(dateKey,idx); }} style={{flex:1,minWidth:0,display:"flex",alignItems:"center",gap:"6px",cursor:"pointer"}}>
+                            /* v106: THE COMMITMENT EDITS IN THE ROW. Two boxes, the same two boxes every
+                               other row uses — the name box carries the LABEL, the price box carries the
+                               PHONE. Both wear data-rowkey, so startEdit's focus finds the label first and
+                               handleBlur knows that moving from one box to the other is not leaving the
+                               edit. Everything that already works on a row works here for free: tap-away
+                               saves, Enter saves, plain Up/Down hop to the next row, Shift+Arrow nudges
+                               the time five minutes without leaving the edit. Blank the label and the slot
+                               comes back — the same rule as blanking a client's name.
+                               Revert lever — the v105 branch, a plain label that opened the popup:
+                               <div onClick={function(e){ e.stopPropagation(); openCommitEditor(dateKey,idx); }} ...>{slot.blockLabel||"Commitment"}</div> */
+                            isEditing?(
+                              <div style={{flex:1,minWidth:0,display:"flex",alignItems:"center",gap:"6px"}}>
+                                <input
+                                  value={editValues.name}
+                                  name="tlcommit" inputMode="text" data-lpignore="true" data-1p-ignore="true" data-form-type="other" data-bwignore="true"
+                                  autoComplete="off" autoCorrect="off" autoCapitalize="words" spellCheck={false}
+                                  onChange={function(e){ var v=e.target.value; setEditValues(function(vv){ return {...vv,name:v}; }); if(!editChromeReady) setEditChromeReady(true); }}
+                                  onKeyDown={function(e){ handleKeyDown(e,dateKey,idx); }}
+                                  onBlur={function(e){ handleBlur(e); }}
+                                  placeholder="Dentist, Ballgame, etc." data-rowkey={rowKey}
+                                  style={{flex:1,minWidth:0,fontSize:isPhone?"16px":"13px",color:"#1a1a1a",background:"transparent",border:"none",outline:"none",padding:"0 2px",fontFamily:"Georgia,serif",caretColor:"#444",WebkitAppearance:"none",appearance:"none"}}
+                                />
+                                {editChromeReady&&(
+                                  <input
+                                    value={editValues.price}
+                                    inputMode="tel" autoComplete="off" autoCorrect="off" spellCheck={false}
+                                    onChange={function(e){ var v=e.target.value; setEditValues(function(vv){ return {...vv,price:v}; }); }}
+                                    onKeyDown={function(e){ handleKeyDown(e,dateKey,idx); }}
+                                    onBlur={function(e){ handleBlur(e); }}
+                                    placeholder="Phone" data-rowkey={rowKey}
+                                    style={{width:compactIcons?"64px":"104px",flexShrink:0,fontSize:isPhone?"16px":"13px",color:"#1a1a1a",background:"#eef3f9",border:"1px solid #cddbea",borderRadius:"4px",outline:"none",padding:"2px 5px",fontFamily:"Georgia,serif",WebkitAppearance:"none",appearance:"none"}}
+                                  />
+                                )}
+                              </div>
+                            ):(
+                            <div onClick={function(e){ e.stopPropagation(); startEdit(dateKey,idx,false); }} style={{flex:1,minWidth:0,display:"flex",alignItems:"center",gap:"6px",cursor:"pointer"}}>
                               <span style={{flex:1,minWidth:0,fontSize:isPhone?"16px":"13px",color:"#1a1a1a",fontFamily:"Georgia,serif",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{slot.blockLabel||"Commitment"}</span>
-                              {!compactIcons&&slot.note?(
-                                <span title="Has a note" style={{flexShrink:0,fontSize:"15px",lineHeight:1,color:TODAY_BLUE,WebkitTextStroke:"0.4px currentColor"}}>{"\u270e"}</span>
-                              ):null}
+                              {/* v106: BOTH ICONS ARE ALWAYS DRAWN — blue when there is something behind
+                                  them, grey when there isn't, so the row tells you at a glance whether this
+                                  commitment carries a note and a number. The grey ones are doors, not decor:
+                                  the pencil opens the note box either way, and the grey message icon opens
+                                  the edit with the caret already in the phone box. Only a BLUE message icon
+                                  sends a text — a grey one has nothing to send to. Revert lever — the v105
+                                  test, which drew each icon only when its field was filled:
+                                  {!compactIcons&&slot.note?(<span .../>):null} */}
+                              {!compactIcons&&(
+                                <span onClick={function(e){ e.stopPropagation(); openCommitNote(dateKey,idx); }} title={slot.note?"Note — tap to edit":"Add a note"} style={{flexShrink:0,fontSize:"15px",lineHeight:1,color:slot.note?TODAY_BLUE:"#c6c6c6",WebkitTextStroke:"0.4px currentColor",cursor:"pointer",padding:"2px 3px"}}>{"\u270e"}</span>
+                              )}
                               {!compactIcons&&(function(){
                                 var cDigits=(slot.blockPhone||"").replace(/[^0-9+]/g,"");
-                                if (!cDigits) return null;
                                 // Same message icon the client rows carry, in the commitment's blue.
-                                // stopPropagation so texting the dentist does not also open the editor.
-                                return <button onClick={function(e){ e.stopPropagation(); window.location.href="sms:"+cDigits; }} title={"Message "+(slot.blockLabel||"commitment")} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 1px 2px 4px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={20} color={TODAY_BLUE}/></button>;
+                                // stopPropagation so texting the dentist does not also open the edit.
+                                if (cDigits) {
+                                  return <button onClick={function(e){ e.stopPropagation(); window.location.href="sms:"+cDigits; }} title={"Message "+(slot.blockLabel||"commitment")} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 1px 2px 4px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={20} color={TODAY_BLUE}/></button>;
+                                }
+                                return <button onClick={function(e){ e.stopPropagation(); startCommitPhoneEdit(dateKey,idx); }} title={"Add a number for "+(slot.blockLabel||"this commitment")} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 1px 2px 4px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={20} color="#c6c6c6"/></button>;
                               })()}
                             </div>
+                            )
                           ):slot.blocked?(
                             <div onClick={function(){ toggleBlockSlot(dateKey,idx,null); }} style={{flex:1,display:"flex",alignItems:"center",cursor:"pointer"}}>
                               <span style={{fontSize:"12px",color:slot.done?"#3a5a3a":"#aaa",fontStyle:"italic"}}>{slot.blockLabel||"Blocked"}</span>
