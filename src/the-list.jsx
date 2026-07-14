@@ -1537,6 +1537,31 @@ export default function TheList() {
       // if ((e.ctrlKey||e.metaKey) && (e.key==="y" || (e.key==="z" && e.shiftKey))) { if(inLiveField) return; e.preventDefault(); handleRedo(); }
       if ((e.ctrlKey||e.metaKey) && e.key==="z" && !e.shiftKey) { if(inLiveField) return; e.preventDefault(); handleUndoKey(); }
       if ((e.ctrlKey||e.metaKey) && (e.key==="y" || (e.key==="z" && e.shiftKey))) { if(inLiveField) return; e.preventDefault(); handleRedoKey(); }
+      // v104 (#6) CMD-S IS THE SEARCH BAR, FROM ANYWHERE IN THE APP.
+      // preventDefault first and unconditionally — otherwise Safari answers this key with its
+      // own "Save Page" sheet and Granger never sees the search bar at all.
+      // Note there is NO inLiveField guard here, unlike Cmd-Z above. That is deliberate: Cmd-Z
+      // inside a text box belongs to iPadOS (it walks back your characters, which is what you
+      // want mid-typing), but Cmd-S inside a text box means nothing to anyone — so it stays
+      // ours, and he can jump to the search from inside a half-typed name.
+      // dismissTopPopup clears anything covering the header first, using that popup's OWN
+      // backdrop-tap close (so the accounting sheet and the day note SAVE, exactly as they do
+      // when he taps outside them). "held" means the day note raised its this-day/all-repeats
+      // question and is still up — so we leave the screen alone.
+      // Already open? Nothing happens. Granger's call — no caret-stealing, no select-all.
+      if ((e.ctrlKey||e.metaKey) && (e.key==="s"||e.key==="S") && !e.altKey) {
+        e.preventDefault();
+        if (searchExpanded) return;
+        var popSt = dismissTopPopup();
+        if (popSt === "held") return;
+        setSearchExpanded(true);
+        // A popup that was just dismissed needs a beat to unmount before the field can take
+        // focus — if we grab it in the same tick, the dying modal can hand focus back to the
+        // body on its way out. With a clear screen, 0ms is the pattern the search BUTTON has
+        // always used, so it stays 0 there.
+        setTimeout(function(){ if(searchInputRef.current) searchInputRef.current.focus(); }, popSt==="closed" ? 60 : 0);
+        return;
+      }
       // While ANY popup is open the arrows belong to the popup, not the schedule behind
       // it — so they never page the day or jump the background to today. (Undo/redo above
       // still work.) Each modal's own handlers take over the arrows from here.
@@ -2074,11 +2099,32 @@ export default function TheList() {
   // Every path here pushes its OWN undo snapshot before it writes, so an undo from the log is
   // itself undoable by the Undo button — same as the slot path has always been.
   // ===========================================================================
+  // v104: this was the LAST bare parseFloat in the file that can ever be handed money, so it
+  // gets the same hardening acctNum got — for the same reason, one room over.
+  //   It cannot actually be fooled today: this compares two stored RECORDS, and every record is
+  // written through acctNum, so its fields are always plain numbers. But this function is the
+  // no-op guard — it is the thing that decides whether a write counts as a change at all. Hand
+  // it two string values that both begin with the same digits ("3,000" and "3,500", say, out of
+  // some future import or a hand-edited backup) and a bare parseFloat reads BOTH as 3, calls
+  // them equal, and SILENTLY DROPS THE WRITE. No error, no banner, no undo step. The money just
+  // doesn't save.
+  //   Routing it through acctNum costs nothing (numbers short-circuit) and changes no behavior
+  // today. It simply means no parser left in this file can be lied to by a comma.
+  // Revert lever — the v103 body:
+  // var acctSameRec = function(a, b) {
+  //   var fs = ["cash","venmo","applepay","square","services","hours"];
+  //   for (var z=0; z<fs.length; z++) {
+  //     var va = a ? parseFloat(a[fs[z]]) : 0; if (isNaN(va)) va = 0;
+  //     var vb = b ? parseFloat(b[fs[z]]) : 0; if (isNaN(vb)) vb = 0;
+  //     if (va !== vb) return false;
+  //   }
+  //   return true;
+  // };
   var acctSameRec = function(a, b) {
     var fs = ["cash","venmo","applepay","square","services","hours"];
     for (var z=0; z<fs.length; z++) {
-      var va = a ? parseFloat(a[fs[z]]) : 0; if (isNaN(va)) va = 0;
-      var vb = b ? parseFloat(b[fs[z]]) : 0; if (isNaN(vb)) vb = 0;
+      var va = a ? acctNum(a[fs[z]]) : 0;
+      var vb = b ? acctNum(b[fs[z]]) : 0;
       if (va !== vb) return false;
     }
     return true;
@@ -4563,7 +4609,73 @@ export default function TheList() {
   // #13 accounting helpers. A day's record is {cash,venmo,applepay,square,services,hours},
   // all plain numbers (default 0). Take-home auto-sums the four payment methods. Empty
   // records are dropped from the map so month view only flags days with real data.
-  var acctNum = function(v){ var n=parseFloat(v); return isNaN(n)?0:n; };
+  // v104 THE COMMA THAT COULD HAVE EATEN THE MONEY. Read this before touching anything below.
+  // Every accounting value in the app is parsed by acctNum, and acctNum was a bare parseFloat.
+  // parseFloat("3,000") does NOT return 3000. It returns 3 — it stops dead at the comma and
+  // hands back the digits in front of it, with no error and no NaN. So the moment a comma is
+  // printed into a value that can be re-parsed (a formatted field blurred a second time, an
+  // import, an undo restore), a three-thousand-dollar day silently becomes a three-dollar day.
+  // Nothing would have thrown. Nothing would have looked wrong until the month total was off.
+  //   So the parser is hardened FIRST, before a single comma is ever printed anywhere: strip
+  // the commas, the dollar signs and the whitespace, then parse. A plain number short-circuits
+  // untouched, so the hot path (which is nearly every call) costs nothing.
+  // Revert lever — the v103 body, which is unsafe the instant any comma exists on screen:
+  // var acctNum = function(v){ var n=parseFloat(v); return isNaN(n)?0:n; };
+  var acctNum = function(v){
+    if (v === null || v === undefined || v === "") return 0;
+    if (typeof v === "number") return isNaN(v) ? 0 : v;
+    var s = String(v).replace(/[$,\s]/g, "");
+    var n = parseFloat(s);
+    return isNaN(n) ? 0 : n;
+  };
+  // v104 MONEY ON SCREEN (#5). Three shapes, one comma engine.
+  //   groupThousands — the comma itself. Hand-rolled rather than toLocaleString because this
+  //     file is compiled ES5-strict and toLocaleString's grouping is locale-dependent; a device
+  //     set to a European locale would render 3.000 and read as three. This is not.
+  //   fmtDollars  — "$3,000". Whole dollars, rounded. The month view's day totals and month
+  //     total (this is the display-only rounding the Kickoff asked for; it was already in the
+  //     source, so this only adds the comma to it).
+  //   fmtMoney    — "3,000" or "3,000.50". Commas, and cents ONLY if there actually are cents.
+  //     Cash / Venmo / Apple Pay wear this: Granger says those never carry cents, but if one
+  //     ever does, this shows it rather than rounding it away behind his back.
+  //   fmtCents    — "3,000.00". Commas, cents ALWAYS. Square only — the one method that takes
+  //     a card and therefore genuinely lands on 325.50.
+  // None of these touch storage. Accounting still stores plain numbers; this is all display.
+  var groupThousands = function(intStr){
+    var s = String(intStr);
+    var neg = false;
+    if (s.charAt(0) === "-") { neg = true; s = s.slice(1); }
+    var out = "";
+    var c = 0;
+    var i;
+    for (i = s.length - 1; i >= 0; i--) {
+      out = s.charAt(i) + out;
+      c++;
+      if (c % 3 === 0 && i > 0) out = "," + out;
+    }
+    return (neg ? "-" : "") + out;
+  };
+  var splitMoney = function(v){
+    var n = acctNum(v);
+    var neg = n < 0;
+    if (neg) n = -n;
+    var cents = Math.round(n * 100);
+    var whole = Math.floor(cents / 100);
+    var frac = cents - (whole * 100);
+    return {neg:neg, whole:whole, frac:frac};
+  };
+  var fmtDollars = function(v){ return "$" + groupThousands(Math.round(acctNum(v))); };
+  var fmtMoney = function(v){
+    var p = splitMoney(v);
+    var body = groupThousands(p.whole);
+    if (p.frac > 0) body = body + "." + (p.frac < 10 ? ("0" + p.frac) : String(p.frac));
+    return (p.neg ? "-" : "") + body;
+  };
+  var fmtCents = function(v){
+    var p = splitMoney(v);
+    var fs = p.frac < 10 ? ("0" + p.frac) : String(p.frac);
+    return (p.neg ? "-" : "") + groupThousands(p.whole) + "." + fs;
+  };
   var acctFor = function(dateKey){ var r=accounting[dateKey]; return r?r:{cash:0,venmo:0,applepay:0,square:0,services:0,hours:0}; };
   var acctTakehome = function(r){ return acctNum(r.cash)+acctNum(r.venmo)+acctNum(r.applepay)+acctNum(r.square); };
   var acctHasData = function(dateKey){ var r=accounting[dateKey]; if(!r) return false; return acctTakehome(r)>0||acctNum(r.services)>0||acctNum(r.hours)>0; };
@@ -5272,6 +5384,70 @@ export default function TheList() {
       if (view!=="Month") { setBaseDate(function(p){ return addDays(p, delta); }); }
     }
   };
+
+  // v104 (#6) WHAT CMD-S HAS TO GET PAST FIRST.
+  // Granger wants Cmd-S to put the cursor in the search bar from ANYWHERE, popup or no popup.
+  // The catch is geometry: the search bar lives in the app header at z-index 100, and every
+  // popup in this file sits on a scrim at 1000-1400. Focusing the field with a popup up would
+  // drop the caret into a box that is physically UNDERNEATH the overlay — he'd be typing blind
+  // into something he cannot see, and tapping a result would steer the schedule behind a modal
+  // that is still open. So the popup has to go first.
+  //
+  // It goes the way HE would send it: this function does nothing clever and invents no new
+  // close path. Each branch below is a line-for-line mirror of that popup's OWN backdrop-tap
+  // handler — the thing that already happens when he taps outside it today. Which means the
+  // commits are the ones he already expects: the day note SAVES (v91 made the backdrop tap save
+  // rather than discard — dnSaveAndClose), and the accounting sheet SAVES the draft (the same
+  // commit the backdrop tap and the arrow-key page both run). Nothing new is written, nothing
+  // new is thrown away. If a popup's backdrop tap ever changes, this follows it for free,
+  // because it calls the same functions.
+  //
+  // Order is z-index, top down — only the TOPMOST popup is dismissed, one per keypress, so a
+  // stack (the phone-twins card over the profile card) unwinds a layer at a time instead of
+  // vanishing all at once.
+  //
+  // Deliberately NOT in this list: shareModal. The share panel is z-index 110 and, on iPad, it
+  // is docked BELOW the header — the search bar is still visible and still clickable with it
+  // open. There is nothing in the way, so there is nothing to dismiss.
+  //
+  // Returns "none" (nothing was in the way), "closed" (a popup was dismissed, the screen is
+  // now clear) or "held" — see the day-note branch. The caller must NOT open the search on
+  // "held": something is still covering the header.
+  var dismissTopPopup = function(){
+    if (phoneTwins) { setPhoneTwins(null); return "closed"; }                                   // 1400
+    if (phoneModal) { setPhoneModal(null); return "closed"; }                                   // 1300
+    if (quickMsgModal) { setQuickMsgModal(false); setQuickMsgOpenId(null); return "closed"; }   // 1250
+    if (noteModal) {                                                                            // 1200 — SAVES
+      // The day note is the ONE popup that is allowed to refuse. If a repeating line's wording
+      // was retyped, tapping the backdrop does not close it — it raises the this-day / all-repeats
+      // question and holds the screen, because the app will not guess the scope of a repeat on
+      // its own (dnCommitLines). Cmd-S inherits that refusal exactly rather than overriding it:
+      // the question comes up, he answers it, and the next Cmd-S goes through. A hotkey is not a
+      // licence to skip a question the backdrop tap isn't allowed to skip either.
+      if (noteModal.isDay && dnWordChanges(noteLines, noteOrigLines).length > 0) { setNoteScopeAsk("lines"); return "held"; }
+      dnSaveAndClose(); return "closed";
+    }
+    if (timeEditModal) { setTimeEditModal(null); return "closed"; }                             // 1200
+    if (acctModal) { acctCommitDraft(acctModal.dateKey); setAcctModal(null); setAcctAdd({}); return "closed"; } // 1200 — SAVES
+    if (seriesShiftReport) { setSeriesShiftReport(null); return "closed"; }                     // 1160
+    if (renameRequiredModal) { setRenameRequiredModal(null); return "closed"; }                 // 1150
+    if (seriesEditModal) { setSeriesEditModal(null); return "closed"; }                         // 1150
+    if (importConfirm) { setImportConfirm(null); return "closed"; }                             // 1150
+    if (profilePriceModal) { setProfilePriceModal(null); return "closed"; }                     // 1150
+    if (blockLabelModal) { setBlockLabelModal(null); return "closed"; }                         // 1100
+    if (clientProfile) { setClientProfile(null); return "closed"; }                             // 1100
+    if (conflictModal) { setConflictModal(null); return "closed"; }                             // 1100
+    if (groupRecurModal) { setGroupRecurModal(null); return "closed"; }                         // 1100
+    if (holidayModal) { setHolidayModal(null); return "closed"; }                               // 1100
+    if (monthLongPress) { setMonthLongPress(null); return "closed"; }                           // 1100
+    if (checkoffModal) { setCheckoffModal(null); setNudgedDate(null); setCheckoffCalMonth(null); setCheckoffRecur(null); setRecurPickerOpen(false); return "closed"; } // 1000
+    if (confirmDelete) { setConfirmDelete(null); return "closed"; }                             // 1000
+    if (recurringModal) { setRecurringModal(null); return "closed"; }                           // 1000
+    if (groupScheduleModal) { setGroupScheduleModal(null); return "closed"; }                   // 1000
+    if (showHistory) { setShowHistory(false); return "closed"; }                                // 500
+    return "none";
+  };
+
   // Commit from the day-note modal. If the note is already a repeat, defer to the
   // "this day / all repeats" prompt; otherwise write straight through.
   var dnCommitDayNote = function(action){
@@ -7233,7 +7409,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v103</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v104</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -8034,6 +8210,50 @@ export default function TheList() {
         var symLabel={width:"96px",flexShrink:0,fontSize:"18px",color:"#a07830",fontFamily:"Georgia,serif"};
         var fieldInp={flex:1,minWidth:0,boxSizing:"border-box",padding:"9px 11px",border:"1px solid #ddd8cc",borderRadius:"8px",fontFamily:"Georgia,serif",fontSize:"16px",color:"#1a1a1a",background:"#fcfbf7",textAlign:"right",WebkitAppearance:"none",appearance:"none"};
         var onFieldChange=function(key){ return function(e){ var v=e.target.value; setAcctAdd(function(p){ var n={...p}; n[key]=v; return n; }); }; };
+        // v104 (#5) THE MONEY FIELDS DRESS AND UNDRESS.
+        // Leave a field and it formats itself; come back to it and it strips back to bare digits
+        // so he can just type. That second half matters more than it looks: without it he'd be
+        // backspacing through "3,000.00" with the caret parked at the end, deleting a comma he
+        // never typed. So editing always happens on a clean number, and the comma only ever
+        // exists on a field he is not currently standing in.
+        //   Square is the ONLY field that expands cents (325.5 -> 325.50). Granger's rule: cash,
+        // Venmo and Apple Pay never carry cents, Square does, because Square is the card. But the
+        // other three still print cents IF a value somehow lands with them — they are not rounded
+        // away silently. A number that appears in this app is never quietly altered.
+        //   Nothing here reaches storage. acctSetField still writes through acctNum, which strips
+        // the commas back out. The stored record stays a plain number, and the live export stays
+        // exactly the shape it has always been.
+        //   Services and hours keep the ORIGINAL handlers (onFieldFocus / onFieldBlur) — a count
+        // of 12 must not become "12.00", and 6.5 hours must not become "6.50".
+        var moneyFmt=function(key,v){
+          if (v===undefined || v===null) return "";
+          if (String(v).replace(/[$,\s]/g,"")==="") return "";
+          if (acctNum(v)===0) return "";
+          return key==="square" ? fmtCents(v) : fmtMoney(v);
+        };
+        var moneyRaw=function(v){
+          if (v===undefined || v===null) return "";
+          var s=String(v).replace(/[$,\s]/g,"");
+          if (s==="" || acctNum(s)===0) return "";
+          return s;
+        };
+        var moneyVal=function(key){ return acctAdd[key]!==undefined ? acctAdd[key] : moneyFmt(key, rec[key]); };
+        var onMoneyFocus=function(key){ return function(e){
+          var el=e.target;
+          // The raw value is derived from what the field ALREADY holds, so focusing a field and
+          // tabbing straight back out without typing cannot zero it — it re-commits the number
+          // that was already there, and acctCommit's no-op guard means that costs no undo step.
+          var raw=moneyRaw(acctAdd[key]!==undefined ? acctAdd[key] : rec[key]);
+          setAcctAdd(function(p){ var n={...p}; n[key]=raw; return n; });
+          // v68's caret-to-the-end, re-measured AFTER the strip so it lands past the last digit
+          // of the bare number rather than past the last digit of the formatted one.
+          setTimeout(function(){ try{ el.setSelectionRange(el.value.length, el.value.length); }catch(err){} }, 0);
+        }; };
+        var onMoneyBlur=function(key){ return function(){
+          var v=acctAdd[key]!==undefined ? acctAdd[key] : rec[key];
+          acctSetField(dk,key,v);
+          setAcctAdd(function(p){ var n={...p}; n[key]=moneyFmt(key,v); return n; });
+        }; };
         // v68: tapping a field that already holds a number should land the caret at the END
         // so you can keep typing / backspace, instead of iOS dropping it at the far left.
         var onFieldFocus=function(e){ var el=e.target; var L=(el.value||"").length; setTimeout(function(){ try{ el.setSelectionRange(L,L); }catch(err){} }, 0); };
@@ -8085,13 +8305,15 @@ export default function TheList() {
                   {tgt
                     ? <div onClick={function(){ launchApp(tgt, fb); }} title={"Open "+label} style={{...rowLabel,color:"#a07830",cursor:"pointer",textDecoration:"underline",textDecorationColor:"#e0d3b0",textUnderlineOffset:"3px",WebkitTapHighlightColor:"transparent"}}>{label}</div>
                     : <div style={rowLabel}>{label}</div>}
-                  <input type="text" inputMode="decimal" value={draftVal(key)} onChange={onFieldChange(key)} onBlur={onFieldBlur(key)} onFocus={onFieldFocus} onKeyDown={onFieldKey} placeholder="0" style={fieldInp}/>
+                  {/* v104 (#5): money fields only. Revert lever — the v103 input, unformatted:
+                      <input type="text" inputMode="decimal" value={draftVal(key)} onChange={onFieldChange(key)} onBlur={onFieldBlur(key)} onFocus={onFieldFocus} onKeyDown={onFieldKey} placeholder="0" style={fieldInp}/> */}
+                  <input type="text" inputMode="decimal" value={moneyVal(key)} onChange={onFieldChange(key)} onBlur={onMoneyBlur(key)} onFocus={onMoneyFocus(key)} onKeyDown={onFieldKey} placeholder="0" style={fieldInp}/>
                 </div>
               );
             })}
             <div style={{display:"flex",alignItems:"center",gap:"12px",padding:"12px 0",marginTop:"4px",marginBottom:"10px",borderTop:"1px solid #ece4d4",borderBottom:"1px solid #ece4d4"}}>
               <span style={{width:"96px",flexShrink:0,fontSize:"18px",color:"#a07830",fontFamily:"Georgia,serif"}}>{"$"}</span>
-              <span style={{flex:1,textAlign:"right",fontSize:"24px",color:"#a07830",fontFamily:"Georgia,serif"}}>{liveTh}</span>
+              <span style={{flex:1,textAlign:"right",fontSize:"24px",color:"#a07830",fontFamily:"Georgia,serif"}}>{fmtMoney(liveTh)}</span>{/* v104 (#5): the DAY total. This is the number Granger meant by "my day total" — it printed as a bare 3000. Commas now, and cents only when Square actually put cents in it. */}
             </div>
             <div style={rowWrap}>
               <div style={symLabel}>{"#"}</div>
@@ -8105,7 +8327,7 @@ export default function TheList() {
               <div style={{padding:"10px 0 4px",marginTop:"-6px",marginBottom:"14px",borderTop:"1px dashed #ece4d4"}}>
                 <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",marginBottom:"5px"}}>
                   <span style={{fontSize:"12px",color:"#b0a68e",letterSpacing:"0.04em",fontFamily:"Georgia,serif"}}>{"$ / service"}</span>
-                  <span style={{fontSize:"15px",color:"#a07830",fontFamily:"Georgia,serif"}}>{dpsVal!==null?("$"+Math.round(dpsVal)):"—"}</span>
+                  <span style={{fontSize:"15px",color:"#a07830",fontFamily:"Georgia,serif"}}>{dpsVal!==null?fmtDollars(dpsVal):"—"}</span>
                 </div>
                 <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between"}}>
                   <span style={{fontSize:"12px",color:"#b0a68e",letterSpacing:"0.04em",fontFamily:"Georgia,serif"}}>{"services / hour"}</span>
@@ -8806,7 +9028,12 @@ export default function TheList() {
               <button onClick={function(){ setShowHistory(true); }} style={{...navBtnSm,background:"#f0f0ee",border:"1px solid #d8d8d6",color:"#666"}}>{"≡"}</button>
             </div>
           </div>
-          {view==="Month"&&<div style={{textAlign:"center",fontSize:"12px",color:"#1a1a1a",paddingBottom:"4px"}}>{baseDate.toLocaleDateString("en-US",{month:"long",year:"numeric"})}</div>}
+          {/* v104 (#3): the phone header carried its own copy of the month and year on a second
+              line. Now that the month strip always renders and always leads with the month, that
+              copy is a duplicate — it would print "July 2026" twice, once above the other. Gone.
+              This also buys the phone back a whole row of vertical space in Month view.
+              Revert lever:
+              {view==="Month"&&<div style={{textAlign:"center",fontSize:"12px",color:"#1a1a1a",paddingBottom:"4px"}}>{baseDate.toLocaleDateString("en-US",{month:"long",year:"numeric"})}</div>} */}
         </div>
       ) : (
         <div data-apphdr="1" style={{borderBottom:"1px solid #e8e8e6",padding:"2px 20px",paddingTop:"env(safe-area-inset-top,0px)",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,background:"#ffffff",zIndex:100,flexShrink:0}}>
@@ -8887,7 +9114,12 @@ export default function TheList() {
               </div>
             )}
           </div>
-          {view==="Month"&&<div style={{fontSize:"14px",color:"#1a1a1a"}}>{baseDate.toLocaleDateString("en-US",{month:"long",year:"numeric"})}</div>}
+          {/* v104 (#3): the month and year used to sit RIGHT HERE, wedged between the search bar
+              and the message icon, and it was as tight as Granger said it was. It now leads the
+              month view's own strip (see the Month block above), which is where it belongs and
+              where there is room for it to be read.
+              Revert lever — put it back in the header:
+              {view==="Month"&&<div style={{fontSize:"14px",color:"#1a1a1a"}}>{baseDate.toLocaleDateString("en-US",{month:"long",year:"numeric"})}</div>} */}
           <div style={{display:"flex",gap:"4px",alignItems:"center"}}>
             <button onClick={openShareSheet} title="Share openings" style={{...navBtn,width:"32px",padding:"0"}}><MessageIcon size={17} color="#777"/></button>
             <button onClick={function(){ setQuickMsgModal(true); }} title="Quick messages" style={{...navBtn,width:"32px",padding:"0"}}><CopyIcon size={16} color="#777"/></button>
@@ -8904,24 +9136,62 @@ export default function TheList() {
       {view==="Month"&&(function(){
         var monthDays=getMonthDays();
         var mTot=acctMonthTotals(baseDate);
+        // v104 (#2): the line between what's behind us and what's ahead. Midnight this morning,
+        // computed ONCE for the whole grid rather than per cell. getMonthDays hands back dates
+        // built as new Date(y,m,d) — already midnight — so this is a clean same-day comparison
+        // and TODAY IS NEVER PAST (it is equal, not less than). Granger's call, and it's also
+        // what keeps today the only pure-white cell in a run of greyed-out ones.
+        var todayMid=new Date(); todayMid.setHours(0,0,0,0);
         return (
           <div style={{width:"100vw",position:"relative",left:"50%",right:"50%",marginLeft:"-50vw",marginRight:"-50vw",boxSizing:"border-box",textAlign:"left",flex:"1 1 auto",display:"flex",flexDirection:"column",minHeight:0}}>
-            {(mTot.takehome>0||mTot.services>0||mTot.hours>0)&&(
-              <div style={{display:"flex",justifyContent:"center",alignItems:"baseline",flexWrap:"wrap",gap:isPhone?"14px":"24px",padding:isPhone?"6px 8px":"8px 12px",background:"#faf7f0",borderBottom:"1px solid #ece4d4",flexShrink:0,fontFamily:"Georgia,serif"}}>
-                <span style={{fontSize:isPhone?"12px":"14px",color:"#777"}}>{"$"+Math.round(mTot.takehome)}</span>
-                {mTot.services>0&&<span style={{fontSize:isPhone?"12px":"14px",color:"#777"}}>{"# "+mTot.services}</span>}
-                {mTot.hours>0&&<span style={{fontSize:isPhone?"12px":"14px",color:"#777"}}>{": "+mTot.hours}</span>}
-              </div>
-            )}
+            {/* v104 (#1, #3, #4) THE MONTH STRIP. Three changes live in this one bar.
+                #1 The cream is gone. This bar was #faf7f0 on a #ece4d4 rule; it is now white on
+                   the same hairline the rest of the app's chrome uses. Today's cell loses its
+                   cream too (see cellBg below) — the blue rail and the blue number carry it alone.
+                #3 The month and year moved here out of the app header, where they were pinched
+                   between the search bar and the message icon. They lead the bar, and the WHOLE
+                   group is centered — so with no money yet the month floats alone in the middle,
+                   and the moment the day's takings arrive it re-centers with them, exactly as
+                   Granger asked. That is why this bar no longer hides itself when the month is
+                   empty: it now always renders, because it always has the month to carry.
+                #4 The bar takes more vertical room and bigger type. That height comes out of the
+                   day cells (the grid below is 1fr), which is what squares them up.
+                Revert levers — the v103 bar, cream and all, which vanished on an empty month:
+                {(mTot.takehome>0||mTot.services>0||mTot.hours>0)&&(
+                  <div style={{display:"flex",justifyContent:"center",alignItems:"baseline",flexWrap:"wrap",gap:isPhone?"14px":"24px",padding:isPhone?"6px 8px":"8px 12px",background:"#faf7f0",borderBottom:"1px solid #ece4d4",flexShrink:0,fontFamily:"Georgia,serif"}}>
+                    <span style={{fontSize:isPhone?"12px":"14px",color:"#777"}}>{"$"+Math.round(mTot.takehome)}</span>
+                    {mTot.services>0&&<span style={{fontSize:isPhone?"12px":"14px",color:"#777"}}>{"# "+mTot.services}</span>}
+                    {mTot.hours>0&&<span style={{fontSize:isPhone?"12px":"14px",color:"#777"}}>{": "+mTot.hours}</span>}
+                  </div>
+                )} */}
+            <div style={{display:"flex",justifyContent:"center",alignItems:"baseline",flexWrap:"wrap",gap:isPhone?"12px":"26px",padding:isPhone?"8px 8px":"15px 12px",background:"#ffffff",borderBottom:"1px solid #ececea",flexShrink:0,fontFamily:"Georgia,serif"}}>
+              <span style={{fontSize:isPhone?"15px":"21px",color:"#1a1a1a",letterSpacing:"0.02em",whiteSpace:"nowrap"}}>{baseDate.toLocaleDateString("en-US",{month:"long",year:"numeric"})}</span>
+              {mTot.takehome>0&&<span style={{fontSize:isPhone?"13px":"17px",color:"#777"}}>{fmtDollars(mTot.takehome)}</span>}
+              {mTot.services>0&&<span style={{fontSize:isPhone?"13px":"17px",color:"#777"}}>{"# "+mTot.services}</span>}
+              {mTot.hours>0&&<span style={{fontSize:isPhone?"13px":"17px",color:"#777"}}>{": "+mTot.hours}</span>}
+            </div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(7,minmax(0,1fr))",background:"#e8e8e6",gap:"1px",borderBottom:"1px solid #e8e8e6",flexShrink:0}}>
-              {(isPhone?["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]:["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]).map(function(d){ return <div key={d} style={{padding:"8px 0",textAlign:"center",fontSize:isPhone?"9px":"10px",letterSpacing:"0.1em",textTransform:"uppercase",color:"#aaa",background:"#fafaf8",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d}</div>; })}
+              {/* v104 (#4): the weekday row grows too — a share of the height comes from here as
+                  well as from the month strip above, so neither has to swell on its own. */}
+              {(isPhone?["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]:["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]).map(function(d){ return <div key={d} style={{padding:isPhone?"9px 0":"13px 0",textAlign:"center",fontSize:isPhone?"10px":"12px",letterSpacing:"0.1em",textTransform:"uppercase",color:"#aaa",background:"#fafaf8",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d}</div>; })}
             </div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(7,minmax(0,1fr))",gap:"1px",background:"#e8e8e6",flex:"1 1 auto",gridAutoRows:"1fr",minHeight:0}}>
               {monthDays.map(function(day,i){
                 var outside = day.getMonth() !== baseDate.getMonth();
                 var dk=toDateKey(day); var slots=getSlots(dk); var booked=slots.filter(function(s){ return s.name; });
                 var isT=isToday(day); var holiday=getHolidayForDate(dk); var range=getDayTimeRange(dk);
-                var cellBg = outside ? "#f6f6f4" : (isT?"#fffbf0":"#ffffff");
+                // v104 (#2): a day that is behind us. Today is excluded by construction (see
+                // todayMid above). The wash goes on the CELL, never on the date number — the
+                // number stays full-strength black so a past day is still as readable as any
+                // other; only the day's freight (dots, hours, totals, pencil) drops a shade.
+                var past = day < todayMid && !isT;
+                // v104 (#1): today's cream (#fffbf0) is gone. Today is now plain white and is
+                // marked by the blue rail and the blue number ALONE — which, next to the greyed
+                // past days, actually reads louder than the cream ever did.
+                // Revert lever — the v103 line, cream and all:
+                // var cellBg = outside ? "#f6f6f4" : (isT?"#fffbf0":"#ffffff");
+                var cellBg = outside ? "#f7f7f5" : "#ffffff";
+                if (past) cellBg = outside ? "#ededeb" : "#f1f1ef";
                 // v78: glide highlight — this day lights up while a live drag (single
                 // or group) passes over it, so it's clear where the drop will land.
                 var mOver = isLiveDragging && dragLifted && dragOverKey===("M:"+dk);
@@ -8933,30 +9203,52 @@ export default function TheList() {
                     onMouseUp={cancelLongPress} onMouseLeave={function(e){ cancelLongPress();e.currentTarget.style.background=cellBg; }}
                     onTouchStart={function(){ longPressTimer.current=setTimeout(function(){ setMonthLongPress({dateKey:dk,day}); },600); }}
                     onTouchEnd={cancelLongPress} onTouchMove={cancelLongPress}
-                    style={{position:"relative",background:cellBg,minHeight:isPhone?"50px":"64px",padding:isPhone?"4px 4px":"7px 8px",cursor:"pointer",borderTop:isT?("2px solid "+TODAY_BLUE):"2px solid transparent",transition:"background 0.1s",userSelect:"none",boxSizing:"border-box",overflow:"hidden",opacity:outside?0.85:1,outline:mOver?"2px solid #5a9a5a":"none",outlineOffset:"-2px"}}
-                    onMouseEnter={function(e){ e.currentTarget.style.background=outside?"#efefec":(isT?"#fff8e8":"#f4f4f2"); }}
+                    style={{position:"relative",background:cellBg,minHeight:isPhone?"50px":"64px",padding:isPhone?"4px 5px":"9px 10px",cursor:"pointer",borderTop:isT?("2px solid "+TODAY_BLUE):"2px solid transparent",transition:"background 0.1s",userSelect:"none",boxSizing:"border-box",overflow:"hidden",opacity:outside?0.85:1,outline:mOver?"2px solid #5a9a5a":"none",outlineOffset:"-2px"}}
+                    /* v104: the hover had the cream baked into it too (isT?"#fff8e8":...), and it
+                       knew nothing about past days — so hovering a greyed day used to flash it
+                       BRIGHTER than its neighbours. Both fixed; each state now hovers one step
+                       darker than wherever it already sits.
+                       Revert lever — the v103 hover:
+                       onMouseEnter={function(e){ e.currentTarget.style.background=outside?"#efefec":(isT?"#fff8e8":"#f4f4f2"); }} */
+                    onMouseEnter={function(e){ e.currentTarget.style.background=past?(outside?"#e5e5e3":"#e9e9e7"):(outside?"#efefec":"#f4f4f2"); }}
                   >
+                    {/* v104 (#4): 14px -> 22px on iPad. NOTE the colour expression is deliberately
+                        unchanged: "past" is NOT in it. A past day's number stays #1a1a1a, full
+                        black, exactly as loud as tomorrow's — that was the whole condition on
+                        greying the past out at all. Only the cell beneath it dims.
+                        The holiday goes up by one point only (11 -> 12); it was already tight. */}
                     <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:"6px",marginBottom:"3px"}}>
-                      <div style={{fontSize:"14px",color:isT?TODAY_BLUE:(outside?"#bdbdbb":"#1a1a1a"),fontWeight:isT?"bold":"normal",flexShrink:0}}>{day.getDate()}</div>
-                      {holiday&&<div style={{fontSize:"11px",color:outside?"#cbb98e":"#a07830",textAlign:"right",lineHeight:1.2,letterSpacing:"0.08em",textTransform:"uppercase",marginTop:"4px",minWidth:0,overflow:"hidden"}}>{holiday}</div>}
+                      <div style={{fontSize:isPhone?"16px":"22px",color:isT?TODAY_BLUE:(outside?"#bdbdbb":"#1a1a1a"),fontWeight:isT?"bold":"normal",flexShrink:0,lineHeight:1.1}}>{day.getDate()}</div>
+                      {holiday&&<div style={{fontSize:isPhone?"10px":"12px",color:outside?"#cbb98e":(past?"#c4b590":"#a07830"),textAlign:"right",lineHeight:1.2,letterSpacing:"0.08em",textTransform:"uppercase",marginTop:"5px",minWidth:0,overflow:"hidden"}}>{holiday}</div>}
                     </div>
+                    {/* v104 (#4): THE DOTS DO NOT GROW. They are still 8px — one dot is one man,
+                        and a day with ten of them has to keep fitting. Everything AROUND them
+                        grows: the working time 11 -> 15px, the end-of-day block 11 -> 14px.
+                        (#2): the fade for a past day rides on this wrapper's opacity, so the dots
+                        and the working time recede together while the date number above them
+                        stays black. */}
                     {booked.length>0&&(
-                      <div style={{opacity:outside?0.55:1}}>
-                        <div style={{display:"flex",flexWrap:"wrap",gap:"3px",marginBottom:"3px"}}>
+                      <div style={{opacity:outside?0.5:(past?0.6:1)}}>
+                        <div style={{display:"flex",flexWrap:"wrap",gap:"3px",marginBottom:"4px"}}>
                           {booked.map(function(s,j){ return <div key={j} style={{width:"8px",height:"8px",borderRadius:"50%",background:s.recurWeeks?"#6a8aaa":"#c9a96e"}}/>; })}
                         </div>
-                        {range&&<div style={{fontSize:"11px",color:"#777",fontWeight:"500"}}>{range}</div>}
+                        {range&&<div style={{fontSize:isPhone?"12px":"15px",color:"#777",fontWeight:"500",lineHeight:1.2}}>{range}</div>}
                       </div>
                     )}
-                    {acctHasData(dk)&&(function(){ var r=acctFor(dk); var sv=acctNum(r.services); var hr=acctNum(r.hours); return (
-                      <div style={{marginTop:"3px",fontSize:isPhone?"9px":"11px",lineHeight:1.3,fontFamily:"Georgia,serif"}}>
-                        <div style={{color:outside?"#c2c2c0":"#888"}}>{"$"+Math.round(acctTakehome(r))}</div>
-                        <div style={{color:outside?"#c2c2c0":"#888"}}>{"#"+sv}</div>
-                        <div style={{color:outside?"#c2c2c0":"#888"}}>{":"+hr}</div>
+                    {/* v104 (#4): the gap Granger asked for. The working time above and the money
+                        below are different animals and were sitting 3px apart, reading as one
+                        block. marginTop opens it to 9px so the eye separates them.
+                        (#5): fmtDollars puts the comma in. It still rounds to the whole dollar,
+                        exactly as v103 did — the rounding was already here; only the comma is new. */}
+                    {acctHasData(dk)&&(function(){ var r=acctFor(dk); var sv=acctNum(r.services); var hr=acctNum(r.hours); var tcol=outside?"#c2c2c0":(past?"#adadab":"#888"); return (
+                      <div style={{marginTop:isPhone?"5px":"9px",fontSize:isPhone?"11px":"14px",lineHeight:1.35,fontFamily:"Georgia,serif"}}>
+                        <div style={{color:tcol}}>{fmtDollars(acctTakehome(r))}</div>
+                        <div style={{color:tcol}}>{"#"+sv}</div>
+                        <div style={{color:tcol}}>{":"+hr}</div>
                       </div>
                     ); })()}
                     {(function(){ var rN=resolveDayNote(dk); var hasN=!!rN.text; var k=rN.text?rN.kind:null; var rep=rN.repeating; var col=!hasN?"#cfcccc":(k==="personal"?TODAY_BLUE:"#c9a96e"); return (
-                      <button onClick={function(e){ e.stopPropagation(); beginUndoVisit("daynote:"+dk); /* v102: fresh undo visit per opening of this day's notes. */ var rws=dnPrefillRows(dk); setNoteLines(rws); setNoteOrigLines(rws.slice()); setNoteRepeatPopup(null); setNoteScopeAsk(null); setNoteModal({dayKey:dk,isDay:true,name:friendlyDateLong(dk)}); }} onMouseDown={function(e){ e.stopPropagation(); }} onTouchStart={function(e){ e.stopPropagation(); }} title={hasN?"Day note":"Add a day note"} style={{position:"absolute",bottom:"2px",right:"3px",background:"none",border:"none",cursor:"pointer",padding:"2px 3px",color:col,fontSize:isPhone?"13px":"15px",lineHeight:1,opacity:outside?0.6:1,WebkitTextStroke:"0.4px currentColor"}}>{"✎"}{rep?<sup style={{fontSize:"7px",marginLeft:"1px",opacity:0.85,WebkitTextStroke:"0px"}}>{"↺"}</sup>:null}</button>
+                      <button onClick={function(e){ e.stopPropagation(); beginUndoVisit("daynote:"+dk); /* v102: fresh undo visit per opening of this day's notes. */ var rws=dnPrefillRows(dk); setNoteLines(rws); setNoteOrigLines(rws.slice()); setNoteRepeatPopup(null); setNoteScopeAsk(null); setNoteModal({dayKey:dk,isDay:true,name:friendlyDateLong(dk)}); }} onMouseDown={function(e){ e.stopPropagation(); }} onTouchStart={function(e){ e.stopPropagation(); }} title={hasN?"Day note":"Add a day note"} style={{position:"absolute",bottom:"2px",right:"4px",background:"none",border:"none",cursor:"pointer",padding:"2px 3px",color:col,fontSize:isPhone?"16px":"21px",lineHeight:1,opacity:outside?0.6:(past?0.7:1),WebkitTextStroke:"0.5px currentColor"}}>{"✎"}{rep?<sup style={{fontSize:"9px",marginLeft:"1px",opacity:0.85,WebkitTextStroke:"0px"}}>{"↺"}</sup>:null}</button>
                     ); })()}
                   </div>
                 );
