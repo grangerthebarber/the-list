@@ -863,6 +863,32 @@ export default function TheList() {
   const [newHolidayYearly, setNewHolidayYearly] = useState(false);
   const [blockLabelModal, setBlockLabelModal] = useState(null);
   const [blockLabel, setBlockLabel] = useState("Lunch");
+  // v105 PERSONAL COMMITMENT SLOTS.
+  // A commitment is NOT a new kind of row. It is a BLOCKED row (blocked:true) wearing one
+  // extra flag: personal:true. That single fact is the whole build. Riding blocked:true means
+  // every exclusion a commitment needs is already written and already proven — a blocked row
+  // is invisible to the booking counts, to checkoff, to drag-and-drop landing, to Share
+  // Openings, to the client-name scans, to the accounting totals, and to the recurring engine
+  // (which treats it as a hard wall and will not land a series on it). Not one of those code
+  // paths is touched here. personal:true is read ONLY by the row's paint and by the editor
+  // below, so a commitment cannot leak into the barbershop's math even if this file is wrong.
+  //
+  // Its fields live INSIDE the slot, inside schedules — which already syncs wholesale — so
+  // this is NOT a Firebase payload change: no seed, no snapshot-apply, no write payload, no
+  // dependency array, no export/import wiring. Confirmed against migrateSchedules/
+  // trimRemovedTail, which pass slot objects through by reference and never rebuild them
+  // field-by-field, so an unknown field survives load, sync, export and re-import untouched.
+  //   blocked:true    the rails
+  //   personal:true   the flag
+  //   blockLabel      the commitment's name ("Dentist")  — EXISTING field, reused
+  //   blockPhone      its number — lives on the SLOT, never in the client registry, so a
+  //                   commitment can never become a "client" in search / suggestions / profiles
+  //   note            the note — the EXISTING slot.note, still fully alive in the data (v98
+  //                   retired the row pencil, it never retired the field)
+  // The TIME is not handled here at all: openTimeEdit/commitTimeEdit carry no blocked guard,
+  // so the row's time column already opens the proven time modal. Custom times cost no code.
+  const [commitModal, setCommitModal] = useState(null);
+  const [commitDraft, setCommitDraft] = useState({label:"", phone:"", note:""});
   const [clientProfile, setClientProfile] = useState(null);
   const [renamingProfile, setRenamingProfile] = useState(false);
   const [renameValue, setRenameValue] = useState("");
@@ -1126,6 +1152,16 @@ export default function TheList() {
   const viewRef = useRef(view);
   viewRef.current = view;
   const slotTapRef = useRef({key:null,count:0,timer:null,side:null});
+  // v105: the empty-slot long-press that raises the commitment editor. Deliberately its OWN
+  // timer, separate from dragLongPress: the drag press only ever arms on a FILLED row (see
+  // its onMouseDown/onTouchStart guards, all of which begin with a filled check, so these two
+  // presses can never both be running on the same row and cannot race each other.
+  // commitSwallowTap is the release guard — an empty row's tap opens the name editor, and
+  // without this the finger lifting off a completed long-press would fall straight through
+  // into that editor behind the modal.
+  const commitLongPress = useRef(null);
+  const commitTouchStart = useRef(null);
+  const commitSwallowTap = useRef(false);
   // Pencil "arm" mode: clicking the pencil with an empty field arms it so the
   // next Enter pencils the person in; clicking it again disarms.
   const [pencilArmed, setPencilArmed] = useState(false);
@@ -1565,7 +1601,7 @@ export default function TheList() {
       // While ANY popup is open the arrows belong to the popup, not the schedule behind
       // it — so they never page the day or jump the background to today. (Undo/redo above
       // still work.) Each modal's own handlers take over the arrows from here.
-      var anyOverlay = !!(acctModal||noteModal||checkoffModal||confirmDelete||phoneModal||blockLabelModal||clientProfile||renameRequiredModal||recurringModal||conflictModal||groupRecurModal||holidayModal||groupScheduleModal||timeEditModal||seriesEditModal||seriesShiftReport||importConfirm||profilePriceModal||phoneTwins); /* v100 (#1): phoneTwins joins the list. In practice it is always raised OVER phoneModal or clientProfile (both already here), so this changes nothing today — it is here so it stays correct if it is ever raised from somewhere else. */
+      var anyOverlay = !!(acctModal||noteModal||checkoffModal||confirmDelete||phoneModal||blockLabelModal||commitModal||clientProfile||renameRequiredModal||recurringModal||conflictModal||groupRecurModal||holidayModal||groupScheduleModal||timeEditModal||seriesEditModal||seriesShiftReport||importConfirm||profilePriceModal||phoneTwins); /* v100 (#1): phoneTwins joins the list. In practice it is always raised OVER phoneModal or clientProfile (both already here), so this changes nothing today — it is here so it stays correct if it is ever raised from somewhere else. */
       // Left/Right arrows page through days (months in Month view), mirroring the
       // on-screen ‹ / › buttons. Ignored while a field is focused — there the arrows
       // move the text cursor / hop slot rows, and Shift+Arrow nudges the time.
@@ -2058,12 +2094,23 @@ export default function TheList() {
       showBanner({type:"undo",name:entry.prevName||entry.name,time:entry.time,dateKey:dk});
     } else if (entry.type==="blocked") {
       pushUndo(snapshot);
-      slots[idx] = {...cur,blocked:false,blockLabel:""};
+      // v105: both branches below gained ONE guarded clause each, for personal commitments.
+      // The guard is entry.personal, which ONLY a v105 commitment entry carries — so every
+      // Lunch and Block entry ever written, before or after today, takes the untouched path
+      // and behaves byte-for-byte as it did in v104. Without this, undoing a commitment gave
+      // back a row still secretly wearing personal/blockPhone/note (blocked branch), or gave
+      // back a blue row with its phone and note silently gone (unblocked branch).
+      // Revert lever — the v104 bodies, verbatim:
+      // slots[idx] = {...cur,blocked:false,blockLabel:""};
+      // slots[idx] = {...cur,blocked:true,blockLabel:entry.name||"Lunch",name:"",done:false};
+      if (entry.personal) { slots[idx] = {...cur,blocked:false,blockLabel:"",personal:false,blockPhone:"",note:""}; }
+      else { slots[idx] = {...cur,blocked:false,blockLabel:""}; }
       setSlots(dk, slots);
       showBanner({type:"undo",name:entry.name,time:entry.time,dateKey:dk});
     } else if (entry.type==="unblocked") {
       pushUndo(snapshot);
-      slots[idx] = {...cur,blocked:true,blockLabel:entry.name||"Lunch",name:"",done:false};
+      if (entry.personal) { slots[idx] = {...cur,blocked:true,blockLabel:entry.name||"Commitment",personal:true,blockPhone:(entry.phone||""),note:(entry.note||""),name:"",done:false}; }
+      else { slots[idx] = {...cur,blocked:true,blockLabel:entry.name||"Lunch",name:"",done:false}; }
       setSlots(dk, slots);
       showBanner({type:"undo",name:entry.name,time:entry.time,dateKey:dk});
     } else if (entry.type==="recurring_set") {
@@ -5435,6 +5482,7 @@ export default function TheList() {
     if (importConfirm) { setImportConfirm(null); return "closed"; }                             // 1150
     if (profilePriceModal) { setProfilePriceModal(null); return "closed"; }                     // 1150
     if (blockLabelModal) { setBlockLabelModal(null); return "closed"; }                         // 1100
+    if (commitModal) { setCommitModal(null); return "closed"; }                                 // v105 commitment editor — 1100
     if (clientProfile) { setClientProfile(null); return "closed"; }                             // 1100
     if (conflictModal) { setConflictModal(null); return "closed"; }                             // 1100
     if (groupRecurModal) { setGroupRecurModal(null); return "closed"; }                         // 1100
@@ -6230,6 +6278,106 @@ export default function TheList() {
       slots[idx]={...slot,blocked:true,blockLabel:label||"Lunch",name:"",done:false,recurWeeks:null,isException:false}; addHistoryEntry({type:"blocked",time:slot.time,name:label||"Lunch",dateKey});
     }
     setSlots(dateKey,slots); setBlockLabelModal(null); setBlockLabel("Lunch"); setSwipedSlot(null);
+  };
+
+  // ── v105 PERSONAL COMMITMENTS ────────────────────────────────────────────────
+  // LONG-PRESS AN EMPTY SLOT. Mirrors startDragLongPress exactly in shape and timing, so it
+  // feels like the same gesture the hand already knows. It arms ONLY on a genuinely open row
+  // (no name, not blocked, not marked available/overtime, not mid-edit) — the guards live at
+  // the call site in the row. Moving 12px cancels it, so a scroll can never raise the editor.
+  const startCommitLongPress = function(dateKey, idx, touchX, touchY) {
+    if (commitLongPress.current) { clearTimeout(commitLongPress.current); commitLongPress.current = null; }
+    commitTouchStart.current = {x: touchX||0, y: touchY||0};
+    commitLongPress.current = setTimeout(function() {
+      commitLongPress.current = null;
+      commitTouchStart.current = null;
+      var slot = getSlots(dateKey)[idx];
+      // Re-checked at FIRE time, not at press time: half a second is long enough for a drop or
+      // a sync to have landed someone on this row, and a commitment must never overwrite them.
+      if (!slot || slot.name || slot.blocked) return;
+      commitSwallowTap.current = true;   // eat the finger coming back up
+      openCommitEditor(dateKey, idx);
+    }, 500);
+  };
+  const cancelCommitLongPress = function() {
+    if (commitLongPress.current) { clearTimeout(commitLongPress.current); commitLongPress.current = null; }
+    commitTouchStart.current = null;
+  };
+  const cancelCommitLongPressIfMoved = function(touchX, touchY) {
+    if (!commitTouchStart.current) return;
+    var dx = Math.abs(touchX - commitTouchStart.current.x);
+    var dy = Math.abs(touchY - commitTouchStart.current.y);
+    if (dx > 12 || dy > 12) { cancelCommitLongPress(); }
+  };
+
+  // Open the editor. Serves BOTH doors: the long-press on an open row (a brand-new
+  // commitment — every field blank), and the tap on an existing commitment's label (an edit —
+  // fields loaded from the slot). isNew only decides the modal's title and its buttons.
+  const openCommitEditor = function(dateKey, idx) {
+    var slot = getSlots(dateKey)[idx];
+    if (!slot) return;
+    // On iPhone an OPEN row's name box is a real, live input (phoneEmptyTypable) — the first
+    // touch focuses it and raises the keyboard, which is exactly what we want for a normal
+    // booking but not here: half a second later the editor arrives on top of a keyboard that
+    // is still up, over an edit that is still open behind it. So tear that edit down and drop
+    // the keyboard as the editor opens. Copied from handleOpenSlotTap, which dismisses an edit
+    // the same way when a second tap turns out to mean something else. On iPad the name box is
+    // readOnly and none of this fires — it is a no-op there.
+    editingRef.current=null; setEditingCell(null); setEditingOccupied(false);
+    if (settleTimer.current) { clearTimeout(settleTimer.current); settleTimer.current=null; }
+    setEditChromeReady(true); setPencilArmed(false);
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    var existing = !!(slot.blocked && slot.personal);
+    setCommitDraft({label:(existing?(slot.blockLabel||""):""), phone:(existing?(slot.blockPhone||""):""), note:(existing?(slot.note||""):"")});
+    setCommitModal({dateKey:dateKey, idx:idx, isNew:!existing, time:slot.time});
+  };
+
+  // Write it. One slot, one undo step. A commitment is written the same way a Lunch is — the
+  // booking fields are cleared to their empty values, exactly as toggleBlockSlot does — plus
+  // the three fields that make it personal. An UNNAMED commitment is meaningless, so a blank
+  // label is refused (the modal's Save is disabled anyway; this is the second lock).
+  const saveCommitment = function() {
+    if (!commitModal) return;
+    var dateKey = commitModal.dateKey; var idx = commitModal.idx;
+    var label = (commitDraft.label||"").trim();
+    if (!label) return;
+    var phone = (commitDraft.phone||"").trim();
+    var note = (commitDraft.note||"").trim();
+    var slots = [...getSlots(dateKey)];
+    var prev = slots[idx];
+    if (!prev) { setCommitModal(null); return; }
+    var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
+    pushUndo(snapshot);
+    slots[idx] = {...prev, blocked:true, personal:true, blockLabel:label, blockPhone:phone, note:note, name:"", price:"", done:false, recurWeeks:null, isException:false, availStatus:null};
+    setSlots(dateKey, slots);
+    // Logged as type:"blocked" — the SAME type Lunch has always used — so the change log, its
+    // color, its chip and its filter bucket all keep working with no new type to teach them.
+    // The commitment's own fields ride ALONG on the entry so the per-row undo can put the
+    // phone and the note back too (see the "unblocked" branch of the per-row undo). Every
+    // pre-existing Lunch/Block entry has no .personal, so all of them are untouched by that.
+    addHistoryEntry({type:"blocked", time:prev.time, name:label, dateKey:dateKey, personal:true, phone:phone, note:note});
+    // No banner, on purpose. bannerFamily() maps "blocked" to RED and flashes the row red —
+    // the color of a cancellation. Saving a commitment is not a loss, and the row going blue
+    // under your finger is louder feedback than any banner. The change log still records it.
+    setCommitModal(null);
+  };
+
+  // Remove it — the row goes back to being a plain open slot. This is the ONLY way a
+  // commitment can be destroyed: the label tap opens the editor instead of unblocking, so
+  // there is no stray-tap path to losing one. Everything is cleared (never left dangling on
+  // an open row), and it logs "unblocked" carrying its fields, so undo restores it whole.
+  const removeCommitment = function() {
+    if (!commitModal) return;
+    var dateKey = commitModal.dateKey; var idx = commitModal.idx;
+    var slots = [...getSlots(dateKey)];
+    var prev = slots[idx];
+    if (!prev) { setCommitModal(null); return; }
+    var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
+    pushUndo(snapshot);
+    slots[idx] = {...prev, blocked:false, personal:false, blockLabel:"", blockPhone:"", note:"", done:false};
+    setSlots(dateKey, slots);
+    addHistoryEntry({type:"unblocked", time:prev.time, name:(prev.blockLabel||"Commitment"), dateKey:dateKey, personal:true, phone:(prev.blockPhone||""), note:(prev.note||"")});
+    setCommitModal(null);
   };
 
   // The human-readable export — fired by its own "Download schedule" button. The JSON
@@ -7409,7 +7557,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v104</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v105</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -7545,6 +7693,44 @@ export default function TheList() {
               <button onClick={function(){ cancelRecurringForGroup(groupRecurModal.dateKey, groupRecurModal.groupSlots); }} style={{display:"block",width:"100%",padding:"10px",background:"none",border:"1px solid #e3b8b0",borderRadius:"8px",color:"#b0392b",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",letterSpacing:"0.08em",textTransform:"uppercase",marginBottom:"8px"}}>Cancel recurring for this group</button>
             )}
             <button onClick={function(){ setGroupRecurModal(null); }} style={{display:"block",width:"100%",padding:"8px",background:"none",border:"none",color:"#bbb",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {/* v105 THE COMMITMENT EDITOR. Reached two ways: a long-press on an open slot (new), or a
+          tap on an existing commitment's label (edit). The TIME is deliberately absent — the row's
+          time column already opens the proven time modal on ANY row, blocked ones included, so a
+          commitment gets a to-the-minute custom time with no new time code written here. Save is
+          dead until there is a label: an unnamed commitment tells you nothing at a glance, which
+          is the one job this feature has. */}
+      {commitModal && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={function(){ setCommitModal(null); }}>
+          <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"24px",width:"min(340px,90vw)",borderTop:"3px solid "+TODAY_BLUE}} onClick={function(e){ e.stopPropagation(); }}>
+            <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:TODAY_BLUE,marginBottom:"3px"}}>{commitModal.isNew?"New commitment":"Commitment"}</div>
+            <div style={{fontSize:"11px",color:"#aaa",marginBottom:"12px"}}>{commitModal.time+" — tap the time on the row to change it"}</div>
+            <input autoFocus value={commitDraft.label}
+              onChange={function(e){ var v=e.target.value; setCommitDraft(function(d){ return {...d, label:v}; }); }}
+              onKeyDown={function(e){ if(e.key==="Enter") saveCommitment(); if(e.key==="Escape") setCommitModal(null); }}
+              placeholder="Dentist, Ballgame, etc."
+              style={{...inputStyle,width:"100%",boxSizing:"border-box",marginBottom:"8px",fontSize:"15px"}} />
+            <input value={commitDraft.phone}
+              onChange={function(e){ var v=e.target.value; setCommitDraft(function(d){ return {...d, phone:v}; }); }}
+              onKeyDown={function(e){ if(e.key==="Enter") saveCommitment(); if(e.key==="Escape") setCommitModal(null); }}
+              placeholder="Phone (optional)" inputMode="tel" autoComplete="off"
+              style={{...inputStyle,width:"100%",boxSizing:"border-box",marginBottom:"8px",fontSize:"15px"}} />
+            <textarea value={commitDraft.note}
+              onChange={function(e){ var v=e.target.value; setCommitDraft(function(d){ return {...d, note:v}; }); }}
+              onKeyDown={function(e){ if(e.key==="Escape") setCommitModal(null); }}
+              placeholder="Notes (optional)" rows={3}
+              style={{...inputStyle,width:"100%",boxSizing:"border-box",marginBottom:"14px",fontSize:"14px",resize:"none",fontFamily:"Georgia,serif",lineHeight:1.45}} />
+            <div style={{display:"flex",gap:"8px"}}>
+              <button onClick={function(){ setCommitModal(null); }} style={{padding:"10px 16px",background:"none",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#888",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>Cancel</button>
+              <button onClick={saveCommitment} disabled={!(commitDraft.label||"").trim()}
+                style={{flex:1,padding:"10px",background:(commitDraft.label||"").trim()?TODAY_BLUE:"#cdd6e0",border:"none",borderRadius:"6px",color:"#fff",cursor:(commitDraft.label||"").trim()?"pointer":"default",fontFamily:"inherit",fontSize:"13px"}}>Save</button>
+            </div>
+            {!commitModal.isNew && (
+              <button onClick={removeCommitment} style={{display:"block",width:"100%",marginTop:"10px",padding:"9px",background:"none",border:"1px solid #e3b8b0",borderRadius:"6px",color:"#b0392b",cursor:"pointer",fontFamily:"inherit",fontSize:"12px",letterSpacing:"0.08em",textTransform:"uppercase"}}>Remove — give the slot back</button>
+            )}
           </div>
         </div>
       )}
@@ -9341,7 +9527,20 @@ export default function TheList() {
                     // B1: a group/multi drag greys EVERY member, not just the one grabbed.
                     // sourceKey covers the grabbed row; the clients list covers the rest.
                     var isDragging=dragState&&(dragState.sourceKey===rowKey||(dragState.multi&&dragState.clients&&dragState.clients.some(function(c){ return (c.originalDateKey+"-"+c.originalIdx)===rowKey; })));
-                    var slotBg=slot.blocked?"#f4f4f2":(wasRemoved&&!isEditing)?"#fff0ee":isOccEdit?"#fff0ee":isSelected?"#f0f4ff":(wasPlaced&&!isEditing)?"#e0f4e0":slot.done?"#f4faf4":(isEditing&&editChromeReady)?"#f0f0ee":filled?"#fcfcfa":"transparent";
+                    // v105: a PERSONAL COMMITMENT. A blocked row wearing personal:true — that is the
+                    // entire test, and it is the only thing in the row that reads the flag.
+                    var isCommit=slot.blocked&&slot.personal===true;
+                    // v105: may a commitment be STARTED on this row? Only on a genuinely open one.
+                    // A marked Available/Overtime row IS allowed — it is still an empty row, and
+                    // saveCommitment clears the mark on the way through. isLiveDragging is in here
+                    // so a finger resting on a row mid-drag can never raise the editor underneath.
+                    var commitOpenHere=!filled&&!slot.blocked&&!isEditing&&!selectMode&&!isLiveDragging&&!placingClient;
+                    // Its wash is the soft edge of TODAY_BLUE (#3a6ea5) — the same blue that marks
+                    // today in Month view — so a commitment cannot be mistaken for a barbershop row
+                    // at a glance. Lunch keeps its grey (#f4f4f2), untouched.
+                    // Revert lever — the v104 line, with no commitment branch:
+                    // var slotBg=slot.blocked?"#f4f4f2":(wasRemoved&&!isEditing)?"#fff0ee":...
+                    var slotBg=isCommit?"#e8f0f9":slot.blocked?"#f4f4f2":(wasRemoved&&!isEditing)?"#fff0ee":isOccEdit?"#fff0ee":isSelected?"#f0f4ff":(wasPlaced&&!isEditing)?"#e0f4e0":slot.done?"#f4faf4":(isEditing&&editChromeReady)?"#f0f0ee":filled?"#fcfcfa":"transparent";
                     var isSearchHit=searchHit&&slot.name&&slot.name.toLowerCase()===searchHit.name&&dateKey===searchHit.dateKey;
                     if (isSearchHit&&!isEditing) slotBg="#bfe9bf";
                     var isCustomSlot=slot.isCustom===true||(slot.isCustom===undefined&&!slot.defaultBaseTime&&!DEFAULT_TIMES.includes(slot.time));
@@ -9374,11 +9573,14 @@ export default function TheList() {
                         )}
                         <div
                           data-droprow={rowKey} data-dropfilled={filled?"1":"0"} data-dropblocked={slot.blocked?"1":"0"}
-                          style={{display:"flex",alignItems:"center",padding:(getDayCount()>3?"0 7px":"0 14px"),flex:"1 1 auto",minHeight:0,background:slotBg,transition:"background 0.2s",animation:isFlash?(flashAnimFor(flashFam)+" 1.6s ease-out"):"none",position:"relative",opacity:slot.blocked?0.6:1,userSelect:"none",WebkitUserSelect:"none",outline:isDropTarget?"2px solid #5a9a5a":(showDropHint?"1px dashed #cdddcd":"none"),outlineOffset:"-3px",borderRadius:isDropTarget?"6px":"0"}}
+                          style={{display:"flex",alignItems:"center",padding:(getDayCount()>3?"0 7px":"0 14px"),flex:"1 1 auto",minHeight:0,background:slotBg,transition:"background 0.2s",animation:isFlash?(flashAnimFor(flashFam)+" 1.6s ease-out"):"none",position:"relative",opacity:(slot.blocked&&!isCommit)?0.6:1,userSelect:"none",WebkitUserSelect:"none",outline:isDropTarget?"2px solid #5a9a5a":(showDropHint?"1px dashed #cdddcd":"none"),outlineOffset:"-3px",borderRadius:isDropTarget?"6px":"0"}}
                           onTouchStart={function(e){ handleTouchStart(e,dateKey,idx); }}
                           onTouchEnd={function(e){ handleTouchEnd(e,dateKey,idx); }}
                           onMouseUp={function(){ if(dragState&&!dragState.multi&&!dragCalHover) handleSlotDrop(dateKey,idx); }}
                         >
+                          {/* v105: the commitment's blue edge. Same 3px gutter every other accent
+                              bar uses, so it can never shift the row's layout by a pixel. */}
+                          {isCommit&&<div style={{position:"absolute",left:0,top:0,bottom:0,width:"3px",background:TODAY_BLUE}}/>}
                           {(wasRemoved||isOccEdit)&&<div style={{position:"absolute",left:0,top:0,bottom:0,width:"3px",background:"#c0392b"}}/>}
                           {wasPlaced&&!isEditing&&<div style={{position:"absolute",left:0,top:0,bottom:0,width:"3px",background:"#2a7a2a"}}/>}
                           {isSelected&&<div style={{position:"absolute",left:0,top:0,bottom:0,width:"3px",background:"#4a7aaa"}}/>}
@@ -9424,7 +9626,30 @@ export default function TheList() {
                             onMouseDown={function(e){ e.stopPropagation(); }}
                             onTouchStart={function(e){ e.stopPropagation(); }}
                             style={{fontSize:"12px",color:defShift?ADJ_BLUE:slot.customTime?"#2f7d8a":(filled?"#c9a96e":"#2e2e2e"),fontWeight:(slot.customTime||defShift)?"bold":"normal",width:"40px",flexShrink:0,fontVariantNumeric:"tabular-nums",letterSpacing:"0.02em",userSelect:"none",WebkitUserSelect:"none",cursor:"pointer"}}>{slot.time}</div>
-                          {slot.blocked?(
+                          {/* v105: THE COMMITMENT ROW. Tested BEFORE the plain blocked row, so a
+                              commitment never falls into the Lunch branch — and the Lunch branch
+                              itself is byte-for-byte what it was in v104, so Lunch and Block are
+                              not changed in any way, including their instant tap-to-unblock.
+                              A commitment's tap does NOT unblock: it OPENS THE EDITOR. That is the
+                              whole point — there must be no stray-tap path to wiping a label, a
+                              phone and a note in one touch. Removal lives behind the editor's own
+                              Remove button. Lettering is plain black, upright: this is a real thing
+                              you have to be at, not a greyed-out hole in the day. */}
+                          {isCommit?(
+                            <div onClick={function(e){ e.stopPropagation(); openCommitEditor(dateKey,idx); }} style={{flex:1,minWidth:0,display:"flex",alignItems:"center",gap:"6px",cursor:"pointer"}}>
+                              <span style={{flex:1,minWidth:0,fontSize:isPhone?"16px":"13px",color:"#1a1a1a",fontFamily:"Georgia,serif",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{slot.blockLabel||"Commitment"}</span>
+                              {!compactIcons&&slot.note?(
+                                <span title="Has a note" style={{flexShrink:0,fontSize:"15px",lineHeight:1,color:TODAY_BLUE,WebkitTextStroke:"0.4px currentColor"}}>{"\u270e"}</span>
+                              ):null}
+                              {!compactIcons&&(function(){
+                                var cDigits=(slot.blockPhone||"").replace(/[^0-9+]/g,"");
+                                if (!cDigits) return null;
+                                // Same message icon the client rows carry, in the commitment's blue.
+                                // stopPropagation so texting the dentist does not also open the editor.
+                                return <button onClick={function(e){ e.stopPropagation(); window.location.href="sms:"+cDigits; }} title={"Message "+(slot.blockLabel||"commitment")} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 1px 2px 4px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={20} color={TODAY_BLUE}/></button>;
+                              })()}
+                            </div>
+                          ):slot.blocked?(
                             <div onClick={function(){ toggleBlockSlot(dateKey,idx,null); }} style={{flex:1,display:"flex",alignItems:"center",cursor:"pointer"}}>
                               <span style={{fontSize:"12px",color:slot.done?"#3a5a3a":"#aaa",fontStyle:"italic"}}>{slot.blockLabel||"Blocked"}</span>
                             </div>
@@ -9433,15 +9658,33 @@ export default function TheList() {
                           ):placingClient&&!filled?(
                             <div onClick={function(){ placeClientInSlot(dateKey,idx); }} style={{flex:1,fontSize:"13px",color:"#2a7a2a",cursor:"pointer",padding:"0 2px"}}>tap to place</div>
                           ):(
+                            /* v105: this div now arms TWO long-presses, and they can never collide.
+                               The drag press arms only on a FILLED row (every one of its guards
+                               begins with a filled check); the commitment press arms only on an OPEN one
+                               (a not-filled check). A row is one or the other, never both, so no race is
+                               possible and the drag gesture is completely unchanged.
+                               commitOpenHere is the arm test. slot.blocked / reassign / placing are
+                               already impossible here — this whole branch only renders when none of
+                               them are true — so the test only has to rule out a filled row, a live
+                               edit, select mode and an in-flight drag.
+                               Revert lever — the v104 handlers, verbatim; paste back and the
+                               long-press simply stops existing:
+                               onClick={function(e){ if(filled&&slot.done) handleDoneRowTap(dateKey,idx); else if(!filled&&!slot.blocked){ startEdit(dateKey,idx,false); } }}
+                               onMouseDown={function(){ if(filled&&!slot.done&&!isEditing&&(!selectMode||selectedSlots[rowKey])) startDragLongPress(dateKey,idx,0,0); }}
+                               onMouseUp={function(){ cancelDragLongPress(); }}
+                               onMouseLeave={cancelDragLongPress}
+                               onTouchStart={function(e){ if(filled&&!slot.done&&!isEditing&&(!selectMode||selectedSlots[rowKey])){ startDragLongPress(dateKey,idx,e.touches[0].clientX,e.touches[0].clientY,true); } }}
+                               onTouchMove={function(e){ if(e.touches[0]) cancelDragLongPressIfMoved(e.touches[0].clientX,e.touches[0].clientY); }}
+                               onTouchEnd={function(e){ var wasTap=!!dragLongPress.current; cancelDragLongPress(); handleTouchEnd(e,dateKey,idx); if(wasTap&&filled&&!slot.done&&!isEditing&&!selectMode) startEdit(dateKey,idx); }} */
                             <div style={{flex:1,minWidth:0,display:"flex",alignItems:"center",gap:"4px",position:"relative"}}
-                              onClick={function(e){ if(filled&&slot.done) handleDoneRowTap(dateKey,idx); else if(!filled&&!slot.blocked){ startEdit(dateKey,idx,false); } }}
+                              onClick={function(e){ if(commitSwallowTap.current){ commitSwallowTap.current=false; e.stopPropagation(); return; } if(filled&&slot.done) handleDoneRowTap(dateKey,idx); else if(!filled&&!slot.blocked){ startEdit(dateKey,idx,false); } }}
                               onPointerDown={function(e){ dragPointerId.current=e.pointerId; }}
-                              onMouseDown={function(){ if(filled&&!slot.done&&!isEditing&&(!selectMode||selectedSlots[rowKey])) startDragLongPress(dateKey,idx,0,0); }}
-                              onMouseUp={function(){ cancelDragLongPress(); }}
-                              onMouseLeave={cancelDragLongPress}
-                              onTouchStart={function(e){ if(filled&&!slot.done&&!isEditing&&(!selectMode||selectedSlots[rowKey])){ startDragLongPress(dateKey,idx,e.touches[0].clientX,e.touches[0].clientY,true); } }}
-                              onTouchMove={function(e){ if(e.touches[0]) cancelDragLongPressIfMoved(e.touches[0].clientX,e.touches[0].clientY); }}
-                              onTouchEnd={function(e){ var wasTap=!!dragLongPress.current; cancelDragLongPress(); handleTouchEnd(e,dateKey,idx); if(wasTap&&filled&&!slot.done&&!isEditing&&!selectMode) startEdit(dateKey,idx); }}
+                              onMouseDown={function(){ if(filled&&!slot.done&&!isEditing&&(!selectMode||selectedSlots[rowKey])) startDragLongPress(dateKey,idx,0,0); if(commitOpenHere) startCommitLongPress(dateKey,idx,0,0); }}
+                              onMouseUp={function(){ cancelDragLongPress(); cancelCommitLongPress(); }}
+                              onMouseLeave={function(){ cancelDragLongPress(); cancelCommitLongPress(); }}
+                              onTouchStart={function(e){ if(filled&&!slot.done&&!isEditing&&(!selectMode||selectedSlots[rowKey])){ startDragLongPress(dateKey,idx,e.touches[0].clientX,e.touches[0].clientY,true); } if(commitOpenHere&&e.touches[0]){ startCommitLongPress(dateKey,idx,e.touches[0].clientX,e.touches[0].clientY); } }}
+                              onTouchMove={function(e){ if(e.touches[0]) cancelDragLongPressIfMoved(e.touches[0].clientX,e.touches[0].clientY); if(e.touches[0]) cancelCommitLongPressIfMoved(e.touches[0].clientX,e.touches[0].clientY); }}
+                              onTouchEnd={function(e){ var wasTap=!!dragLongPress.current; cancelDragLongPress(); cancelCommitLongPress(); handleTouchEnd(e,dateKey,idx); if(wasTap&&filled&&!slot.done&&!isEditing&&!selectMode) startEdit(dateKey,idx); }}
                             >
                               {wasRemoved&&!isEditing&&rmName&&<div style={{position:"absolute",left:"2px",top:0,bottom:0,display:"flex",alignItems:"center",pointerEvents:"none",fontStyle:"italic",fontFamily:"Georgia,serif",fontSize:isPhone?"16px":"13px",color:"#9a2f22",opacity:0.72,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:"100%",zIndex:1}}>{rmName}</div>}
                               {isOccEdit&&<div style={{position:"absolute",top:"2px",left:"70px",fontSize:"9px",color:"#c0392b"}}>Editing {slot.name}</div>}
