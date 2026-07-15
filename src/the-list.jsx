@@ -101,6 +101,24 @@ function vacateSlotCollapsing(arr, idx) {
   return out;
 }
 
+// v110 THE COMMITMENT ORIGIN-RESTORE. When a commitment is DRAGGED off its slot, the slot it
+// leaves behind must become a plain, bookable, empty row again — not a nameless commitment still
+// secretly wearing blocked/personal/blockLabel/blockPhone/note. vacateSlotCollapsing above only
+// blanks the NAME; it never knew about the five fields that make a row a commitment, because until
+// v110 a commitment could not be dragged at all. So this strips those five fields FIRST (the exact
+// recipe the undo path uses to turn a commitment back into a plain slot — see the entry.personal
+// branch in the per-row undo), then hands the now-plain, emptied row to the very same
+// vacateSlotCollapsing so the origin heals (restores its default time / collapses a shared pair /
+// splices a stale anchor) EXACTLY as an emptied client row does. No new heal logic, no ghost rows.
+// Revert lever — this whole function is only ever reached from the commit branch of a drop/place;
+// delete those branches and this is dead, delete this and those branches lose their restore.
+function vacateCommitment(arr, idx) {
+  if (!arr || !arr[idx]) return arr;
+  var out = arr.slice();
+  out[idx] = {...out[idx], blocked:false, personal:false, blockLabel:"", blockPhone:"", note:"", name:"", price:"", done:false};
+  return vacateSlotCollapsing(out, idx);
+}
+
 const OLD_DEFAULT_TIMES_A = [
   "6:51","7:13","7:36","7:58",
   "8:21","8:43","9:06","9:28","9:51","10:13","10:36","10:58",
@@ -2102,9 +2120,16 @@ export default function TheList() {
         setEntryUndoConflict({entry, current:cur, dateKey:dk}); return;
       }
       pushUndo(snapshot);
-      slots[idx] = {...cur,name:"",price:"",done:false,recurWeeks:null,isException:false,blocked:false,blockLabel:"",note:""};
+      // v110: a commitment MOVE logs as a rescheduled entry carrying personal:true. Undoing it
+      // from the log clears the LANDING slot (same convention as a client move — the origin is
+      // restored by the main snapshot Undo, not the per-row button). A commitment must be cleared
+      // WHOLE, so the personal branch also strips personal/blockPhone that the client clear leaves
+      // behind. entry.personal is set ONLY by a commit move, so every client/added/checkoff entry
+      // ever written takes the untouched else path. Revert lever — the pre-v110 single line:
+      // slots[idx] = {...cur,name:"",price:"",done:false,recurWeeks:null,isException:false,blocked:false,blockLabel:"",note:""};
+      if (entry.personal) { slots[idx] = {...cur,name:"",price:"",done:false,recurWeeks:null,isException:false,blocked:false,blockLabel:"",note:"",personal:false,blockPhone:""}; }
+      else { slots[idx] = {...cur,name:"",price:"",done:false,recurWeeks:null,isException:false,blocked:false,blockLabel:"",note:""}; }
       setSlots(dk, slots);
-      flashRemoved(dk, idx, entry.name);
       showBanner({type:"undo",name:entry.name,time:entry.time,dateKey:dk});
     } else if (entry.type==="removed"||entry.type==="slot_removed") {
       // expected: slot is empty now. Restore the name. If occupied by someone else, conflict.
@@ -6848,7 +6873,31 @@ export default function TheList() {
       var startY = dragTouchStart.current ? dragTouchStart.current.y : (touchY||0);
       dragTouchStart.current = null;
       var slot = getSlots(dateKey)[idx];
-      if (!slot.name) return;
+      // v110: the gate used to bail on any nameless slot, which is every commitment (a commitment
+      // has name:""). Now a commitment (blocked + personal) is also allowed through — but ONLY into
+      // the single-drag fast-path directly below, which returns before the multi/group/client code.
+      // Revert lever — the v108 gate, name-only:  if (!slot.name) return;
+      if (!slot.name && !(slot.blocked && slot.personal===true)) return;
+      // v110: A COMMITMENT IS DRAGGED SINGLE, ALWAYS. It carries its label in the name field so the
+      // floating chip and the "Move to…" calendar (both read clients[0].name) show the right word;
+      // the commit:true flag is what routes the DROP down the commitment branch, where blockLabel/
+      // blockPhone/note are what actually get written. recurWeeks is null so no series question can
+      // ever fire. Returning here keeps a commitment out of the multi-select and group paths below —
+      // it can never be grabbed as part of a selection or a linked group.
+      if (slot.blocked && slot.personal===true) {
+        var commitPayload = [{name:(slot.blockLabel||"Commitment"),commit:true,blockLabel:(slot.blockLabel||""),blockPhone:(slot.blockPhone||""),note:(slot.note||""),price:"",recurWeeks:null,originalTime:slot.time,originalDateKey:dateKey,originalIdx:idx}];
+        setDragState({clients:commitPayload,sourceKey:dateKey+"-"+idx,multi:false,commit:true});
+        if (isTouch) {
+          dragPosRef.current = {x:startX, y:startY};
+          dragOverRef.current = null; setDragOverKey(null);
+          setIsLiveDragging(true);
+          captureDragPointer();
+        } else {
+          setDragCalOpen(true); setDragCalMonth(new Date()); setDragCalHover(true);
+          playSound("lock");
+        }
+        return;
+      }
       var isMulti = selectMode && selectedSlots[dateKey+"-"+idx];
       if (isMulti) {
         var entries = Object.keys(selectedSlots).filter(function(k){ return selectedSlots[k]; });
@@ -6989,6 +7038,37 @@ export default function TheList() {
       return;
     }
     if (client.originalDateKey === targetDateKey && client.originalIdx === targetIdx) { setPlacingClient(null); return; }
+    // v110: A COMMITMENT LANDED VIA TAP-TO-PLACE — this is the path a live drag falls into the
+    // moment it crosses out of the source day (onto another view's tab, a Month day cell, or any
+    // cross-day tap). Same write as the direct drop: the commitment goes into the target, its
+    // origin is handed to vacateCommitment to become a plain bookable slot, and the move is logged.
+    if (client.commit) {
+      var pcLabel = client.blockLabel || "Commitment";
+      var pcSnap = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
+      pushUndo(pcSnap);
+      if (client.originalDateKey === targetDateKey) {
+        var pcArr = [...getSlots(targetDateKey)];
+        pcArr[targetIdx] = {...pcArr[targetIdx], blocked:true, personal:true, blockLabel:pcLabel, blockPhone:(client.blockPhone||""), note:(client.note||""), name:"", price:"", done:false, recurWeeks:null, isException:false, availStatus:null, groupId:null, pending:false};
+        var pcVacT = pcArr[client.originalIdx] ? pcArr[client.originalIdx].time : null;
+        var pcVacS = false; for (var pcvi=0; pcvi<pcArr.length; pcvi++){ if (pcvi!==client.originalIdx && pcArr[pcvi] && pcArr[pcvi].time===pcVacT) { pcVacS=true; break; } }
+        pcArr = vacateCommitment(pcArr, client.originalIdx);
+        setSlots(targetDateKey, pcArr);
+        flashMovePair(targetDateKey, pcArr, pcVacT, pcVacS, targetDateKey, pcArr, targetSlot.time, pcLabel);
+      } else {
+        var pcTs = [...getSlots(targetDateKey)];
+        pcTs[targetIdx] = {...pcTs[targetIdx], blocked:true, personal:true, blockLabel:pcLabel, blockPhone:(client.blockPhone||""), note:(client.note||""), name:"", price:"", done:false, recurWeeks:null, isException:false, availStatus:null, groupId:null, pending:false};
+        setSlots(targetDateKey, pcTs);
+        var pcOs = [...getSlots(client.originalDateKey)];
+        var pcVacTx = pcOs[client.originalIdx] ? pcOs[client.originalIdx].time : null;
+        var pcVacSx = false; for (var pcxi=0; pcxi<pcOs.length; pcxi++){ if (pcxi!==client.originalIdx && pcOs[pcxi] && pcOs[pcxi].time===pcVacTx) { pcVacSx=true; break; } }
+        pcOs = vacateCommitment(pcOs, client.originalIdx);
+        setSlots(client.originalDateKey, pcOs);
+        flashMovePair(client.originalDateKey, pcOs, pcVacTx, pcVacSx, targetDateKey, pcTs, targetSlot.time, pcLabel);
+      }
+      addHistoryEntry({type:"rescheduled", personal:true, time:targetSlot.time, name:pcLabel, dateKey:targetDateKey});
+      setPlacingClient(null);
+      return;
+    }
     // v93 SILENT-MOVE HOLE #1. A recurring client moved through TAP-TO-PLACE — which is
     // where a live drag lands the moment it crosses out of the source day's column, i.e.
     // exactly what happens when you drag somebody onto a DIFFERENT DAY — used to move
@@ -7033,9 +7113,49 @@ export default function TheList() {
     if (!ds || ds.multi) return false;
     var client = ds.clients[0];
     if (!client) return false;
-    if (client.originalDateKey === targetDateKey && client.originalIdx === targetIdx) return false;
+    // v108: DROP BACK ONTO YOUR OWN SLOT = CLEAN CANCEL. A single person dropped exactly
+    // where he was lifted from used to return false here. The pointer-up handler reads a
+    // false as "landed nowhere" and arms tap-to-place (the !landed fallback in onUp). So a
+    // no-move drop wrongly dumped you into placement mode. Returning true instead reports
+    // "handled, nothing to do," so the drag tears down to default: no move, no placement
+    // mode, no log entry. This fires ONLY on the exact origin (same dateKey AND same index);
+    // a drop onto any other slot is untouched and moves normally.
+    // Revert lever — the v107 line, which fell through into tap-to-place:
+    // if (client.originalDateKey === targetDateKey && client.originalIdx === targetIdx) return false;
+    if (client.originalDateKey === targetDateKey && client.originalIdx === targetIdx) return true;
     var targetSlot = getSlots(targetDateKey)[targetIdx];
     if (!targetSlot || targetSlot.name || targetSlot.blocked) return false;
+    // v110: A COMMITMENT LANDS HERE. Handled before the recurring/client code below, which is
+    // all name-and-price shaped. A commitment writes its label/phone/note into the target (the
+    // exact create recipe), then hands its ORIGIN to vacateCommitment so that row becomes a plain
+    // bookable slot again. recurWeeks is null on a commitment, so the series question above never
+    // fires for one; this branch just makes that explicit and keeps the client path untouched.
+    if (client.commit) {
+      var cLabel = client.blockLabel || "Commitment";
+      var cSnap = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
+      pushUndo(cSnap);
+      if (client.originalDateKey === targetDateKey) {
+        var cArr = [...getSlots(targetDateKey)];
+        cArr[targetIdx] = {...cArr[targetIdx], blocked:true, personal:true, blockLabel:cLabel, blockPhone:(client.blockPhone||""), note:(client.note||""), name:"", price:"", done:false, recurWeeks:null, isException:false, availStatus:null, groupId:null, pending:false};
+        var cVacT = cArr[client.originalIdx] ? cArr[client.originalIdx].time : null;
+        var cVacS = false; for (var cvi=0; cvi<cArr.length; cvi++){ if (cvi!==client.originalIdx && cArr[cvi] && cArr[cvi].time===cVacT) { cVacS=true; break; } }
+        cArr = vacateCommitment(cArr, client.originalIdx);
+        setSlots(targetDateKey, cArr);
+        flashMovePair(targetDateKey, cArr, cVacT, cVacS, targetDateKey, cArr, targetSlot.time, cLabel);
+      } else {
+        var cTs = [...getSlots(targetDateKey)];
+        cTs[targetIdx] = {...cTs[targetIdx], blocked:true, personal:true, blockLabel:cLabel, blockPhone:(client.blockPhone||""), note:(client.note||""), name:"", price:"", done:false, recurWeeks:null, isException:false, availStatus:null, groupId:null, pending:false};
+        setSlots(targetDateKey, cTs);
+        var cOs = [...getSlots(client.originalDateKey)];
+        var cVacTx = cOs[client.originalIdx] ? cOs[client.originalIdx].time : null;
+        var cVacSx = false; for (var cxi=0; cxi<cOs.length; cxi++){ if (cxi!==client.originalIdx && cOs[cxi] && cOs[cxi].time===cVacTx) { cVacSx=true; break; } }
+        cOs = vacateCommitment(cOs, client.originalIdx);
+        setSlots(client.originalDateKey, cOs);
+        flashMovePair(client.originalDateKey, cOs, cVacTx, cVacSx, targetDateKey, cTs, targetSlot.time, cLabel);
+      }
+      addHistoryEntry({type:"rescheduled", personal:true, time:targetSlot.time, name:cLabel, dateKey:targetDateKey});
+      return true;
+    }
     // A recurring occurrence being dragged: don't move silently — ask whether this is
     // just this one or the whole series. Return true (handled); the caller clears the
     // drag UI and applySeriesDrop performs the move once the user chooses.
@@ -7797,7 +7917,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v107</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v110</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -7947,11 +8067,16 @@ export default function TheList() {
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={function(){ setCommitModal(null); }}>
           <div style={{background:"#fff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"24px",width:"min(340px,90vw)",borderTop:"3px solid "+TODAY_BLUE}} onClick={function(e){ e.stopPropagation(); }}>
             <div style={{fontSize:"10px",letterSpacing:"0.2em",textTransform:"uppercase",color:TODAY_BLUE,marginBottom:"3px"}}>{commitModal.isNew?"New commitment":"Commitment"}</div>
-            <div style={{fontSize:"11px",color:"#aaa",marginBottom:"12px"}}>{commitModal.time+" — tap the time on the row to change it"}</div>
+            {/* v110: was "{time} — tap the time on the row to change it". That instruction is now
+                wrong twice over: this modal has been dormant since v106 (the commitment edits in the
+                row), and as of v110 a commitment is retimed by dragging, not by tapping its time. The
+                modal is kept whole as a revert lever, so the line is corrected to just the time. */}
+            <div style={{fontSize:"11px",color:"#aaa",marginBottom:"12px"}}>{commitModal.time}</div>
+            {/* v108: name-box placeholder blanked so it reads like a regular slot's name box (Granger's ask). Revert lever — old hint text was: placeholder of "Dentist, Ballgame, etc." */}
             <input autoFocus value={commitDraft.label}
               onChange={function(e){ var v=e.target.value; setCommitDraft(function(d){ return {...d, label:v}; }); }}
               onKeyDown={function(e){ if(e.key==="Enter") saveCommitment(); if(e.key==="Escape") setCommitModal(null); }}
-              placeholder="Dentist, Ballgame, etc."
+              placeholder=""
               style={{...inputStyle,width:"100%",boxSizing:"border-box",marginBottom:"8px",fontSize:"15px"}} />
             <input value={commitDraft.phone}
               onChange={function(e){ var v=e.target.value; setCommitDraft(function(d){ return {...d, phone:v}; }); }}
@@ -9861,11 +9986,19 @@ export default function TheList() {
                             {slot.done&&<span style={{color:"#fff",fontSize:"10px",lineHeight:1}}>{"✓"}</span>}
                           </button>
                           )}
+                          {/* v110: on a COMMITMENT row the time is hidden (the 40px cell stays, so
+                              every row still lines up) and tapping it no longer opens the time editor —
+                              a commitment is retimed by DRAGGING it now, not by tapping its time. The
+                              guard is isCommit (blocked + personal), so Lunch and Block rows — blocked
+                              but NOT personal — keep their tap-to-retime exactly as before.
+                              Revert levers — the v108 text and openTimeEdit condition:
+                                text was:  {slot.time}
+                                condition ended with:  !isLiveDragging&&!(reassignMode&&reassignMode.currentDateKey===dateKey) */}
                           <div
-                            onClick={function(e){ e.stopPropagation(); if(placingClient){ if(!filled) placeClientInSlot(dateKey,idx); return; } if(filled&&slot.done){ handleDoneRowTap(dateKey,idx); return; } if(!isEditing&&!selectMode&&!isLiveDragging&&!(reassignMode&&reassignMode.currentDateKey===dateKey)) openTimeEdit(dateKey,idx); }}
+                            onClick={function(e){ e.stopPropagation(); if(placingClient){ if(!filled) placeClientInSlot(dateKey,idx); return; } if(filled&&slot.done){ handleDoneRowTap(dateKey,idx); return; } if(!isEditing&&!selectMode&&!isLiveDragging&&!isCommit&&!(reassignMode&&reassignMode.currentDateKey===dateKey)) openTimeEdit(dateKey,idx); }}
                             onMouseDown={function(e){ e.stopPropagation(); }}
                             onTouchStart={function(e){ e.stopPropagation(); }}
-                            style={{fontSize:"12px",color:defShift?ADJ_BLUE:slot.customTime?"#2f7d8a":(filled?"#c9a96e":"#2e2e2e"),fontWeight:(slot.customTime||defShift)?"bold":"normal",width:"40px",flexShrink:0,fontVariantNumeric:"tabular-nums",letterSpacing:"0.02em",userSelect:"none",WebkitUserSelect:"none",cursor:"pointer"}}>{slot.time}</div>
+                            style={{fontSize:"12px",color:defShift?ADJ_BLUE:slot.customTime?"#2f7d8a":(filled?"#c9a96e":"#2e2e2e"),fontWeight:(slot.customTime||defShift)?"bold":"normal",width:"40px",flexShrink:0,fontVariantNumeric:"tabular-nums",letterSpacing:"0.02em",userSelect:"none",WebkitUserSelect:"none",cursor:isCommit?"default":"pointer"}}>{isCommit?"":slot.time}</div>
                           {/* v105: THE COMMITMENT ROW. Tested BEFORE the plain blocked row, so a
                               commitment never falls into the Lunch branch — and the Lunch branch
                               itself is byte-for-byte what it was in v104, so Lunch and Block are
@@ -9911,8 +10044,29 @@ export default function TheList() {
                                 )}
                               </div>
                             ):(
-                            <div onClick={function(e){ e.stopPropagation(); startEdit(dateKey,idx,false); }} style={{flex:1,minWidth:0,display:"flex",alignItems:"center",gap:"6px",cursor:"pointer"}}>
-                              <span style={{flex:1,minWidth:0,fontSize:isPhone?"16px":"13px",color:"#1a1a1a",fontFamily:"Georgia,serif",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{slot.blockLabel||"Commitment"}</span>
+                            /* v110: the commitment LABEL is now the drag grip. Long-press it to lift
+                                the commitment (startDragLongPress accepts a commitment as of v110); a
+                                quick tap still opens the in-row editor. This is the same tap-vs-hold
+                                split every client row uses: onTouchEnd reads dragLongPress.current —
+                                truthy means the timer never fired, i.e. a tap (→ edit); falsy means the
+                                hold fired and the drag armed (→ set commitSwallowTap so the trailing
+                                synthetic click is eaten, exactly as the create-commitment long-press
+                                does). The handlers live on the LABEL SPAN, not the whole row, so the
+                                note-pencil and message icons beside it keep their own taps untouched.
+                                Revert lever — the v108 label, a plain tap-to-edit with no drag:
+                                <div onClick={function(e){ e.stopPropagation(); startEdit(dateKey,idx,false); }} style={{flex:1,minWidth:0,display:"flex",alignItems:"center",gap:"6px",cursor:"pointer"}}>
+                                  span style flex:1 minWidth:0 then slot.blockLabel or "Commitment" then close span */
+                            <div style={{flex:1,minWidth:0,display:"flex",alignItems:"center",gap:"6px"}}>
+                              <span
+                                onClick={function(e){ e.stopPropagation(); if(commitSwallowTap.current){ commitSwallowTap.current=false; return; } startEdit(dateKey,idx,false); }}
+                                onPointerDown={function(e){ dragPointerId.current=e.pointerId; }}
+                                onMouseDown={function(){ startDragLongPress(dateKey,idx,0,0); }}
+                                onMouseUp={function(){ cancelDragLongPress(); }}
+                                onMouseLeave={function(){ cancelDragLongPress(); }}
+                                onTouchStart={function(e){ if(e.touches[0]) startDragLongPress(dateKey,idx,e.touches[0].clientX,e.touches[0].clientY,true); }}
+                                onTouchMove={function(e){ if(e.touches[0]) cancelDragLongPressIfMoved(e.touches[0].clientX,e.touches[0].clientY); }}
+                                onTouchEnd={function(e){ var wasTap=!!dragLongPress.current; cancelDragLongPress(); if(wasTap){ startEdit(dateKey,idx,false); } else { commitSwallowTap.current=true; } }}
+                                style={{flex:1,minWidth:0,fontSize:isPhone?"16px":"13px",color:"#1a1a1a",fontFamily:"Georgia,serif",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",cursor:"pointer",userSelect:"none",WebkitUserSelect:"none"}}>{slot.blockLabel||"Commitment"}</span>
                               {/* v106: BOTH ICONS ARE ALWAYS DRAWN — blue when there is something behind
                                   them, grey when there isn't, so the row tells you at a glance whether this
                                   commitment carries a note and a number. The grey ones are doors, not decor:
