@@ -356,6 +356,51 @@ function friendlyDateLong(dateKey) {
 }
 function friendlyDateTime(time, dateKey) { return time + ", " + friendlyDateLong(dateKey); }
 
+// v114 (#6): SMART BOOKING TEXT. The message icon on a client's LIST ROW used to open a bare,
+// empty thread. It still does for TODAY (and for a past day, or a row with no readable time).
+// For a booking on TOMORROW it now pre-types a short "see you before" line; for any booking
+// further out it pre-types the full "you're on The List" promise with that client's own
+// deadline (their slot's time, day and date) filled in. Nothing is ever SENT — the words only
+// land in the box for Granger to read, edit, or send. This is string/display work only: no
+// schedule, client, accounting, payload, sync, or recurring-engine field is read or written.
+// The slot's day (dateKey) and its CURRENT displayed time (slot.time — the adjusted value
+// after any nudge; see retimeSlot, time:newTime) are the only inputs, both already in hand at
+// the tap site. Scope is deliberately JUST this row icon: the standby icon, the profile
+// Message button, and the phone-popup Message button keep their old bare behavior, because
+// none of them carry a single unambiguous day+time pair.
+//
+// Morning/afternoon + AM/PM follow GRANGER'S rule, which is NOT the app's internal
+// 1-4-is-PM clock (timeToAbsMinutes): here 5-11 is morning/AM and 12 onward (12,1,2,3,4) is
+// afternoon/PM. So a 12:30 slot reads "afternoon" / "12:30 PM".
+var SMART_DOW = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+var SMART_MON = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+function smartOrdinal(n) {
+  var suf = ["th","st","nd","rd"]; var v = n % 100;
+  return n + (suf[(v-20)%10] || suf[v] || suf[0]);
+}
+// true = afternoon/PM (12,1,2,3,4); false = morning/AM (5-11).
+function smartIsPM(hr) { return hr === 12 || (hr >= 1 && hr <= 4); }
+// Returns the sms: href. Bare "sms:DIGITS" for today, a past day, or an unreadable time;
+// otherwise the same with an iOS-style &body= carrying the pre-typed (never sent) message.
+function bookingSmsHref(digits, dateKey, slotTime) {
+  var base = "sms:" + digits;
+  if (!dateKey || !slotTime) return base;
+  var hr = Number(String(slotTime).split(":")[0]);
+  if (!(hr >= 1 && hr <= 12)) return base;
+  var tmrKey = toDateKey(addDays(new Date(), 1));
+  var body = "";
+  if (dateKey === tmrKey) {
+    body = "See you before " + slotTime + " tomorrow " + (smartIsPM(hr) ? "afternoon" : "morning") + "!";
+  } else if (dateKey > tmrKey) {
+    var d = parseDateKey(dateKey);
+    var when = SMART_DOW[d.getDay()] + ", " + SMART_MON[d.getMonth()] + " " + smartOrdinal(d.getDate());
+    body = "Perfect, I've got you on The List! Since I'm frequently running ahead of schedule, most people like to come about 10 minutes early! But I do promise to hold your spot in line as long as you're inside the shop before your deadline of " + slotTime + " " + (smartIsPM(hr) ? "PM" : "AM") + " on " + when + "!";
+  } else {
+    return base;
+  }
+  return base + "&body=" + encodeURIComponent(body);
+}
+
 // v93: how far a drop moved somebody, in plain words. "" for a same-day drop, which is
 // the signal everywhere that this is a pure retime and the old v92 behavior applies.
 function dayShiftDelta(fromDateKey, toDateKey) {
@@ -7311,9 +7356,35 @@ export default function TheList() {
     return true;
   };
 
-  // Drop a same-day group onto a specific slot: pack the members into the open
-  // slots starting at the one they were dropped on (instead of snapping them
-  // back to their original times). Overflow goes to the tap-to-place picker.
+  // v113: THE WHOLE-GROUP-FITS RULE, in one place. Starting at startIdx, walk forward
+  // collecting an UNBROKEN run of open slots long enough for the whole group. A taken or
+  // blocked slot STOPS the run (we never skip past it). openNames is an optional map of
+  // lowercased names to treat as open — used by the DRAG paths, where the group's own
+  // members are about to be lifted off, so their current slots count as available. Returns
+  // the array of run indices when the group fits, or null when it doesn't. Single source of
+  // truth for the live-drag glow, the same-day drop, and the tap-to-place highlight, so what
+  // lights up green always matches what will actually place.
+  var groupRun = function(daySlots, startIdx, need, openNames) {
+    if (!daySlots || need <= 0) return null;
+    var run = []; var k = startIdx;
+    while (k < daySlots.length && run.length < need) {
+      var s = daySlots[k];
+      if (!s || s.blocked) break;
+      var nm = s.name && String(s.name).trim();
+      var isOpen = !nm || (openNames && openNames[String(s.name).toLowerCase()] === true);
+      if (!isOpen) break;
+      run.push(k); k++;
+    }
+    return run.length >= need ? run : null;
+  };
+
+  // Drop a group onto a specific slot on any visible day: place the members into the run of
+  // open slots starting at the one they were dropped on, KEEPING each landing slot's own time.
+  // v113: NOW OBEYS THE WHOLE-GROUP-FITS RULE. If a full run doesn't start at the dropped slot,
+  // the drop is REFUSED (quiet banner, nothing moves) — it no longer skips past taken slots or
+  // spills the overflow into the one-at-a-time picker. It returns true on a refuse so the
+  // release doesn't fall through to the day-picker popup. Revert lever — delete the v113 GUARD
+  // block below (marked) to restore the old skip-and-overflow packing.
   const dropGroupAtSlot = function(targetDateKey, targetIdx) {
     var ds = dragStateRef.current;
     if (!ds || !ds.multi) return false;
@@ -7322,6 +7393,17 @@ export default function TheList() {
     clients = clients.slice().sort(function(a,b){
       return timeToAbsMinutes(a.originalTime||a.time) - timeToAbsMinutes(b.originalTime||b.time);
     });
+    // v113 GUARD (whole-group-fits): refuse unless a full open run starts at the dropped
+    // slot. The group's own members count as open (they're about to be lifted). Nothing moves
+    // on a refuse, and returning true keeps the release from opening the day-picker popup.
+    // Revert lever — delete this block to restore the old skip-past-and-overflow packing.
+    var gNeed = clients.length;
+    var gOpen = {};
+    clients.forEach(function(c){ if (c.name) gOpen[String(c.name).toLowerCase()] = true; });
+    if (!groupRun(getSlots(targetDateKey), targetIdx, gNeed, gOpen)) {
+      showBanner({type:"info", msg:"No room for all " + gNeed + " here — drop on a slot with " + gNeed + " openings in a row."});
+      return true;
+    }
     var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
     pushUndo(snapshot);
     var newSch = {...schedulesRef.current};
@@ -7785,14 +7867,13 @@ export default function TheList() {
     // Build the run against the CURRENT visible grid — that is what Granger is looking at
     // when he taps, so the refuse decision matches the openings he can see.
     var dayNow = getSlots(targetDateKey);
-    var run = []; var k = targetIdx; var sK;
-    while (k < dayNow.length && run.length < need) {
-      sK = dayNow[k];
-      if (!sK || (sK.name && String(sK.name).trim()) || sK.blocked) break;  // taken/blocked stops the run
-      run.push(k);
-      k++;
-    }
-    if (run.length < need) {
+    // v113: use the shared whole-group-fits rule (openNames null — here a named slot always
+    // stops the run, matching the pre-v113 inline loop exactly). Revert lever — the old loop:
+    //   var run0 = []; var k = targetIdx; var sK;
+    //   while (k < dayNow.length && run0.length < need) { sK = dayNow[k]; if (!sK || (sK.name && String(sK.name).trim()) || sK.blocked) break; run0.push(k); k++; }
+    //   if (run0.length < need) { showBanner(...); return; }
+    var run = groupRun(dayNow, targetIdx, need, null);
+    if (!run) {
       showBanner({type:"info", msg:"No room for all " + need + " here — tap a slot with " + need + " openings in a row."});
       return;  // leave placingGroup armed; he can tap somewhere else
     }
@@ -8052,7 +8133,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v112</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v114</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -10063,7 +10144,18 @@ export default function TheList() {
                     // group's members is still an eligible landing spot, so let it
                     // highlight like an empty slot does.
                     var groupMemberHere=filled&&dragState&&dragState.multi&&dragState.clients&&slot.name&&dragState.clients.some(function(c){ return (c.name||"").toLowerCase()===slot.name.toLowerCase(); });
-                    var dropEligible=(!filled||groupMemberHere)&&!slot.blocked;
+                    // v113: a GROUP drag only lights a slot green when the WHOLE group fits as an
+                    // unbroken run starting here (its own members count as open — they get lifted).
+                    // A single drag is unchanged. Revert lever — the v112 line, one-open-slot only:
+                    //   var dropEligible=(!filled||groupMemberHere)&&!slot.blocked;
+                    var __gClients=(dragState&&dragState.multi&&dragState.clients)?dragState.clients.filter(function(c){ return c.name; }):null;
+                    var dropEligible;
+                    if (__gClients && __gClients.length>1) {
+                      var __gOpen={}; __gClients.forEach(function(c){ __gOpen[String(c.name).toLowerCase()]=true; });
+                      dropEligible=!slot.blocked&&!!groupRun(slots, idx, __gClients.length, __gOpen);
+                    } else {
+                      dropEligible=(!filled||groupMemberHere)&&!slot.blocked;
+                    }
                     var isDropTarget=isLiveDragging&&dragLifted&&dragOverKey===rowKey&&dropEligible;
                     var showDropHint=((isLiveDragging&&dragLifted)||placingClient)&&dropEligible&&!isEditing&&!(dragState&&dragState.sourceKey===rowKey);
                     if (isDropTarget) slotBg="#e3f3e3";
@@ -10246,10 +10338,18 @@ export default function TheList() {
                           ):placingClient&&!filled?(
                             <div onClick={function(){ placeClientInSlot(dateKey,idx); }} style={{flex:1,fontSize:"13px",color:"#2a7a2a",cursor:"pointer",padding:"0 2px"}}>tap to place</div>
                           ):placingGroup&&!filled&&placingGroup.currentDateKey===dateKey?(
-                            /* v111 (Session B): tap here to land the whole group on and after this
-                               slot. placeGroupInSlots refuses (quiet banner, nothing moves) if there
-                               isn't an open run long enough. Revert lever — delete this branch. */
-                            <div onClick={function(){ placeGroupInSlots(dateKey,idx); }} style={{flex:1,fontSize:"13px",color:"#2a7a2a",cursor:"pointer",padding:"0 2px"}}>tap to place all {placingGroup.members.length}</div>
+                            /* v111 (Session B): tap here to land the whole group on and after this slot.
+                               v113: only the slots where the WHOLE group fits as an unbroken run now show
+                               the green "tap to place all N"; the rest read "no room for N here" in grey, so
+                               the openings you can actually use are the only ones lit. placeGroupInSlots is
+                               still the tap target on every open slot, so a stray tap gets the same quiet
+                               refuse banner. Revert lever — the v111 body was one always-green line:
+                               <div onClick={function(){ placeGroupInSlots(dateKey,idx); }} style={{flex:1,fontSize:"13px",color:"#2a7a2a",cursor:"pointer",padding:"0 2px"}}>tap to place all {placingGroup.members.length}</div> */
+                            (function(){
+                              var __need=placingGroup.members.length;
+                              var __fits=!!groupRun(slots, idx, __need, null);
+                              return <div onClick={function(){ placeGroupInSlots(dateKey,idx); }} style={{flex:1,fontSize:"13px",color:__fits?"#2a7a2a":"#bcbcba",cursor:"pointer",padding:"0 2px"}}>{__fits?("tap to place all "+__need):("no room for "+__need+" here")}</div>;
+                            })()
                           ):(
                             /* v105: this div now arms TWO long-presses, and they can never collide.
                                The drag press arms only on a FILLED row (every one of its guards
@@ -10331,7 +10431,9 @@ export default function TheList() {
                                   {!compactIcons&&filled&&(function(){
                                     var digits=getClientPhone(slot.name).replace(/[^0-9+]/g,"");
                                     if (digits) {
-                                      return <button onClick={function(e){ e.stopPropagation(); window.location.href="sms:"+digits; }} title={"Message "+slot.name} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 1px 2px 4px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={20} color="#c9a96e"/></button>;
+                                      /* v114 (#6): revert lever — the pre-v114 bare hand-off, which opened an empty thread every time:
+                                         onClick={function(e){ e.stopPropagation(); window.location.href="sms:"+digits; }} */
+                                      return <button onClick={function(e){ e.stopPropagation(); window.location.href=bookingSmsHref(digits,dateKey,slot.time); }} title={"Message "+slot.name} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 1px 2px 4px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={20} color="#c9a96e"/></button>;
                                     }
                                     return <button onClick={function(e){ e.stopPropagation(); beginUndoVisit("client:"+String(slot.name||"").toLowerCase()); setPhoneModal({name:slot.name,phone:"",origPhone:getClientPhone(slot.name)}); /* v101 (#4): origPhone frozen at open — see revertPhoneTwin. v102: fresh undo visit per opening. */ }} title={"Add a number for "+slot.name} style={{background:"none",border:"none",cursor:"pointer",padding:"2px 1px 2px 4px",lineHeight:1,flexShrink:0,display:"flex",alignItems:"center"}}><MessageIcon size={20} color="#c6c6c6"/></button>;
                                   })()}
