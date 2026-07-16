@@ -965,6 +965,15 @@ export default function TheList() {
   const [selectedSlots, setSelectedSlots] = useState({});
   const [dragState, setDragState] = useState(null);
   const [placingClient, setPlacingClient] = useState(null);
+  // v111 (Session B): a WHOLE GROUP armed for tap-to-place. One tap lands everybody
+  // into the open run starting at the tapped slot (each keeping that slot's own time),
+  // or refuses if there isn't room for all of them. Holds {members:[...], mode:"book"|"move",
+  // currentDateKey, groupSize}. "book" = additive (group quick-book, no origin to vacate);
+  // "move" = a dragged group handed across a view (origins vacated). This replaces the old
+  // one-tap-per-member queue for both entry points. Revert lever — delete this state and the
+  // three wirings (jumpToDateForGroupBooking, queueGroupTapToPlace, the confirmNextBooking
+  // redirects) and groups fall back to their v110 behavior.
+  const [placingGroup, setPlacingGroup] = useState(null);
   const [dragCalOpen, setDragCalOpen] = useState(false);
   const [dragCalMonth, setDragCalMonth] = useState(null);
   const [dragCalHover, setDragCalHover] = useState(false);
@@ -3017,6 +3026,23 @@ export default function TheList() {
     // A recurring occurrence nudged this way moves only itself (marked an exception),
     // never the whole series — popping the series modal would interrupt typing.
     if (prev.recurWeeks && prev.name) moved.isException = true;
+    // v112 (Session A): the KEYBOARD nudge hand-rolls its own retime (above) instead of
+    // going through retimeSlot, so it never inherited retimeSlot's v95 anchor-drop or its
+    // v97 "a deliberate nudge signs its name" stamp. The result: a Shift+Arrow nudge on an
+    // EMPTY opening set defaultBaseTime but left nudgeKept UNSET. It looked right on-device,
+    // then the very next cloud snapshot ran migrateSchedules -> deNudgeEmptyRows, saw an
+    // anchored empty row with no nudgeKept, and swept it back to its default ~1s later. (It
+    // "stuck" the moment a name was typed, because deNudgeEmptyRows skips any named row.)
+    // These three lines are the tail of retimeSlot (lines ~293 and ~304-305) applied to the
+    // FINAL moved row: drop a now-redundant anchor if the nudge landed back on its own
+    // default, then flag a genuine empty on-purpose nudge so the sweep leaves it alone, and
+    // strip the flag from anything that isn't one (named / blocked / back-on-default). No new
+    // synced field — nudgeKept already rides the schedules payload end to end (v96/v97), so
+    // this one stamp is all that was missing. Revert lever — delete this block and the
+    // keyboard nudge reverts on the next snapshot again.
+    if (moved.defaultBaseTime && moved.defaultBaseTime === newTime) { delete moved.defaultBaseTime; moved.customTime = false; }
+    if (moved.defaultBaseTime && !(moved.name && String(moved.name).trim()) && !moved.blocked) { moved.nudgeKept = true; }
+    else if (moved.nudgeKept) { delete moved.nudgeKept; }
     slots[idx] = moved;
     slots.sort(function(a,b){ return timeToAbsMinutes(a.time)-timeToAbsMinutes(b.time); });
     var newIdx = -1; var fi;
@@ -4501,6 +4527,24 @@ export default function TheList() {
     setCheckoffModal(null); setNudgedDate(null); setCheckoffCalMonth(null);
     setBaseDate(parseDateKey(targetDateKey)); setView(isPhone?"Day":"3-Day");
     setReassignMode({client:{name:slot.name,price:slot.price,recurWeeks:slot.recurWeeks},currentDateKey:targetDateKey,remainingConflicts:[]});
+  };
+
+  // v111 (Session B): the GROUP twin of jumpToDateForBooking. A group quick-book jumps to the
+  // chosen date and arms group tap-to-place (mode "book" — additive, no origin to vacate), so
+  // the whole group lands on ONE tap into the open run he taps, instead of being shoved onto
+  // their old times with no tap at all (the v110 group behavior). Members carry no origin.
+  // Recurring-source groups are deliberately NOT routed here (see the confirmNextBooking
+  // redirects) — re-anchoring a recurring group is a recurring-engine change and belongs to
+  // its own session. Revert lever — remove this and the two confirmNextBooking redirects.
+  const jumpToDateForGroupBooking = function(targetDateKey) {
+    if (!checkoffModal || !checkoffModal.groupTimes) return;
+    var members = checkoffModal.groupTimes.map(function(t){
+      return {name:t.name, price:(t.price||""), recurWeeks:(t.recurWeeks||null), originalDateKey:null, originalIdx:null, originalTime:(t.defaultBaseTime||t.time)};
+    }).filter(function(m){ return !!m.name; });
+    members.sort(function(a,b){ return timeToAbsMinutes(a.originalTime) - timeToAbsMinutes(b.originalTime); });
+    setCheckoffModal(null); setNudgedDate(null); setCheckoffCalMonth(null); setCheckoffRecur(null); setRecurPickerOpen(false);
+    setBaseDate(parseDateKey(targetDateKey)); setView(isPhone?"Day":"3-Day");
+    setPlacingGroup({members:members, mode:"book", currentDateKey:targetDateKey, groupSize:members.length});
   };
 
   const openClientProfile = function(name) {
@@ -7335,25 +7379,38 @@ export default function TheList() {
 
   // v78: Month-view (or calendar-picker) group drop — NEVER auto-place. Granger's
   // rule: a drag-and-drop reschedule always ends with HIM choosing the time. Open
-  // the target day and hand the whole group to tap-to-place, one open-slot tap per
-  // member in time order. Each queued member carries a shared groupId so the group
-  // lands re-joined as the taps complete. (Select-mode multi drags pass through
-  // here too with gid=null — they place the same way, just un-joined.)
+  // the target day and hand the whole group to tap-to-place.
+  //
+  // v111 (Session B): ONE TAP, WHOLE GROUP — no longer one tap per member. Granger still
+  // chooses the time (the slot he taps), and now the whole group lands on and after that slot
+  // together, each keeping the tapped-run's own slot times. This arms placingGroup (mode
+  // "move" — origins are vacated when they land) instead of draining a per-member queue, and
+  // placeGroupInSlots enforces the room-check (refuse if there isn't an open run long enough).
+  // (Select-mode multi drags pass through here too; they arm the same way and land as a group.)
+  //
+  // Revert lever — the v110 body, one open-slot tap per member via the reassign queue:
+  // var clients0 = ds.clients.filter(function(c){ return c.name; });
+  // if (clients0.length === 0) return;
+  // clients0 = clients0.slice().sort(function(a,b){ return timeToAbsMinutes(a.originalTime||a.time) - timeToAbsMinutes(b.originalTime||b.time); });
+  // var gid0 = (ds.group && clients0.length > 1) ? newGroupId() : null;
+  // var withGid0 = clients0.map(function(c){ return {...c, groupId:gid0}; });
+  // setSelectMode(false); setSelectedSlots({});
+  // setBaseDate(parseDateKey(targetDateKey)); setView(isPhone?"Day":"3-Day");
+  // var first0 = withGid0[0]; var rest0 = withGid0.slice(1);
+  // setReassignQueue(rest0);
+  // setReassignMode({client:{name:first0.name,price:first0.price,recurWeeks:first0.recurWeeks,groupId:first0.groupId},currentDateKey:targetDateKey,remainingConflicts:[],groupSize:(1+rest0.length),originalDateKey:first0.originalDateKey,originalIdx:first0.originalIdx});
   const queueGroupTapToPlace = function(targetDateKey, ds) {
     var clients = ds.clients.filter(function(c){ return c.name; });
     if (clients.length === 0) return;
     clients = clients.slice().sort(function(a,b){
       return timeToAbsMinutes(a.originalTime||a.time) - timeToAbsMinutes(b.originalTime||b.time);
     });
-    var gid = (ds.group && clients.length > 1) ? newGroupId() : null;
-    var withGid = clients.map(function(c){ return {...c, groupId:gid}; });
+    var members = clients.map(function(c){
+      return {name:c.name, price:(c.price||""), recurWeeks:(c.recurWeeks||null), originalDateKey:c.originalDateKey, originalIdx:c.originalIdx, originalTime:(c.originalTime||c.time)};
+    });
     setSelectMode(false); setSelectedSlots({});
     setBaseDate(parseDateKey(targetDateKey)); setView(isPhone?"Day":"3-Day");
-    var first = withGid[0]; var rest = withGid.slice(1);
-    setReassignQueue(rest);
-    // v87 (#5b): fixed original batch size for the banner (see companion note above). The
-    // whole group is tap-placed here, so 1+rest.length = withGid.length = the full group.
-    setReassignMode({client:{name:first.name,price:first.price,recurWeeks:first.recurWeeks,groupId:first.groupId},currentDateKey:targetDateKey,remainingConflicts:[],groupSize:(1+rest.length),originalDateKey:first.originalDateKey,originalIdx:first.originalIdx});
+    setPlacingGroup({members:members, mode:"move", currentDateKey:targetDateKey, groupSize:members.length});
   };
 
   useEffect(function() {
@@ -7704,6 +7761,84 @@ export default function TheList() {
     }
   };
 
+  // v111 (Session B): PLACE A WHOLE GROUP ON ONE TAP. This is the group twin of the single
+  // placement paths, and it makes groups behave like singles: the slot you tap keeps its own
+  // time (edited stays edited, default stays default), and nobody's original time is carried
+  // onto it. Starting at the tapped slot, we collect the tapped slot plus the consecutive
+  // slots after it, requiring an UNBROKEN run of open slots long enough for the whole group.
+  // Granger's locked rule: a taken/blocked slot INSIDE the run STOPS the run (we refuse — we
+  // do not skip past it), and if there is not enough room the tap is refused with a quiet
+  // banner and nothing moves (placingGroup stays armed so he can try another slot). No spill
+  // to the next day, no standby, no doubling two people onto one time.
+  // Two modes: "book" (group quick-book) is additive — no origin to vacate, logs each as added;
+  // "move" (a dragged group handed across a view) vacates each origin first (blank in place,
+  // drop any old link — the same recipe the drag/reassign group paths already use) and logs
+  // each origin removed. Recurring members move as single-instance exceptions (isException:true),
+  // exactly as the v110 group tap-to-place did — the series is untouched, so the recurring
+  // engine is not on this path.
+  // Revert lever — delete this function and the render branch/​time-cell wiring that calls it.
+  const placeGroupInSlots = function(targetDateKey, targetIdx) {
+    if (!placingGroup || placingGroup.currentDateKey !== targetDateKey) return;
+    var members = placingGroup.members || [];
+    var need = members.length;
+    if (need === 0) { setPlacingGroup(null); return; }
+    // Build the run against the CURRENT visible grid — that is what Granger is looking at
+    // when he taps, so the refuse decision matches the openings he can see.
+    var dayNow = getSlots(targetDateKey);
+    var run = []; var k = targetIdx; var sK;
+    while (k < dayNow.length && run.length < need) {
+      sK = dayNow[k];
+      if (!sK || (sK.name && String(sK.name).trim()) || sK.blocked) break;  // taken/blocked stops the run
+      run.push(k);
+      k++;
+    }
+    if (run.length < need) {
+      showBanner({type:"info", msg:"No room for all " + need + " here — tap a slot with " + need + " openings in a row."});
+      return;  // leave placingGroup armed; he can tap somewhere else
+    }
+    var snapshot = {schedules:JSON.parse(JSON.stringify(schedulesRef.current))};
+    pushUndo(snapshot);
+    var newSch = {...schedulesRef.current};
+    var getDayW = function(dk){ return newSch[dk] ? [...newSch[dk]] : DEFAULT_TIMES.map(function(t){ return {time:t,name:"",price:"",done:false,recurWeeks:null}; }); };
+    var isMove = placingGroup.mode === "move";
+    var gid = need > 1 ? newGroupId() : null;
+    var vacList = [];
+    // MOVE: lift each member off its origin first (same-day or cross-day), so the origin
+    // goes back to a plain bookable opening and the old joint link is dropped.
+    if (isMove) {
+      members.forEach(function(m){
+        if (m.originalDateKey == null || m.originalIdx == null) return;
+        var od = getDayW(m.originalDateKey);
+        if (od[m.originalIdx] && od[m.originalIdx].name === m.name) {
+          vacList.push({dateKey:m.originalDateKey, time:od[m.originalIdx].time, name:m.name});
+          od[m.originalIdx] = {...od[m.originalIdx],name:"",price:"",done:false,recurWeeks:null,isException:false,groupId:null};
+          newSch[m.originalDateKey] = od;
+          addHistoryEntry({type:"removed",time:od[m.originalIdx].time,name:m.name,dateKey:m.originalDateKey});
+        }
+      });
+    }
+    // Place each member into the run, KEEPING each landing slot's own time. isException:true
+    // so a moved recurring member lands as a one-off and its series is left alone.
+    var tday = getDayW(targetDateKey);
+    var flashT = [];
+    members.forEach(function(m, i){
+      var ri = run[i];
+      tday[ri] = {...tday[ri],name:m.name,price:(m.price||""),recurWeeks:(m.recurWeeks||null),isException:true,done:false,groupId:gid};
+      flashT.push({dateKey:targetDateKey, time:tday[ri].time});
+      addHistoryEntry({type:"added",time:tday[ri].time,name:m.name,price:(m.price||""),dateKey:targetDateKey});
+    });
+    newSch[targetDateKey] = tday;
+    setSchedules(newSch);
+    // Green on each landing, red on each vacated origin (indices re-resolved by time; red
+    // skipped on any slot repacked into on the same day).
+    flashT.forEach(function(ft){ var d=newSch[ft.dateKey]; if(d){ var fi=findSlotIdxByTime(d,ft.time); if(fi>=0) flashPlaced(ft.dateKey,fi); } });
+    vacList.forEach(function(vt){ var d=newSch[vt.dateKey]; if(d){ var vi=findSlotIdxByTime(d,vt.time); if(vi>=0 && !d[vi].name) flashRemoved(vt.dateKey,vi,vt.name); } });
+    var nm = members.map(function(m){ return m.name; }).filter(function(n){ return !!n; });
+    var lbl = nm.length<=2 ? nm.join(" & ") : (nm.slice(0,-1).join(", ")+" & "+nm[nm.length-1]);
+    showBanner({type:(isMove?"rescheduled":"info"), msg:(lbl||(need+" appointments"))+(isMove?" rescheduled":" booked"), time:null, dateKey:null, flashTargets:flashT});
+    setPlacingGroup(null);
+  };
+
   const dates = getDates();
   const effectiveNextDate = nudgedDate||(checkoffModal&&checkoffModal.nextDateKey);
   const nudgeConflict = effectiveNextDate?isSlotTaken(effectiveNextDate,checkoffModal&&checkoffModal.slot&&placementTime(checkoffModal.slot),checkoffModal&&checkoffModal.slot&&checkoffModal.slot.name):false;
@@ -7805,7 +7940,7 @@ export default function TheList() {
             var isT=isToday(day); var disabled=isPast||isFuture;
             var range=getDayTimeRange(dk);
             return (
-              <div key={dk} onClick={function(){ if(!disabled){ if(checkoffRecur) bookRecurringFromModal(dk,checkoffRecur); else if(checkoffModal.groupTimes&&checkoffModal.groupTimes.length>1) confirmNextBooking(dk); else jumpToDateForBooking(dk,slot); } }}
+              <div key={dk} onClick={function(){ if(!disabled){ if(checkoffRecur) bookRecurringFromModal(dk,checkoffRecur); else if(checkoffModal.groupTimes&&checkoffModal.groupTimes.length>1){ /* v111 (Session B): a NON-recurring group now arms tap-to-place (jumpToDateForGroupBooking) instead of being dropped onto old times with no tap. A recurring-source group keeps the v110 confirmNextBooking path — re-anchoring a recurring group is a recurring-engine change for its own session. Revert lever — the v110 line: else if(checkoffModal.groupTimes&&checkoffModal.groupTimes.length>1) confirmNextBooking(dk); */ if(checkoffModal.slot.recurWeeks) confirmNextBooking(dk); else jumpToDateForGroupBooking(dk); } else jumpToDateForBooking(dk,slot); } }}
                 style={{position:"relative",height:"44px",background:disabled?"#f8f8f8":holiday?"#fffbf0":isT?"#fffbf0":"#ffffff",borderTop:isT?("2px solid "+TODAY_BLUE):"2px solid transparent",padding:"4px 5px",cursor:disabled?"default":"pointer",borderRadius:"3px",opacity:disabled?0.35:1,boxSizing:"border-box"}}>
                 {!disabled&&weekMarks[dk]&&<div style={{position:"absolute",top:"2px",right:"2px",fontSize:"8px",fontWeight:"bold",color:"#a07830",background:"#fdf3df",borderRadius:"3px",padding:"1px 2px",lineHeight:1}}>{weekMarks[dk]+"w"}</div>}
                 <div style={{fontSize:"12px",color:isT?TODAY_BLUE:disabled?"#ccc":"#1a1a1a",fontWeight:isT?"bold":"normal",lineHeight:1}}>{day.getDate()}</div>
@@ -7877,7 +8012,7 @@ export default function TheList() {
   }
 
   return (
-    <div ref={appRootRef} style={{height:"100dvh",overflow:"hidden",boxSizing:"border-box",display:"flex",flexDirection:"column",background:"#ffffff",fontFamily:"Georgia,serif",color:"#1a1a1a",paddingTop:(reassignMode||placingClient)?"calc(env(safe-area-inset-top,0px) + 52px)":"0"}}
+    <div ref={appRootRef} style={{height:"100dvh",overflow:"hidden",boxSizing:"border-box",display:"flex",flexDirection:"column",background:"#ffffff",fontFamily:"Georgia,serif",color:"#1a1a1a",paddingTop:(reassignMode||placingClient||placingGroup)?"calc(env(safe-area-inset-top,0px) + 52px)":"0"}}
       onMouseUp={function(){ endSelectDrag(); if(dragState&&!dragCalHover) { setDragState(null); setDragCalOpen(false); } }}
       onTouchStart={function(e){
         // Record touch start for swipe-to-navigate (horizontal swipe on the app chrome,
@@ -7917,7 +8052,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v110</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v112</div>
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -8391,6 +8526,19 @@ export default function TheList() {
         </div>
       )}
 
+      {/* v111 (Session B): the GROUP tap-to-place banner — one tap lands everybody. Guarded so
+          it never stacks under the reassign or single-placement banners. Revert lever — delete
+          this whole block along with the placingGroup state and wiring. */}
+      {placingGroup && !reassignMode && !placingClient && (
+        <div style={{position:"fixed",top:0,left:0,right:0,zIndex:900,background:"#1a1a1a",color:"#fff",padding:"12px 20px",paddingTop:"calc(env(safe-area-inset-top,0px) + 12px)",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+          <div>
+            <div style={{fontSize:"11px",letterSpacing:"0.15em",textTransform:"uppercase",color:"#c9a96e",marginBottom:"2px"}}>{placingGroup.mode==="move"?"Moving group":"Booking group"}</div>
+            <div style={{fontSize:"14px"}}>Tap an open slot to place all <strong>{placingGroup.members.length}</strong> together — on and after that slot</div>
+          </div>
+          <button onClick={function(){ setPlacingGroup(null); }} style={{background:"none",border:"1px solid #444",borderRadius:"6px",color:"#888",padding:"6px 12px",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>Cancel</button>
+        </div>
+      )}
+
       {reassignApplyAll && (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={function(){ setReassignApplyAll(null); }}>
           <div style={{background:"#ffffff",border:"1px solid #e0e0de",borderRadius:"12px",padding:"28px 28px 24px",width:"min(380px,92vw)"}} onClick={function(e){ e.stopPropagation(); }}>
@@ -8652,7 +8800,7 @@ export default function TheList() {
                   {[2,3,4,5,6,7,8].map(function(w){
                     var d=addWeeks(parseDateKey(checkoffModal.dateKey),w); var dk=toDateKey(d); var mo=d.getMonth();
                     var ds=[3,4,5,6].includes(mo)?d.toLocaleDateString("en-US",{month:"long",day:"numeric"}):d.toLocaleDateString("en-US",{month:"short",day:"numeric"});
-                    return <button key={w} onClick={function(){ if(checkoffRecur) bookRecurringFromModal(dk,checkoffRecur); else if(checkoffModal.groupTimes&&checkoffModal.groupTimes.length>1) confirmNextBooking(dk); else jumpToDateForBooking(dk,checkoffModal.slot); }} style={{padding:"9px 16px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"8px",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",color:"#1a1a1a"}}>{w}w · {ds}</button>;
+                    return <button key={w} onClick={function(){ if(checkoffRecur) bookRecurringFromModal(dk,checkoffRecur); else if(checkoffModal.groupTimes&&checkoffModal.groupTimes.length>1){ /* v111 (Session B): non-recurring group arms tap-to-place; recurring-source group keeps confirmNextBooking (own session). Revert lever — the v110 line: else if(checkoffModal.groupTimes&&checkoffModal.groupTimes.length>1) confirmNextBooking(dk); */ if(checkoffModal.slot.recurWeeks) confirmNextBooking(dk); else jumpToDateForGroupBooking(dk); } else jumpToDateForBooking(dk,checkoffModal.slot); }} style={{padding:"9px 16px",background:"#f4f4f2",border:"1px solid #d8d8d6",borderRadius:"8px",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",color:"#1a1a1a"}}>{w}w · {ds}</button>;
                   })}
                 </div>
                 <div style={{fontSize:"11px",letterSpacing:"0.1em",textTransform:"uppercase",color:"#aaa",marginBottom:"12px"}}>Or pick a date</div>
@@ -9995,7 +10143,7 @@ export default function TheList() {
                                 text was:  {slot.time}
                                 condition ended with:  !isLiveDragging&&!(reassignMode&&reassignMode.currentDateKey===dateKey) */}
                           <div
-                            onClick={function(e){ e.stopPropagation(); if(placingClient){ if(!filled) placeClientInSlot(dateKey,idx); return; } if(filled&&slot.done){ handleDoneRowTap(dateKey,idx); return; } if(!isEditing&&!selectMode&&!isLiveDragging&&!isCommit&&!(reassignMode&&reassignMode.currentDateKey===dateKey)) openTimeEdit(dateKey,idx); }}
+                            onClick={function(e){ e.stopPropagation(); if(placingClient){ if(!filled) placeClientInSlot(dateKey,idx); return; } if(placingGroup&&placingGroup.currentDateKey===dateKey){ /* v111 (Session B): during group placement, a tap on the target day's time cell places the whole group (mirrors placingClient). Other days fall through untouched. */ if(!filled) placeGroupInSlots(dateKey,idx); return; } if(filled&&slot.done){ handleDoneRowTap(dateKey,idx); return; } if(!isEditing&&!selectMode&&!isLiveDragging&&!isCommit&&!(reassignMode&&reassignMode.currentDateKey===dateKey)) openTimeEdit(dateKey,idx); }}
                             onMouseDown={function(e){ e.stopPropagation(); }}
                             onTouchStart={function(e){ e.stopPropagation(); }}
                             style={{fontSize:"12px",color:defShift?ADJ_BLUE:slot.customTime?"#2f7d8a":(filled?"#c9a96e":"#2e2e2e"),fontWeight:(slot.customTime||defShift)?"bold":"normal",width:"40px",flexShrink:0,fontVariantNumeric:"tabular-nums",letterSpacing:"0.02em",userSelect:"none",WebkitUserSelect:"none",cursor:isCommit?"default":"pointer"}}>{isCommit?"":slot.time}</div>
@@ -10097,6 +10245,11 @@ export default function TheList() {
                             <div onClick={function(){ handleReassignSlotTapWithQueue(dateKey,idx); }} style={{flex:1,fontSize:"13px",color:"#2a7a2a",cursor:"pointer",padding:"0 2px"}}>tap to place</div>
                           ):placingClient&&!filled?(
                             <div onClick={function(){ placeClientInSlot(dateKey,idx); }} style={{flex:1,fontSize:"13px",color:"#2a7a2a",cursor:"pointer",padding:"0 2px"}}>tap to place</div>
+                          ):placingGroup&&!filled&&placingGroup.currentDateKey===dateKey?(
+                            /* v111 (Session B): tap here to land the whole group on and after this
+                               slot. placeGroupInSlots refuses (quiet banner, nothing moves) if there
+                               isn't an open run long enough. Revert lever — delete this branch. */
+                            <div onClick={function(){ placeGroupInSlots(dateKey,idx); }} style={{flex:1,fontSize:"13px",color:"#2a7a2a",cursor:"pointer",padding:"0 2px"}}>tap to place all {placingGroup.members.length}</div>
                           ):(
                             /* v105: this div now arms TWO long-presses, and they can never collide.
                                The drag press arms only on a FILLED row (every one of its guards
