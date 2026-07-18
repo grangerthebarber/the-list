@@ -649,6 +649,13 @@ function logEntryWords(entry) {
   else if (isSlotSwap) { chip = "replaced"; action = "replaced " + prev; }
   else if (t === "edited") { chip = "edited"; action = "edited"; }
   else if (t === "backup") { chip = "backup"; action = "backup"; }
+  // v117 (#3): a restore (and an undone restore) reads as its own thing. The action line
+  // says where the backup came from when we know, because "Backup restored" on its own
+  // tells him nothing about WHICH backup landed on top of his day.
+  else if (t === "restore") {
+    chip = "restore";
+    action = (nm === "Restore undone") ? "restore undone — your data is back" : ((entry && entry.restoreWhen) ? ("restored from the backup from " + entry.restoreWhen) : "backup restored");
+  }
   else { chip = "changed"; action = "changed"; }
   return {chip: chip, action: action, isProfileRename: isProfileRename};
 }
@@ -687,6 +694,14 @@ const VIEWS = ["Day","3-Day","Wknd","Week","Month"];
 // the header is too cramped so the banner falls back to floating. Tune this one
 // number if it flips inline at the wrong split size on the actual iPad.
 var SPLIT_INLINE_MIN_W = 900;
+// v117 (#3): RESTORE SAFETY NET storage keys. Three separate keys on purpose — if the
+// iPad refuses the second write (quota, private mode), the FIRST one still landed, and
+// the first one is the copy of Granger's real live data. Never merge these into one blob.
+// Measured against his live export of 2026-07-18: 420KB minified, ~836KB as Safari counts
+// it, roughly 16% of the ~5MB ceiling. Both copies together sit near a third of it.
+var RESTORE_KEY_BEFORE = "tl_restoreBefore";
+var RESTORE_KEY_AFTER  = "tl_restoreAfter";
+var RESTORE_KEY_META   = "tl_restoreMeta";
 // Default "Share openings" intro drafts. {{OT_AMT}} is replaced with the live OT
 // surcharge number at copy time, independent of which draft is active. "full" is
 // word-for-word the original always-on intro; "short" skips the OT explainer for
@@ -1019,6 +1034,10 @@ export default function TheList() {
   // three wirings (jumpToDateForGroupBooking, queueGroupTapToPlace, the confirmNextBooking
   // redirects) and groups fall back to their v110 behavior.
   const [placingGroup, setPlacingGroup] = useState(null);
+  // v115 (#1): a GROUP dropped on the MONTH tab is held here ("in hand") while Month view is
+  // shown, until he taps a day to place it. See the onEnd multi branch (sets it), the month-cell
+  // onClick (consumes it), the "Tap a day" banner, and the leave-Month cleanup effect below.
+  const [groupTabPending, setGroupTabPending] = useState(null);
   const [dragCalOpen, setDragCalOpen] = useState(false);
   const [dragCalMonth, setDragCalMonth] = useState(null);
   const [dragCalHover, setDragCalHover] = useState(false);
@@ -1137,6 +1156,19 @@ export default function TheList() {
   const [quickMsgOpenId, setQuickMsgOpenId] = useState(null);
   const [quickMsgCopiedId, setQuickMsgCopiedId] = useState(null);
   const quickMsgCopyTimer = useRef(null);
+  // v116 (#1): QUICK-MESSAGE UNDO / REDO. One step, scoped to the Messages popup only —
+  // deliberately NOT wired into the app's main undo stack, which carries bookings and moves
+  // and must not become unpredictable because a message body was retyped.
+  // qmUndo shape: {kind:"delete"|"edit", id, index, before, after, undone}
+  //   delete — before = the whole removed message object, index = where it sat in the list.
+  //   edit   — before/after = {title,body} snapshots taken at box OPEN and box CLOSE.
+  //   undone — false: the Undo chip is live.  true: the Redo chip is live.
+  // A new delete or a new committed edit REPLACES the entry outright (single step, per
+  // Granger's locked decision), so there is no stack to drift out of sync with the list.
+  // Revert lever — delete this state, qmEditSnapRef, the commit effect, applyQmUndo /
+  // applyQmRedo, the capture line inside removeQuickMsg, and the chip row in the popup.
+  const [qmUndo, setQmUndo] = useState(null);
+  const qmEditSnapRef = useRef(null);
   // Header name search (iPad): what's typed, whether the dropdown is open, and the
   // current green "found them" highlight ({name lower-cased, dateKey}) that fades after 8s.
   const [searchText, setSearchText] = useState("");
@@ -1168,6 +1200,18 @@ export default function TheList() {
   const [renameRequiredModal, setRenameRequiredModal] = useState(null);
   // Import backup confirm: {data, whenText}. Held aside so we can ask before overwriting.
   const [importConfirm, setImportConfirm] = useState(null);
+  // v117 (#3): RESTORE SAFETY NET. Two separate lifetimes on purpose.
+  //   restoreSafety — the DURABLE half. {mode:"canUndo"|"canRedo", entryId, whenText, at,
+  //     hasBefore, hasAfter}. Mirrored into localStorage so the change-log row still works
+  //     after the app is closed and reopened. The payloads themselves are NOT held here —
+  //     they live in localStorage and are read only at the moment a tap needs them, so the
+  //     app never carries two full copies of the world in memory for nothing.
+  //   restoreChip — the IMMEDIATE half. The floating Undo restore / Redo restore chip.
+  //     Stays up through view changes, popups and drags until Granger dismisses it by hand,
+  //     but does NOT come back on a fresh app open (see Handoff — one-line change if he
+  //     wants it to). The change-log row is the long-lived way back in.
+  const [restoreSafety, setRestoreSafety] = useState(null);
+  const [restoreChip, setRestoreChip] = useState(null);
   // Price change on a profiled, non-recurring person: {dateKey, idx, name, oldPrice, newPrice}.
   // Asks whether the new price is just this appointment or the person's saved profile default.
   const [profilePriceModal, setProfilePriceModal] = useState(null);
@@ -1226,6 +1270,12 @@ export default function TheList() {
   dragStateRef.current = dragState;
   const viewRef = useRef(view);
   viewRef.current = view;
+  // v115 (#1): if he leaves Month view without placing an in-hand group (taps another view tab,
+  // arrows away, etc.), drop the pending so it can't resurface and mis-place on a later day tap.
+  // The place path (month-cell onClick) clears the pending BEFORE it flips the view, so this
+  // never fights a real placement. Revert lever — delete this effect along with the rest of the
+  // v115 (#1) block.
+  useEffect(function(){ if (view !== "Month" && groupTabPending) setGroupTabPending(null); }, [view]);
   const slotTapRef = useRef({key:null,count:0,timer:null,side:null});
   // v105: the empty-slot long-press that raises the commitment editor. Deliberately its OWN
   // timer, separate from dragLongPress: the drag press only ever arms on a FILLED row (see
@@ -1570,6 +1620,21 @@ export default function TheList() {
         try { window.localStorage.setItem("tl_lastExportPrompt", todayKey); } catch(e) {}
         setDailyExportPrompt(true);
       }
+    } catch(e) {}
+  }, [authUser, hydrated]);
+
+  // v117 (#3): on app open, pick up a restore that happened in an earlier session so its
+  // change-log row is still tappable. Meta only — the payloads stay on disk in localStorage
+  // until a tap actually needs one. Deliberately does NOT raise the floating chip; the log
+  // row is the long-lived way back, and a chip that reappeared on every open forever would
+  // become furniture. (One-line change if that turns out to be wrong: setRestoreChip(mt).)
+  useEffect(function() {
+    if (!authUser || !hydrated) return;
+    try {
+      var raw = window.localStorage.getItem(RESTORE_KEY_META);
+      if (!raw) return;
+      var mt = JSON.parse(raw);
+      if (mt && (mt.mode === "canUndo" || mt.mode === "canRedo")) setRestoreSafety(mt);
     } catch(e) {}
   }, [authUser, hydrated]);
 
@@ -1965,29 +2030,36 @@ export default function TheList() {
 
   const setSlots = function(dateKey, slots) { setSchedules(function(prev){ return {...prev,[dateKey]:slots}; }); };
 
-  // The day/3-day/week views are anchored on today — but once today's last
-  // person is checked off, the anchor rolls forward to tomorrow.
+  // v116 (#5): TODAY STAYS TODAY. Granger's rule — the day follows the CLOCK, and nothing
+  // else. Checking off the last person no longer makes today "finished" and no longer moves
+  // him off it. Two behaviors died here, both of which used isDayComplete:
+  //   (a) the ANCHOR: every "go home" route (tapping the current view's tab again, leaving
+  //       Wknd, leaving Month) called getAnchorStart, which handed back TOMORROW once today
+  //       was complete. It now always hands back today. Six call sites, all unchanged —
+  //       they route through this one function, so this single line covers all of them.
+  //   (b) the LIVE ROLL-FORWARD effect: the moment the last check landed while he was
+  //       sitting on today, the first column jumped to tomorrow underneath him. Deleted.
+  // isDayComplete itself is left alone — it is used elsewhere and this is not its only home.
+  // Revert lever — the v115 pair, verbatim:
+  //   const getAnchorStart = function() {
+  //     var today = new Date();
+  //     if (isDayComplete(getSlots(toDateKey(today)))) return addDays(today, 1);
+  //     return today;
+  //   };
+  //   const todayCompleteRef = useRef(false);
+  //   useEffect(function() {
+  //     var today = new Date();
+  //     var complete = isDayComplete(getSlots(toDateKey(today)));
+  //     var was = todayCompleteRef.current;
+  //     todayCompleteRef.current = complete;
+  //     if (view==="Month" || view==="Wknd") return;
+  //     if (complete && !was && toDateKey(baseDate)===toDateKey(today)) {
+  //       setBaseDate(addDays(today, 1));
+  //     }
+  //   }, [schedules, view, baseDate]);
   const getAnchorStart = function() {
-    var today = new Date();
-    if (isDayComplete(getSlots(toDateKey(today)))) return addDays(today, 1);
-    return today;
+    return new Date();
   };
-
-  // Live roll-forward: the moment today's last person gets checked off (while you're
-  // sitting on today in a day/3-day/week view), advance the first column to tomorrow.
-  // Only fires on the incomplete→complete transition, so you can still arrow back to
-  // review a finished day without being bounced forward again.
-  const todayCompleteRef = useRef(false);
-  useEffect(function() {
-    var today = new Date();
-    var complete = isDayComplete(getSlots(toDateKey(today)));
-    var was = todayCompleteRef.current;
-    todayCompleteRef.current = complete;
-    if (view==="Month" || view==="Wknd") return;
-    if (complete && !was && toDateKey(baseDate)===toDateKey(today)) {
-      setBaseDate(addDays(today, 1));
-    }
-  }, [schedules, view, baseDate]);
 
   const addHistoryEntry = function(entry) {
     var full = {...entry, timestamp:new Date().toLocaleTimeString(), id:Date.now()+Math.random()};
@@ -4166,8 +4238,90 @@ export default function TheList() {
     setQuickMsgOpenId(nid);
   };
   const removeQuickMsg = function(id) {
+    // v116 (#1): remember the whole message AND its position before it goes, so Undo can put
+    // it back exactly where it was rather than on the end of the list. Read off the ref so
+    // this is the list as it stands right now, not a stale render's copy. Any pending edit
+    // snapshot for this message is dropped — the delete is the newer, bigger event.
+    var qmList = quickMsgsRef.current || [];
+    var qmIdx = -1; var qmI;
+    for (qmI = 0; qmI < qmList.length; qmI++) { if (qmList[qmI].id === id) { qmIdx = qmI; break; } }
+    if (qmIdx >= 0) {
+      qmEditSnapRef.current = null;
+      setQmUndo({kind:"delete", id:id, index:qmIdx, before:{...qmList[qmIdx]}, after:null, undone:false});
+    }
     setQuickMsgs(function(prev){ return prev.filter(function(m){ return m.id!==id; }); });
     setQuickMsgOpenId(function(cur){ return cur===id?null:cur; });
+  };
+
+  // v116 (#1): THE EDIT SNAPSHOT. Granger types a message body one character at a time, so
+  // capturing per keystroke would make Undo back out a single letter — useless. Instead the
+  // body+title are snapshotted when a message's box OPENS, and that snapshot is COMMITTED
+  // into qmUndo when the box closes (he collapses it, opens another, adds one, or shuts the
+  // popup). One effect owns the whole lifecycle, keyed on the two things that can open or
+  // close a box, so no individual button handler has to remember to do this.
+  // Three guards worth naming:
+  //   - nothing is committed if the text came back identical (opening a box to read it is
+  //     not an edit and must not blow away a real undo he still wants);
+  //   - a message that no longer exists is skipped, so removeQuickMsg's delete entry — set
+  //     in the same tick, which also closes the box and re-runs this — survives intact;
+  //   - the ref is cleared before re-arming, so a commit can never fire twice.
+  useEffect(function() {
+    var snap = qmEditSnapRef.current;
+    qmEditSnapRef.current = null;
+    if (snap) {
+      var list = quickMsgsRef.current || [];
+      var cur = null; var i;
+      for (i = 0; i < list.length; i++) { if (list[i].id === snap.id) { cur = list[i]; break; } }
+      if (cur && (cur.title !== snap.title || cur.body !== snap.body)) {
+        setQmUndo({kind:"edit", id:snap.id, index:-1,
+          before:{title:snap.title, body:snap.body},
+          after:{title:cur.title, body:cur.body}, undone:false});
+      }
+    }
+    if (quickMsgModal && quickMsgOpenId) {
+      var list2 = quickMsgsRef.current || [];
+      var j;
+      for (j = 0; j < list2.length; j++) {
+        if (list2[j].id === quickMsgOpenId) {
+          qmEditSnapRef.current = {id:list2[j].id, title:list2[j].title, body:list2[j].body};
+          break;
+        }
+      }
+    }
+  }, [quickMsgOpenId, quickMsgModal]);
+
+  // v116 (#1): apply one side of the remembered change. dir "undo" writes "before", dir
+  // "redo" writes "after"; the entry is kept and only its "undone" flag flips, which is what
+  // swaps the chip in the popup. A restored delete goes back at its ORIGINAL index (clamped,
+  // in case the list got shorter meanwhile). If the affected message's box happens to be
+  // open, the edit snapshot is re-armed to the text we just wrote — otherwise closing that
+  // box would read the restore as a fresh edit and offer to undo the undo.
+  const applyQmSwap = function(dir) {
+    var e = qmUndo;
+    if (!e) return;
+    var target = dir === "undo" ? e.before : e.after;
+    if (e.kind === "delete") {
+      if (dir === "undo") {
+        setQuickMsgs(function(prev){
+          for (var i = 0; i < prev.length; i++) { if (prev[i].id === e.id) return prev; }
+          var out = prev.slice();
+          var at = e.index; if (at < 0) at = 0; if (at > out.length) at = out.length;
+          out.splice(at, 0, {...e.before});
+          return out;
+        });
+      } else {
+        setQuickMsgs(function(prev){ return prev.filter(function(m){ return m.id !== e.id; }); });
+      }
+    } else if (target) {
+      setQuickMsgs(function(prev){
+        return prev.map(function(m){
+          if (m.id !== e.id) return m;
+          return {...m, title:target.title, body:target.body};
+        });
+      });
+      if (quickMsgOpenId === e.id) qmEditSnapRef.current = {id:e.id, title:target.title, body:target.body};
+    }
+    setQmUndo({...e, undone:(dir === "undo")});
   };
 
   // Build the list of times that share a slot's group on a given day (sorted by time).
@@ -6842,8 +6996,21 @@ export default function TheList() {
     armBannerTapClear();
   };
 
+  // v117 (#3): ONE PAYLOAD BUILDER. The export and the pre-restore safety snapshot must
+  // capture the SAME eleven trees — if they ever drift, the safety net saves a different
+  // world than the backup does, and the drift would only show up on the one day it matters.
+  // So both now call this. It is a straight lift of the object literal exportData built
+  // inline through v116; nothing was added, removed or reordered. Verified field-for-field
+  // against Granger's live export of 2026-07-18 (all eleven keys present, plus exportedAt).
+  const buildBackupPayload = function() {
+    return {schedules:schedulesRef.current, clients:clientMemory, holidays:customHolidays, history:history, dayNotes:dayNotes, accounting:accountingRef.current, shareDrafts:shareDraftsRef.current, shareActiveDraftId:shareActiveDraftIdRef.current, quickMsgs:quickMsgs, shareSavedChecks:shareSavedChecks, shareSavedState:shareSavedState, exportedAt:new Date().toISOString()};
+  };
+
   const exportData = function() {
-    var data = {schedules:schedulesRef.current, clients:clientMemory, holidays:customHolidays, history:history, dayNotes:dayNotes, accounting:accountingRef.current, shareDrafts:shareDraftsRef.current, shareActiveDraftId:shareActiveDraftIdRef.current, quickMsgs:quickMsgs, shareSavedChecks:shareSavedChecks, shareSavedState:shareSavedState, exportedAt:new Date().toISOString()};
+    // v117 (#3): was the inline literal. Revert lever — restore this single line and delete
+    // buildBackupPayload above to undo the factoring:
+    // var data = {schedules:schedulesRef.current, clients:clientMemory, holidays:customHolidays, history:history, dayNotes:dayNotes, accounting:accountingRef.current, shareDrafts:shareDraftsRef.current, shareActiveDraftId:shareActiveDraftIdRef.current, quickMsgs:quickMsgs, shareSavedChecks:shareSavedChecks, shareSavedState:shareSavedState, exportedAt:new Date().toISOString()};
+    var data = buildBackupPayload();
     var blob = new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
     var url = URL.createObjectURL(blob);
     var a = document.createElement("a");
@@ -6876,10 +7043,13 @@ export default function TheList() {
     e.target.value="";
   };
 
-  // Actually restore, once the user confirms in the import dialog.
-  const applyImport = function() {
-    var m = importConfirm; if (!m) return;
-    var data = m.data;
+  // v117 (#3): the eleven setters, lifted verbatim out of applyImport into one place so the
+  // restore, the undo and the redo all put the world back the SAME way. Every guard is
+  // character-for-character what applyImport ran through v116 — including the quirks
+  // (shareDrafts needs a non-empty array, shareSavedChecks/State test !==undefined so an
+  // intentional empty value still lands). Changing any of these is a separate job.
+  const applyBackupPayload = function(data) {
+    if (!data) return;
     if (data.schedules) { setSchedules(migrateSchedules(data.schedules)); }
     if (data.clients) setClientMemory(data.clients);
     if (data.holidays) setCustomHolidays(data.holidays);
@@ -6891,10 +7061,114 @@ export default function TheList() {
     if (data.quickMsgs) setQuickMsgs(data.quickMsgs);
     if (data.shareSavedChecks!==undefined) setShareSavedChecks(data.shareSavedChecks);
     if (data.shareSavedState!==undefined) setShareSavedState(data.shareSavedState);
+  };
+
+  // v117 (#3): stash a payload under one localStorage key. Returns true only if it actually
+  // landed. Safari's ~5MB ceiling throws on overflow, and a private-mode window can refuse
+  // writes outright, so EVERY caller must treat false as normal and carry on — the file on
+  // disk is the real safety net and it does not depend on any of this.
+  const stashRestorePart = function(key, payload) {
+    try {
+      window.localStorage.setItem(key, JSON.stringify(payload));
+      return true;
+    } catch(e) { try { window.localStorage.removeItem(key); } catch(e2) {} return false; }
+  };
+  const readRestorePart = function(key) {
+    try {
+      var raw = window.localStorage.getItem(key);
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch(e) { return null; }
+  };
+  const clearRestoreStash = function() {
+    try { window.localStorage.removeItem(RESTORE_KEY_BEFORE); } catch(e) {}
+    try { window.localStorage.removeItem(RESTORE_KEY_AFTER); } catch(e) {}
+    try { window.localStorage.removeItem(RESTORE_KEY_META); } catch(e) {}
+  };
+
+  // v117 (#3): drop the pre-restore copy onto the iPad as a real file. This runs BEFORE the
+  // overwrite, on the same tap that confirmed it — iPad Safari allows one download per tap
+  // and the restore itself downloads nothing, so this is the only one in flight.
+  const saveBeforeRestoreFile = function(payload) {
+    try {
+      var blob = new Blob([JSON.stringify(payload,null,2)],{type:"application/json"});
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement("a");
+      a.href = url; a.download = "the-list-before-restore-" + (new Date().toISOString().split("T")[0]) + ".json"; a.click();
+      URL.revokeObjectURL(url);
+      return true;
+    } catch(e) { return false; }
+  };
+
+  // Actually restore, once the user confirms in the import dialog.
+  // v117 (#3): the overwrite now happens between two safety steps. Order matters and is
+  // deliberate: capture the live world FIRST, put it on disk SECOND, and only then let the
+  // eleven setters fire. If anything throws on the way in, the copy already exists.
+  // Revert lever — the pre-v117 body was exactly the applyBackupPayload block above plus
+  // setImportConfirm(null) / showBanner / armBannerTapClear, with nothing else around it.
+  const applyImport = function() {
+    var m = importConfirm; if (!m) return;
+    var data = m.data;
+    var before = buildBackupPayload();
+    var onDisk = saveBeforeRestoreFile(before);
+    // Throw away any earlier restore's copies FIRST. Without this, a failed write below
+    // would leave last month's "before" sitting under this month's meta, and the Undo
+    // button would cheerfully hand him the wrong world.
+    clearRestoreStash();
+    var okBefore = stashRestorePart(RESTORE_KEY_BEFORE, before);
+    var okAfter = stashRestorePart(RESTORE_KEY_AFTER, data);
+    applyBackupPayload(data);
+    // The restored world carries the restored change log, so the entry announcing the
+    // restore has to be written on top of it — after applyBackupPayload, never before.
+    // Functional updater, so it chains onto whatever setHistory just landed.
+    var entryId = Date.now() + Math.random();
+    var stamp = new Date().toLocaleTimeString();
+    var logEntry = {type:"restore", name:"Backup restored", timestamp:stamp, id:entryId, restoreWhen:(m.whenText||""), restoreOnDisk:!!onDisk};
+    setHistory(function(prev){ return [logEntry, ...prev].slice(0,200); });
+    var meta = {mode:"canUndo", entryId:entryId, whenText:(m.whenText||""), at:new Date().toISOString(), hasBefore:!!okBefore, hasAfter:!!okAfter, onDisk:!!onDisk};
+    stashRestorePart(RESTORE_KEY_META, meta);
+    setRestoreSafety(meta);
+    setRestoreChip(meta);
     setImportConfirm(null);
     showBanner({type:"added",msg:"Backup restored",time:null,dateKey:null});
     armBannerTapClear();
   };
+
+  // v117 (#3): one machine for both directions. "undo" puts back the world that was live
+  // before the restore; "redo" puts the restored backup back. Each flips the mode so the
+  // same button walks back and forth, and each re-prepends the change-log row so the way
+  // back in survives the very swap that would otherwise wipe it (an undo restores the OLD
+  // log, which of course has never heard of this restore).
+  // Deliberately NOT wired into the app's main undo button — same call as the v116
+  // quick-message undo. A restore is too big to sit in a stack of slot moves.
+  const applyRestoreDirection = function(dir) {
+    var meta = restoreSafety; if (!meta) return;
+    var key = (dir === "undo") ? RESTORE_KEY_BEFORE : RESTORE_KEY_AFTER;
+    var payload = readRestorePart(key);
+    if (!payload) {
+      showBanner({type:"added",msg:"That copy isn't on this iPad anymore",time:null,dateKey:null});
+      armBannerTapClear();
+      return;
+    }
+    applyBackupPayload(payload);
+    var nextMode = (dir === "undo") ? "canRedo" : "canUndo";
+    var entryId = Date.now() + Math.random();
+    var stamp = new Date().toLocaleTimeString();
+    var logEntry = {type:"restore", name:(dir === "undo") ? "Restore undone" : "Backup restored", timestamp:stamp, id:entryId, restoreWhen:(meta.whenText||""), restoreOnDisk:!!meta.onDisk};
+    setHistory(function(prev){ return [logEntry, ...prev].slice(0,200); });
+    var nextMeta = {mode:nextMode, entryId:entryId, whenText:(meta.whenText||""), at:meta.at, hasBefore:!!meta.hasBefore, hasAfter:!!meta.hasAfter, onDisk:!!meta.onDisk};
+    stashRestorePart(RESTORE_KEY_META, nextMeta);
+    setRestoreSafety(nextMeta);
+    setRestoreChip(nextMeta);
+    showBanner({type:"added",msg:(dir === "undo") ? "Restore undone" : "Backup restored",time:null,dateKey:null});
+    armBannerTapClear();
+  };
+
+  // v117 (#3): dismissing is Granger's call and his alone — nothing auto-expires the chip.
+  // Putting the chip away leaves the change-log row and the stashed copies exactly where
+  // they are; the way back stays open. The copies are only ever thrown away by the NEXT
+  // restore, which overwrites all three keys on its own confirm tap. clearRestoreStash
+  // exists for that reason and is called there.
 
   const handleTouchStart = function(e,dateKey,idx) { touchStart.current={x:e.touches[0].clientX,dateKey,idx}; };
   const handleTouchEnd = function(e,dateKey,idx) {
@@ -7631,6 +7905,25 @@ export default function TheList() {
           if (mdkM) { queueGroupTapToPlace(mdkM, ds); landed = true; }
           // v77 fallback lever: if (mdkM) landed = dropMultiOnDay(mdkM);
         }
+        // v115 (#1): GROUP DROPPED ON THE MONTH TAB. The single-person branch (below) already
+        // hands a tab drop off — switch to that view, keep the person in hand. The group branch
+        // never had that, so a group let go on the MONTH tab fell straight through to the
+        // day-picker popup every time. Now it switches to Month view and holds the group IN HAND
+        // (groupTabPending); tapping any month day then opens that day and arms the group via
+        // queueGroupTapToPlace, so one tap on an open slot drops them all (the v111/v113 whole-
+        // group placement). Scoped to the MONTH tab only per Granger — other tabs still fall to
+        // the picker below, unchanged. Placed BEFORE the dead-space fallback so a real tab drop
+        // never reaches it. Revert lever — delete this whole block; the group falls back to the
+        // day picker exactly as before (also remove the groupTabPending state, the month-cell
+        // onClick check, the "Tap a day" banner, and the leave-Month cleanup effect).
+        if (!landed && px!=null) {
+          var vtDropG = findViewTab(px, py);
+          if (vtDropG === "Month") {
+            if (viewRef.current !== "Month") setView("Month");
+            setGroupTabPending({clients: ds.clients});
+            landed = true;
+          }
+        }
         // v82 (#4): group released on dead space (no slot row, no month-day cell) used
         // to silently cancel. Instead hand the whole group to the day picker so it
         // carries into tap-to-place together — the same recovery onCancel already uses
@@ -8093,7 +8386,7 @@ export default function TheList() {
   }
 
   return (
-    <div ref={appRootRef} style={{height:"100dvh",overflow:"hidden",boxSizing:"border-box",display:"flex",flexDirection:"column",background:"#ffffff",fontFamily:"Georgia,serif",color:"#1a1a1a",paddingTop:(reassignMode||placingClient||placingGroup)?"calc(env(safe-area-inset-top,0px) + 52px)":"0"}}
+    <div ref={appRootRef} style={{height:"100dvh",overflow:"hidden",boxSizing:"border-box",display:"flex",flexDirection:"column",background:"#ffffff",fontFamily:"Georgia,serif",color:"#1a1a1a",paddingTop:(reassignMode||placingClient||placingGroup||groupTabPending)?"calc(env(safe-area-inset-top,0px) + 52px)":"0"}}
       onMouseUp={function(){ endSelectDrag(); if(dragState&&!dragCalHover) { setDragState(null); setDragCalOpen(false); } }}
       onTouchStart={function(e){
         // Record touch start for swipe-to-navigate (horizontal swipe on the app chrome,
@@ -8133,7 +8426,25 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v114</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v117</div>
+
+      {/* v117 (#3): THE RESTORE CHIP. Sits above the build stamp, out of the way of the
+          list itself. No timer touches it — it stays through view changes, popups and
+          drags until the x is tapped, which is exactly what Granger asked for. Dismissing
+          it only puts the chip away; the change-log row and the stashed copies stay put. */}
+      {restoreChip && restoreSafety && (
+        <div style={{position:"fixed",left:"10px",bottom:"calc(env(safe-area-inset-bottom,0px) + 18px)",zIndex:2680,display:"flex",alignItems:"center",gap:"10px",background:"#fdfdfb",border:"1px solid #d8d8d6",borderLeft:"3px solid #7a5aa0",borderRadius:"8px",padding:"8px 10px",boxShadow:"0 2px 10px rgba(0,0,0,0.10)",fontFamily:"inherit",maxWidth:"88vw"}}>
+          <div style={{display:"flex",flexDirection:"column",gap:"1px",minWidth:0}}>
+            <span style={{fontSize:"10px",letterSpacing:"0.1em",textTransform:"uppercase",color:"#7a5aa0"}}>restore</span>
+            <span style={{fontSize:"12px",color:"#555",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{restoreSafety.mode==="canUndo" ? "Your old data is saved" : "Restore undone"}</span>
+          </div>
+          <button onClick={function(){ applyRestoreDirection(restoreSafety.mode==="canUndo"?"undo":"redo"); }} style={{background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",padding:"7px 12px",fontFamily:"inherit",fontSize:"12px",flexShrink:0,display:"flex",alignItems:"center",gap:"6px"}}>
+            {restoreSafety.mode==="canUndo" ? <UndoIcon size={13} color="#fff"/> : <RedoIcon size={13} color="#fff"/>}
+            <span>{restoreSafety.mode==="canUndo" ? "Undo restore" : "Redo restore"}</span>
+          </button>
+          <button onClick={function(){ setRestoreChip(null); }} title="Dismiss" style={{background:"none",border:"none",color:"#bbb",cursor:"pointer",padding:"4px 6px",fontFamily:"inherit",fontSize:"16px",lineHeight:1,flexShrink:0}}>{"\u00d7"}</button>
+        </div>
+      )}
 
       {/* Kill the browser's double-tap-to-zoom and the legacy 300ms tap delay so the app
           feels native and our own double-tap-to-mark-available gesture wins. "manipulation"
@@ -8617,6 +8928,21 @@ export default function TheList() {
             <div style={{fontSize:"14px"}}>Tap an open slot to place all <strong>{placingGroup.members.length}</strong> together — on and after that slot</div>
           </div>
           <button onClick={function(){ setPlacingGroup(null); }} style={{background:"none",border:"1px solid #444",borderRadius:"6px",color:"#888",padding:"6px 12px",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>Cancel</button>
+        </div>
+      )}
+
+      {/* v115 (#1): GROUP IN HAND from a MONTH-tab drop. Shown only in Month view, and only when
+          no other placement banner is up, so it never stacks. Tapping a day (month cell onClick)
+          consumes groupTabPending and arms the group for that day. Revert lever — delete this
+          whole block along with the groupTabPending state, the onEnd MONTH-tab branch, the
+          month-cell onClick check, and the leave-Month cleanup effect. */}
+      {groupTabPending && view==="Month" && !reassignMode && !placingClient && !placingGroup && (
+        <div style={{position:"fixed",top:0,left:0,right:0,zIndex:900,background:"#1a1a1a",color:"#fff",padding:"12px 20px",paddingTop:"calc(env(safe-area-inset-top,0px) + 12px)",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+          <div>
+            <div style={{fontSize:"11px",letterSpacing:"0.15em",textTransform:"uppercase",color:"#c9a96e",marginBottom:"2px"}}>Moving group</div>
+            <div style={{fontSize:"14px"}}>Tap a day to place all <strong>{groupTabPending.clients.length}</strong> together</div>
+          </div>
+          <button onClick={function(){ setGroupTabPending(null); }} style={{background:"none",border:"1px solid #444",borderRadius:"6px",color:"#888",padding:"6px 12px",cursor:"pointer",fontFamily:"inherit",fontSize:"12px"}}>Cancel</button>
         </div>
       )}
 
@@ -9408,7 +9734,22 @@ export default function TheList() {
                 );
               })}
             </div>
-            <button onClick={addQuickMsg} style={{marginTop:"12px",flexShrink:0,padding:"10px",background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>+ Add message</button>
+            {/* v116 (#1): the footer is now a ROW — Add message keeps the full-width feel by
+                flexing, and the single Undo/Redo chip sits beside it only when there is
+                something to swap. One chip, never two: it reads "Undo …" while the change
+                stands and "Redo …" once it has been undone. Nothing here touches the app's
+                main undo button. Revert lever — the v115 line was this button alone:
+                <button onClick={addQuickMsg} style={{marginTop:"12px",flexShrink:0,padding:"10px",background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>+ Add message</button> */}
+            <div style={{marginTop:"12px",flexShrink:0,display:"flex",gap:"8px",alignItems:"stretch"}}>
+              <button onClick={addQuickMsg} style={{flex:"1 1 auto",padding:"10px",background:"#1a1a1a",border:"none",borderRadius:"6px",color:"#fff",cursor:"pointer",fontFamily:"inherit",fontSize:"13px"}}>+ Add message</button>
+              {qmUndo && (
+                <button
+                  onClick={function(){ applyQmSwap(qmUndo.undone ? "redo" : "undo"); }}
+                  style={{flexShrink:0,padding:"10px 14px",background:"#fff",border:"1px solid #d8d8d6",borderRadius:"6px",color:"#666",cursor:"pointer",fontFamily:"inherit",fontSize:"13px",whiteSpace:"nowrap"}}>
+                  {(qmUndo.undone ? "Redo " : "Undo ") + (qmUndo.kind === "delete" ? "delete" : "edit")}
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -9745,6 +10086,11 @@ export default function TheList() {
               var catH=logEntryCategory(entry);
               var chipColH=isSideH?(catH==="books"?"#2e7d46":catH==="notes"?"#a07830":"#4a8a9a"):(entry.type==="added"?"#4a8a5a":(entry.type==="removed"||entry.type==="slot_removed")?"#8a3a2a":entry.type==="recurring_set"?"#c9a96e":entry.type==="slot_added"?"#6a8aaa":entry.type==="checkoff"?"#4a8a5a":entry.type==="backup"?"#999":"#666");
               if (redRowH && isSideH) chipColH="#8a3a2a";
+              // v117 (#3): a restore row. "Live" means the stashed copy still exists on this
+              // iPad AND belongs to this row — both halves matter, see the button below.
+              var isRestoreRow = (entry.type === "restore");
+              var restoreLive = !!(isRestoreRow && restoreSafety && restoreSafety.entryId === entry.id && (restoreSafety.mode==="canUndo" ? restoreSafety.hasBefore : restoreSafety.hasAfter));
+              if (isRestoreRow) chipColH = "#7a5aa0";
               return (
               <div key={entry.id||i} onClick={canJump?function(){ jumpToLogEntry(entry); }:undefined} style={{padding:"10px 12px",marginBottom:"6px",borderRadius:"6px",cursor:canJump?"pointer":"default",background:redRowH?"#fff0ee":"#fafaf8",border:redRowH?"1px solid #e0b0a8":"1px solid #e4e4e2"}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"3px"}}>
@@ -9771,6 +10117,15 @@ export default function TheList() {
                   {/* v103: two machines behind one button. A slot row still goes to handleEntryUndo,
                       exactly as it always has. The six new types go to handleSideUndo, which puts
                       back a VALUE rather than a world. Neither knows about the other. */}
+                  {/* v117 (#3): the restore row's own button — a third machine, kept apart
+                      from the two above because it puts back a WHOLE WORLD, not a slot or a
+                      value. Only the LIVE restore (the one whose id matches the stashed meta)
+                      gets a button; older restore rows are plain history, because the copies
+                      behind them are long gone and a button that can't deliver is worse than
+                      no button. If the copy has been cleared off the iPad, the row says so
+                      instead and points at the file. */}
+                  {isRestoreRow&&restoreLive&&<button onClick={function(e){ e.stopPropagation(); applyRestoreDirection(restoreSafety.mode==="canUndo"?"undo":"redo"); }} title={restoreSafety.mode==="canUndo"?"Undo restore":"Redo restore"} style={{background:"none",border:"1px solid #d8d8d6",borderRadius:"5px",color:"#888",cursor:"pointer",padding:"4px 8px",fontFamily:"inherit",flexShrink:0,display:"flex",alignItems:"center",gap:"5px"}}>{restoreSafety.mode==="canUndo"?<UndoIcon size={13} color="#888"/>:<RedoIcon size={13} color="#888"/>}<span style={{fontSize:"10px",letterSpacing:"0.06em",textTransform:"uppercase"}}>{restoreSafety.mode==="canUndo"?"Undo":"Redo"}</span></button>}
+                  {isRestoreRow&&!restoreLive&&<span style={{fontSize:"10px",color:"#bbb",flexShrink:0,fontStyle:"italic"}}>copy is in your Files</span>}
                   {canEntryUndo&&<button onClick={function(e){ e.stopPropagation(); if(isSideH){ handleSideUndo(entry); } else { handleEntryUndo(entry); } }} title="Undo" style={{background:"none",border:"1px solid #d8d8d6",borderRadius:"5px",color:"#888",cursor:"pointer",padding:"4px 8px",fontFamily:"inherit",flexShrink:0,display:"flex",alignItems:"center"}} onMouseEnter={function(e){ e.currentTarget.style.borderColor="#1a1a1a"; }} onMouseLeave={function(e){ e.currentTarget.style.borderColor="#d8d8d6"; }}><UndoIcon size={13} color="#888"/></button>}
                 </div>
               </div>
@@ -9978,7 +10333,7 @@ export default function TheList() {
                 if (mOver) cellBg = "#e3f3e3";
                 return (
                   <div key={dk} data-monthday={dk}
-                    onClick={function(){ setBaseDate(day);setView(isPhone?"Day":"3-Day"); }}
+                    onClick={function(){ if(groupTabPending){ /* v115 (#1): a group is in hand from a MONTH-tab drop. Tapping a day opens it — queueGroupTapToPlace switches to Day/3-Day and arms placingGroup for THIS day — so one tap on an open slot then drops all of them. Clear the pending FIRST so the leave-Month effect below sees no pending when the view flips. Revert lever — delete this if-block; a tapped day just opens with no group armed. */ var _g=groupTabPending; setGroupTabPending(null); queueGroupTapToPlace(dk, {clients:_g.clients}); return; } setBaseDate(day);setView(isPhone?"Day":"3-Day"); }}
                     onMouseDown={function(){ longPressTimer.current=setTimeout(function(){ setMonthLongPress({dateKey:dk,day}); },600); }}
                     onMouseUp={cancelLongPress} onMouseLeave={function(e){ cancelLongPress();e.currentTarget.style.background=cellBg; }}
                     onTouchStart={function(){ longPressTimer.current=setTimeout(function(){ setMonthLongPress({dateKey:dk,day}); },600); }}
