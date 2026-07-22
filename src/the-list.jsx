@@ -253,6 +253,32 @@ function deNudgeEmptyRows(arr) {
 var _gid = 1;
 function newGroupId() { return "g"+(_gid++); }
 
+// v118 (#1): GROUP-TAG COUNTER SEED. _gid resets to 1 on every app load (module init) and
+// was never re-seeded from saved data, so the FIRST group made after a reopen / Firestore
+// re-sync reused an id an older group on the same day still carried — the two then shared one
+// tag and read (and checked-off, and moved) as a SINGLE linked group, even with a lunch
+// between them. This walks every loaded day for the highest gN in use and lifts _gid above it.
+// Monotonic: it only ever RAISES the counter, so a later snapshot carrying fewer groups can
+// never drop it back into collision range. Pure read — no writes, no state.
+// Revert lever — delete this function and the v118 (#1) effect that calls it.
+function seedGroupIdFromSchedules(sch) {
+  if (!sch) return;
+  var maxN = 0;
+  var keys = Object.keys(sch);
+  var ki, si, day, gid, m, n;
+  for (ki = 0; ki < keys.length; ki++) {
+    day = sch[keys[ki]];
+    if (!day || !day.length) continue;
+    for (si = 0; si < day.length; si++) {
+      gid = day[si] && day[si].groupId;
+      if (!gid) continue;
+      m = String(gid).match(/^g(\d+)$/);
+      if (m) { n = parseInt(m[1], 10); if (n > maxN) { maxN = n; } }
+    }
+  }
+  if (maxN + 1 > _gid) { _gid = maxN + 1; }
+}
+
 // v92 GROUP TIME CASCADE. Given a day's slots and the index being time-edited, return
 // the indexes of the OTHER members of that slot's group — but ONLY when the edited slot
 // is the group's FIRST (earliest) member. Move the first member and the whole group
@@ -1270,6 +1296,12 @@ export default function TheList() {
   dragStateRef.current = dragState;
   const viewRef = useRef(view);
   viewRef.current = view;
+  // v118 (#1): keep the group-tag counter ahead of every tag already in the data. Re-seeding
+  // whenever schedules changes covers first load, every remote Firestore snapshot, and every
+  // import/restore in one place; the seed only ever RAISES the counter (see seedGroupIdFromSchedules
+  // up top), so a newly made group can never reuse an id an existing group still holds and get
+  // swallowed into it. Revert lever — delete this effect and seedGroupIdFromSchedules (both v118 (#1)).
+  useEffect(function(){ seedGroupIdFromSchedules(schedules); }, [schedules]);
   // v115 (#1): if he leaves Month view without placing an in-hand group (taps another view tab,
   // arrows away, etc.), drop the pending so it can't resurface and mis-place on a later day tap.
   // The place path (month-cell onClick) clears the pending BEFORE it flips the view, so this
@@ -8426,7 +8458,7 @@ export default function TheList() {
       }}>
 
       {/* Build stamp — lets the deploy be verified at a glance. Bump on each push. */}
-      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v117</div>
+      <div style={{position:"fixed",left:"4px",bottom:"calc(env(safe-area-inset-bottom,0px) + 2px)",zIndex:2700,fontSize:"9px",letterSpacing:"0.08em",color:"rgba(140,140,140,0.55)",fontFamily:"Georgia,serif"}}>v118</div>
 
       {/* v117 (#3): THE RESTORE CHIP. Sits above the build stamp, out of the way of the
           list itself. No timer touches it — it stays through view changes, popups and
